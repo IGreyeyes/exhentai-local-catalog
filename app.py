@@ -23,6 +23,7 @@ from favorites import Collector, FavoriteStore, JOIN_FAVORITES, gallery_url
 from maintenance import LibraryMaintenance, MaintenanceManager, recover_import
 from covers import CoverCache, CoverUnavailable
 from credentials import export_credentials, import_credentials
+from favorite_transfer import MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
 APP_ID = "local-tag-catalog-v1"
@@ -392,7 +393,7 @@ class Server(ThreadingHTTPServer):
         self.collector = Collector(catalog)
         project_root = catalog.path.parent.parent if catalog.path.parent.name=="data" else catalog.path.parent
         self.cover_cache = CoverCache(project_root/"data"/"covers", project_root/"data"/"covers.sqlite3")
-        self.maintenance = MaintenanceManager(LibraryMaintenance(catalog.path,project_root),self.exclusive_maintenance,self.reload_catalog,self.reload_translations)
+        self.maintenance = MaintenanceManager(LibraryMaintenance(catalog.path,project_root),self.exclusive_maintenance,self.reload_catalog,self.reload_translations,self.invalidate_collection_preview)
         self.collector.on_completed = self.maintenance.on_collection_completed
 
     @contextmanager
@@ -425,6 +426,10 @@ class Server(ThreadingHTTPServer):
             self.catalog.translations = translations
             with self.collector.lock:
                 self.collector.preview_data = None
+
+    def invalidate_collection_preview(self):
+        with self.collector.lock:
+            self.collector.preview_data = None
 
     def request_stop(self):
         self.maintenance.reserve_stop()
@@ -472,10 +477,12 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
-    def reply_attachment(self, body, filename):
+    def reply_attachment(self, body, filename, record_count=None):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        if record_count is not None:
+            self.send_header("X-Favorite-Record-Count", str(record_count))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -560,6 +567,17 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({"error": "页面会话已更新或请求来源不正确，请刷新本地页面后重试。"},status=403)
             return
         try:
+            if self.path == "/api/maintenance/favorites-prepare":
+                if self.headers.get_content_type() not in {"application/octet-stream", "application/json"}:
+                    raise ValueError("请选择收藏数 JSON 文件。")
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= MAX_FILE_BYTES:
+                    raise ValueError("收藏数文件须为 1 字节～128 MiB。")
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    raise ValueError("收藏数文件上传不完整，请重新选择。")
+                self.reply(self.server.maintenance.prepare_favorites_upload(raw))
+                return
             if self.headers.get_content_type() != "application/json":
                 raise ValueError("请求必须使用 JSON 格式。")
             length = int(self.headers.get("Content-Length","0"))
@@ -570,7 +588,19 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("请求格式不正确。")
             if self.path.startswith("/api/maintenance/"):
                 manager=self.server.maintenance
-                if self.path in {"/api/maintenance/translations-check", "/api/maintenance/translations-update"}:
+                if self.path == "/api/maintenance/favorites-export":
+                    if payload:
+                        raise ValueError("导出收藏数不接受额外选项。")
+                    body, count = manager.export_favorites()
+                    from datetime import datetime, timezone
+                    filename="favorites-"+datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")+".ehfavorites.json"
+                    self.reply_attachment(body, filename, count)
+                    return
+                elif self.path == "/api/maintenance/favorites-import":
+                    if set(payload) != {"prepared_id"}:
+                        raise ValueError("请使用已检查的收藏数文件确认合并。")
+                    result=manager.start("favorites-import",identifier=payload["prepared_id"])
+                elif self.path in {"/api/maintenance/translations-check", "/api/maintenance/translations-update"}:
                     if payload:
                         raise ValueError("词库操作不接受自定义下载地址或额外选项。")
                     result=manager.start(self.path.rsplit("/",1)[1])

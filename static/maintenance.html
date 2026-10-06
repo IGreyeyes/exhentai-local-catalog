@@ -25,7 +25,7 @@
       <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>资料库维护</strong></span><div class="topbar-actions"><span class="connection" id="connection"><i></i> 正在连接本地服务</span><a class="button secondary" href="/">标签搜索</a><a class="button secondary" href="/records">已记录</a><button class="button secondary" id="maintenance-stop-request">停止服务</button></div></header>
       <div class="main-content">
         <section class="intro"><div class="eyebrow">LIBRARY CARE</div><h1>管理资料，安心保存。</h1><p>备份与恢复资料，更新作品目录和中文词库。</p></section>
-        <nav class="maintenance-tabs" aria-label="维护功能"><a href="#backup-section">备份资料</a><a href="#restore-section">导入备份</a><a href="#catalog-section">更新作品目录</a><a href="#translations-section">中文词库</a><a href="#covers-section">封面缓存</a></nav>
+        <nav class="maintenance-tabs" aria-label="维护功能"><a href="#backup-section">备份资料</a><a href="#favorites-section">收藏数导入导出</a><a href="#restore-section">导入备份</a><a href="#catalog-section">更新作品目录</a><a href="#translations-section">中文词库</a><a href="#covers-section">封面缓存</a></nav>
         <div id="maintenance-status" class="maintenance-status" role="status" aria-live="polite">维护工具正在连接…</div>
         <section class="maintenance-card maintenance-section" id="backup-section" aria-labelledby="backup-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↗</span><div><h2 id="backup-title">备份我的资料</h2><p>保存收藏数、阅读状态、黑名单、采集进度、中文词库和程序文件。</p></div></div>
@@ -38,6 +38,23 @@
           <p class="field-hint">自动备份默认关闭，只备份收藏资料与词库。完整备份还包含作品目录；封面缓存和 Cookie 不包含在备份中。</p>
           <div class="maintenance-list-heading"><h3>这个位置的最近备份</h3><span>显示最近 10 份，旧备份会保留</span></div>
           <div id="backup-list" class="backup-list"><p class="backup-empty">正在读取备份…</p></div>
+        </section>
+        <section class="maintenance-card maintenance-section" id="favorites-section" aria-labelledby="favorites-title">
+          <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">⇄</span><div><h2 id="favorites-title">仅导出 / 合并收藏数</h2><p>在资料库之间迁移已采集的收藏数，按作品 ID 合并。</p></div></div>
+          <p class="field-hint">文件只包含作品 ID、收藏数、原抓取时间和源站标识。不包含作品目录、阅读状态、黑名单、采集队列或登录信息。</p>
+          <button class="button secondary" id="favorites-export" disabled>仅导出收藏数</button>
+          <label class="maintenance-field favorites-file-label" for="favorites-file">选择要合并的收藏数文件</label>
+          <div class="maintenance-path-row"><input id="favorites-file" type="file" accept=".ehfavorites.json,.json,application/json"><button class="button secondary" id="favorites-check" disabled>检查收藏数文件</button></div>
+          <p class="field-hint">选择本程序导出的 .ehfavorites.json 文件，最大 128 MiB。检查后先核对数量，再确认合并。</p>
+          <div id="favorites-preview" class="prepared-import" hidden>
+            <h3>收藏数文件已校验</h3><p class="path-hint" id="favorites-file-name"></p>
+            <dl class="translation-stats"><div><dt>文件记录</dt><dd id="favorites-total">—</dd></div><div><dt>预计新增</dt><dd id="favorites-added">—</dd></div><div><dt>预计更新</dt><dd id="favorites-updated">—</dd></div><div><dt>保留现有</dt><dd id="favorites-kept">—</dd></div></dl>
+            <p class="field-hint" id="favorites-preview-detail"></p>
+            <p class="maintenance-warning">相同作品仅在导入抓取时间更晚、且收藏数更大时更新。时间相同或更旧、收藏数相同或减少时保留现有值；未记录的作品直接新增，并保留原抓取时间。</p>
+            <label class="checkbox"><input id="favorites-confirm" type="checkbox">我确认按上述规则合并收藏数</label>
+            <button class="button primary" id="favorites-import" disabled>备份当前资料并合并收藏数</button>
+          </div>
+          <p id="favorites-feedback" class="translation-feedback" role="status" aria-live="polite">导出不会访问源站。合并前自动轻量备份，并暂停当前采集；进度和阅读标记保留。</p>
         </section>
         <section class="maintenance-card maintenance-section" id="restore-section" aria-labelledby="restore-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↙</span><div><h2 id="restore-title">导入已有备份</h2><p>从备份恢复收藏数、阅读状态、黑名单、采集进度和中文词库。</p></div></div>

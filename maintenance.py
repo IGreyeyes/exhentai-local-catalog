@@ -19,6 +19,7 @@ import time
 from initialize_catalog import initialize
 from prepare_database import prepare, inspect_database
 from favorites import FavoriteStore
+from favorite_transfer import MAX_FILE_BYTES, export_snapshot, merge_snapshot, parse_snapshot, preview_snapshot
 from update_translations import check_latest, compare_version, latest_release, local_status, update
 
 ROOT = Path(__file__).resolve().parent
@@ -139,6 +140,54 @@ class LibraryMaintenance:
         self.translation_signature = None
         self.translation_local = {}
         self.translation_check_memory = None
+        self.prepared_favorites_file = self.data/"prepared-favorites-import.json"
+
+    def export_favorites(self):
+        return export_snapshot(self.data/"favorites.sqlite3")
+
+    def stage_favorites(self, raw):
+        if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_FILE_BYTES:
+            raise ValueError("请选择不超过 128 MiB 的收藏数文件。")
+        self.staging.mkdir(parents=True, exist_ok=True)
+        path = contained(self.staging/("favorites-"+secrets.token_hex(12)+".json"), self.staging)
+        with path.open("xb") as output:
+            output.write(raw)
+        self.prepared_favorites_file.unlink(missing_ok=True)
+        return str(path)
+
+    def prepare_favorites(self, path, task_id, progress=lambda message: None):
+        path = contained(path, self.staging)
+        progress("正在校验收藏数文件并检查作品 ID…")
+        raw = path.read_bytes()
+        payload = parse_snapshot(raw)
+        progress("正在对比现有收藏数与原抓取时间…")
+        summary = preview_snapshot(self.data/"favorites.sqlite3", self.catalog_path, payload["records"])
+        result = {"id": secrets.token_hex(12), "task_id": task_id, "stage": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "exported_at": payload["exported_at"], "summary": summary}
+        save_json(self.prepared_favorites_file, result)
+        return result
+
+    def prepared_favorites(self):
+        result = read_json(self.prepared_favorites_file)
+        if result and contained(result["stage"], self.staging).is_file():
+            return result
+        return None
+
+    def import_favorites(self, identifier, on_merged=lambda: None, progress=lambda message: None):
+        ready = self.prepared_favorites()
+        if not ready or not isinstance(identifier, str) or not secrets.compare_digest(ready["id"], identifier):
+            raise ValueError("请先选择并检查收藏数文件，再确认合并。")
+        path = contained(ready["stage"], self.staging)
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != ready["sha256"]:
+            raise ValueError("已检查的收藏数文件发生变化，请重新检查。")
+        payload = parse_snapshot(raw)
+        progress("合并前正在备份当前收藏资料…")
+        backup = self.backup(False, "收藏数合并前自动备份", progress)
+        progress("正在按作品 ID、抓取时间和收藏数合并…")
+        summary = merge_snapshot(self.data/"favorites.sqlite3", payload["records"])
+        on_merged()
+        self.prepared_favorites_file.unlink(missing_ok=True)
+        return {"summary": summary, "backup": backup, "message": f"收藏数合并完成：新增 {summary['added']:,} 条，更新 {summary['updated']:,} 条，保留现有 {summary['kept']:,} 条。原抓取时间已保留，当前采集计划保持暂停。"}
 
     def translation_status(self):
         paths = [self.data/"tag-translations.json", self.data/"tag-translations-info.json"]
@@ -458,9 +507,10 @@ class LibraryMaintenance:
 
 
 class MaintenanceManager:
-    def __init__(self,engine,exclusive,reload_catalog,reload_translations=None):
+    def __init__(self,engine,exclusive,reload_catalog,reload_translations=None,on_favorites_merged=None):
         self.engine,self.exclusive,self.reload_catalog=engine,exclusive,reload_catalog
         self.reload_translations = reload_translations or (lambda: None)
+        self.on_favorites_merged = on_favorites_merged or (lambda: None)
         self.lock=threading.RLock()
         self.state_path=engine.data/"maintenance-state.json"
         self.settings_path=engine.data/"maintenance-settings.json"
@@ -505,7 +555,20 @@ finally:
 
     def status(self):
         with self.lock:
-            return {**self.state,"settings":dict(self.settings),"recent_tasks":list(self.history),"backup_directory":str(self.engine.backups),"default_backup_directory":str(self.engine.root/"backups"),"archive_path":str(self.engine.root/"e-hentai.db.zstd"),"archive_exists":(self.engine.root/"e-hentai.db.zstd").is_file(),"catalog_size":self.engine.catalog_path.stat().st_size if self.engine.catalog_path.exists() else 0,"prepared":self.engine.prepared(),"prepared_restore":self.engine.prepared_restore(),"backups":self.engine.list_backups(),"translations":self.engine.translation_status()}
+            return {**self.state,"settings":dict(self.settings),"recent_tasks":list(self.history),"backup_directory":str(self.engine.backups),"default_backup_directory":str(self.engine.root/"backups"),"archive_path":str(self.engine.root/"e-hentai.db.zstd"),"archive_exists":(self.engine.root/"e-hentai.db.zstd").is_file(),"catalog_size":self.engine.catalog_path.stat().st_size if self.engine.catalog_path.exists() else 0,"prepared":self.engine.prepared(),"prepared_restore":self.engine.prepared_restore(),"backups":self.engine.list_backups(),"translations":self.engine.translation_status(),"prepared_favorites":self.engine.prepared_favorites()}
+
+    def export_favorites(self):
+        with self.lock:
+            if self.stopping or self.state.get("busy"):
+                raise ValueError("请等待维护完成后再导出收藏数。")
+            return self.engine.export_favorites()
+
+    def prepare_favorites_upload(self, raw):
+        with self.lock:
+            if self.stopping or self.state.get("busy"):
+                raise ValueError("请等待维护完成后再检查收藏数文件。")
+            path = self.engine.stage_favorites(raw)
+            return self.start("favorites-prepare", favorites_path=path)
 
     def publish(self,message,**updates):
         with self.lock:
@@ -529,16 +592,16 @@ finally:
             self.engine.backups=directory
         return self.status()
 
-    def start(self,kind,include_catalog=False,expected_sha256="",identifier="",allow_older=False,reason="手动备份",restore_path=""):
+    def start(self,kind,include_catalog=False,expected_sha256="",identifier="",allow_older=False,reason="手动备份",restore_path="",favorites_path=""):
         with self.lock:
             if self.stopping:raise ValueError("服务正在停止，暂时不能启动维护。")
             if self.state.get("busy"):raise ValueError("已有维护任务正在运行，请等待完成。")
-            if kind not in {"backup","prepare","apply","prepare-restore","restore","translations-check","translations-update"}:raise ValueError("未知维护操作。")
+            if kind not in {"backup","prepare","apply","prepare-restore","restore","translations-check","translations-update","favorites-prepare","favorites-import"}:raise ValueError("未知维护操作。")
             if not isinstance(include_catalog,bool) or not isinstance(allow_older,bool) or not isinstance(expected_sha256,str) or not isinstance(restore_path,str):raise ValueError("维护选项格式不正确。")
             self.state={"kind":kind,"phase":"running","message":"正在准备维护任务…","busy":True,"id":secrets.token_hex(8),"started_at":datetime.now(timezone.utc).isoformat()}
             task_id=self.state["id"]
             save_json(self.state_path,self.state)
-            self.thread=threading.Thread(target=self._run,args=(kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path),daemon=False,name="catalog-maintenance")
+            self.thread=threading.Thread(target=self._run,args=(kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path,favorites_path),daemon=False,name="catalog-maintenance")
             self.thread.start()
         return {**self.status(),"requested_id":task_id}
 
@@ -549,9 +612,12 @@ finally:
             save_json(self.history_path,self.history)
             self.publish(message,phase=phase,result=result,busy=False)
 
-    def _run(self,kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path):
+    def _run(self,kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path,favorites_path):
         try:
-            if kind=="translations-check":
+            if kind=="favorites-prepare":
+                result=self.engine.prepare_favorites(favorites_path,self.state["id"],self.publish)
+                message="收藏数文件已校验，请核对新增、更新和保留数量，再确认合并。"
+            elif kind=="translations-check":
                 result=self.engine.check_translations(self.publish)
                 message=result["message"]
             elif kind=="translations-update":
@@ -569,7 +635,8 @@ finally:
             else:
                 self.publish("正在暂停采集并等待当前请求结束")
                 with self.exclusive():
-                    if kind=="restore":result=self.engine.restore(identifier,self.reload_catalog,self.publish)
+                    if kind=="favorites-import":result=self.engine.import_favorites(identifier,self.on_favorites_merged,self.publish)
+                    elif kind=="restore":result=self.engine.restore(identifier,self.reload_catalog,self.publish)
                     else:result=self.engine.apply(identifier,allow_older,self.reload_catalog,self.publish)
                 message=result["message"]
             self.finish(message,"completed",result)

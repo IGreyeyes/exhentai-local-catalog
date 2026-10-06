@@ -6,6 +6,15 @@
   const size=bytes=>Number(bytes)>=1024**3?`${(bytes/1024**3).toFixed(2)} GiB`:`${(Number(bytes||0)/1024**2).toFixed(1)} MiB`;
   const element=(tag,className,text="")=>{const node=document.createElement(tag);node.className=className;node.textContent=text;return node;};
   let state=null,token="",busy=false,polling=false,preparedId="",restoreId="",backupsKey="",directoryLoaded=false;
+  let favoritesTaskId="",favoritesFileKey="",favoritesPreparedId="";
+  let favoritesLocalMessage=null;
+  function favoritesMessage(text,error=false){favoritesLocalMessage={text,error};ui("favorites-feedback").textContent=text;ui("favorites-feedback").classList.toggle("error",error);}
+  const selectedFavoritesFile=()=>ui("favorites-file").files[0];
+  const fileKey=file=>file?`${file.name}:${file.size}:${file.lastModified}`:"";
+  function favoritesMatches(){
+    const ready=state?.prepared_favorites,file=selectedFavoritesFile();
+    return Boolean(ready&&(file?(fileKey(file)===favoritesFileKey&&ready.task_id===favoritesTaskId):!favoritesTaskId));
+  }
   function message(text,error=false){ui("maintenance-status").textContent=text;ui("maintenance-status").classList.toggle("error",error);}
   function controls(){
     const working=Boolean(busy||state?.busy||window.catalogStopped||!token||!state);
@@ -21,6 +30,24 @@
     ui("translation-update").disabled=working;
     ui("translation-check").textContent=translationTask&&state.kind==="translations-check"?"正在检查…":"检查更新";
     ui("translation-update").textContent=translationTask&&state.kind==="translations-update"?"正在更新…":state?.translations?.local?.available?"更新到最新版":"安装中文词库";
+    ["favorites-export","favorites-file"].forEach(id=>ui(id).disabled=working);
+    ui("favorites-check").disabled=working||!selectedFavoritesFile();
+    ui("favorites-confirm").disabled=working||!favoritesMatches();
+    ui("favorites-import").disabled=working||!favoritesMatches()||!ui("favorites-confirm").checked;
+  }
+  function renderFavorites(){
+    const ready=state.prepared_favorites,matches=favoritesMatches();
+    ui("favorites-preview").hidden=!matches;
+    if(matches){
+      if(favoritesPreparedId!==ready.id){favoritesPreparedId=ready.id;ui("favorites-confirm").checked=false;}
+      const summary=ready.summary;
+      ui("favorites-file-name").textContent=selectedFavoritesFile()?.name||"上次已校验的收藏数文件";
+      for(const [id,key] of [["favorites-total","total"],["favorites-added","added"],["favorites-updated","updated"],["favorites-kept","kept"]])ui(id).textContent=number(summary[key]);
+      ui("favorites-preview-detail").textContent=`保留现有：${number(summary.kept_older_or_equal_time)} 条抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条时间更晚但收藏数未增加。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 条当前作品目录暂缺，收藏数仍会按作品 ID 保存。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
+    }
+    const task=state.kind?.startsWith("favorites-")?state:[...(state.recent_tasks||[])].reverse().find(item=>item.kind?.startsWith("favorites-"));
+    if(favoritesLocalMessage){ui("favorites-feedback").textContent=favoritesLocalMessage.text;ui("favorites-feedback").classList.toggle("error",favoritesLocalMessage.error);}
+    else if(task){ui("favorites-feedback").textContent=task.message;ui("favorites-feedback").classList.toggle("error",task.phase==="failed"||task.phase==="interrupted");}
   }
   function renderTranslations(){
     const translations=state.translations||{},local=translations.local||{},latest=translations.latest;
@@ -41,6 +68,7 @@
   function render(){
     if(!state)return;
     renderTranslations();
+    renderFavorites();
     ui("backup-path").textContent=state.backup_directory;
     if(!directoryLoaded){ui("backup-directory").value=state.backup_directory;directoryLoaded=true;}
     ui("archive-path").textContent=state.archive_path;
@@ -146,6 +174,36 @@
   ui("maintenance-prepare").onclick=()=>action("prepare",{sha256:ui("archive-sha256").value.trim()});
   ui("translation-check").onclick=()=>action("translations-check");
   ui("translation-update").onclick=()=>action("translations-update");
+  ui("favorites-file").onchange=()=>{
+    favoritesTaskId="";favoritesFileKey="";ui("favorites-confirm").checked=false;ui("favorites-preview").hidden=true;
+    favoritesMessage(selectedFavoritesFile()?"已选择文件，点击「检查收藏数文件」预览合并结果。":"请选择本程序导出的收藏数文件。");controls();
+  };
+  ui("favorites-confirm").onchange=controls;
+  ui("favorites-export").onclick=async()=>{
+    if(busy)return;busy=true;controls();favoritesMessage("正在生成收藏数文件…");
+    try{
+      const response=await fetch("/api/maintenance/favorites-export",{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:"{}"});
+      if(!response.ok){const failure=await response.json();throw new Error(failure.error||"收藏数导出失败");}
+      const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
+      link.href=url;link.download=response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]||"favorites.ehfavorites.json";
+      document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      favoritesMessage(`已导出 ${number(response.headers.get("X-Favorite-Record-Count"))} 条收藏数，请在浏览器下载列表查看。文件保留原始抓取时间。`);
+    }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导出。":error.message,true);}
+    finally{busy=false;controls();}
+  };
+  ui("favorites-check").onclick=async()=>{
+    const file=selectedFavoritesFile();if(busy||!file)return;
+    if(file.size===0||file.size>128*1024**2){favoritesMessage("请选择非空且不超过 128 MiB 的收藏数文件。",true);return;}
+    busy=true;ui("favorites-confirm").checked=false;favoritesTaskId="";favoritesFileKey="";ui("favorites-preview").hidden=true;controls();
+    favoritesMessage("正在上传并检查收藏数文件…");
+    try{
+      const response=await fetch("/api/maintenance/favorites-prepare",{method:"POST",headers:{"Content-Type":"application/octet-stream","X-Catalog-Token":token},body:file});
+      const result=await response.json();if(!response.ok)throw new Error(result.error||"收藏数检查失败");
+      favoritesTaskId=result.requested_id;favoritesFileKey=fileKey(file);favoritesLocalMessage=null;state={...result,cover_cache:result.cover_cache||state?.cover_cache};render();
+    }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导入。":error.message,true);}
+    finally{busy=false;controls();}
+  };
+  ui("favorites-import").onclick=()=>{if(favoritesMatches()&&ui("favorites-confirm").checked){favoritesLocalMessage=null;action("favorites-import",{prepared_id:state.prepared_favorites.id});}};
   ui("allow-older-import").onchange=controls;
   ui("maintenance-apply").onclick=()=>{if(state?.prepared)action("apply",{prepared_id:state.prepared.id,allow_older:ui("allow-older-import").checked});};
   function showStop(){ui("maintenance-stop-confirm").hidden=false;ui("maintenance-stop-confirm").scrollIntoView({block:"nearest",behavior:"smooth"});}

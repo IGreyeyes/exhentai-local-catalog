@@ -8,6 +8,11 @@
   let state=null,token="",busy=false,polling=false,preparedId="",restoreId="",backupsKey="",directoryLoaded=false;
   let favoritesTaskId="",favoritesFileKey="",favoritesPreparedId="";
   let favoritesLocalMessage=null;
+  let identityLoadedKey="",identityChecked=null,identityLocalMessage=null,identityEditing=false;
+  const identityApiAvailable=()=>Boolean(state?.collector_identity?.collector_id&&typeof state?.collector_identity_initialized==="boolean");
+  function identityMessage(text,error=false){identityLocalMessage={text,error};ui("collector-identity-feedback").textContent=text;ui("collector-identity-feedback").classList.toggle("error",error);}
+  function identityMatches(){return Boolean(identityChecked&&identityChecked.current_id===state?.collector_identity?.collector_id&&identityChecked.key===fileKey(ui("collector-identity-file").files[0]));}
+  function invalidateIdentity(){identityChecked=null;ui("collector-identity-confirm").checked=false;ui("collector-identity-preview").hidden=true;controls();}
   function favoritesMessage(text,error=false){favoritesLocalMessage={text,error};ui("favorites-feedback").textContent=text;ui("favorites-feedback").classList.toggle("error",error);}
   const selectedFavoritesFile=()=>ui("favorites-file").files[0];
   const fileKey=file=>file?`${file.name}:${file.size}:${file.lastModified}`:"";
@@ -34,6 +39,29 @@
     ui("favorites-check").disabled=working||!selectedFavoritesFile();
     ui("favorites-confirm").disabled=working||!favoritesMatches();
     ui("favorites-import").disabled=working||!favoritesMatches()||!ui("favorites-confirm").checked;
+    const identitySupported=identityApiAvailable(),initialized=Boolean(state?.collector_identity_initialized);
+    ["collector-name","collector-identity-generate","collector-name-edit","collector-name-save","collector-name-cancel","collector-identity-export","collector-identity-file"].forEach(id=>ui(id).disabled=working||!identitySupported);
+    ui("collector-name").readOnly=initialized&&!identityEditing;
+    ui("collector-identity-generate").hidden=initialized;
+    ui("collector-name-edit").hidden=!initialized||identityEditing;
+    ui("collector-name-save").hidden=!initialized||!identityEditing;
+    ui("collector-name-cancel").hidden=!initialized||!identityEditing;
+    ui("collector-identity-check").disabled=working||!identitySupported||!ui("collector-identity-file").files[0];
+    ui("collector-identity-confirm").disabled=working||!identityMatches();
+    ui("collector-identity-import").disabled=working||!identityMatches()||!ui("collector-identity-confirm").checked;
+  }
+  function renderIdentity(){
+    const identity=state.collector_identity||{},key=JSON.stringify(identity);
+    ui("collector-id").textContent=identity.collector_id||"需要重启本地服务后读取";
+    if(key!==identityLoadedKey){identityLoadedKey=key;identityEditing=false;ui("collector-name").value=identity.collector_name||"";}
+    const matches=identityMatches();ui("collector-identity-preview").hidden=!matches;
+    if(identityChecked&&!matches){identityChecked=null;ui("collector-identity-confirm").checked=false;}
+    if(matches){ui("collector-identity-new-id").textContent=identityChecked.identity.collector_id;ui("collector-identity-new-name").textContent=`昵称：${identityChecked.identity.collector_name||"匿名采集者"}`;}
+    const task=state.kind==="collector-identity-import"?state:[...(state.recent_tasks||[])].reverse().find(item=>item.kind==="collector-identity-import");
+    if(!identityApiAvailable()){ui("collector-identity-feedback").textContent="当前后台尚未加载新版采集身份功能。请停止服务后重新打开「启动搜索.cmd」，再按 Ctrl+F5 刷新页面。";ui("collector-identity-feedback").classList.add("error");}
+    else if(identityLocalMessage){ui("collector-identity-feedback").textContent=identityLocalMessage.text;ui("collector-identity-feedback").classList.toggle("error",identityLocalMessage.error);}
+    else if(task){ui("collector-identity-feedback").textContent=task.message;ui("collector-identity-feedback").classList.toggle("error",task.phase==="failed"||task.phase==="interrupted");}
+    else{ui("collector-identity-feedback").textContent=state.collector_identity_initialized?"昵称已保存。修改昵称不会更换 ID，停止服务后重新打开仍会保留。":"采集者 ID 已自动生成，填写昵称后点击「生成昵称」。旧记录仍显示为采集者未知，新采集自动记录我的 ID。";ui("collector-identity-feedback").classList.remove("error");}
   }
   function renderFavorites(){
     const ready=state.prepared_favorites,matches=favoritesMatches();
@@ -43,7 +71,7 @@
       const summary=ready.summary;
       ui("favorites-file-name").textContent=selectedFavoritesFile()?.name||"上次已校验的收藏数文件";
       for(const [id,key] of [["favorites-total","total"],["favorites-added","added"],["favorites-updated","updated"],["favorites-kept","kept"]])ui(id).textContent=number(summary[key]);
-      ui("favorites-preview-detail").textContent=`保留现有：${number(summary.kept_older_or_equal_time)} 条抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条时间更晚但收藏数未增加。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 条当前作品目录暂缺，收藏数仍会按作品 ID 保存。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
+      ui("favorites-preview-detail").textContent=`采集者：我的记录 ${number(summary.own_records)} 条，他人的记录 ${number(summary.other_records)} 条，未知采集者 ${number(summary.unknown_records)} 条。保留现有：${number(summary.kept_older_or_equal_time)} 条自己的或未知采集者记录抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条收藏数未增加。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 条当前作品目录暂缺，收藏数仍会按作品 ID 保存。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
     }
     const task=state.kind?.startsWith("favorites-")?state:[...(state.recent_tasks||[])].reverse().find(item=>item.kind?.startsWith("favorites-"));
     if(favoritesLocalMessage){ui("favorites-feedback").textContent=favoritesLocalMessage.text;ui("favorites-feedback").classList.toggle("error",favoritesLocalMessage.error);}
@@ -67,6 +95,7 @@
   }
   function render(){
     if(!state)return;
+    renderIdentity();
     renderTranslations();
     renderFavorites();
     ui("backup-path").textContent=state.backup_directory;
@@ -179,15 +208,42 @@
     favoritesMessage(selectedFavoritesFile()?"已选择文件，点击「检查收藏数文件」预览合并结果。":"请选择本程序导出的收藏数文件。");controls();
   };
   ui("favorites-confirm").onchange=controls;
+  async function downloadAttachment(path,fallback){
+    const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:"{}"});
+    if(!response.ok){const failure=await response.json();throw new Error(failure.error||"文件导出失败");}
+    const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
+    link.href=url;link.download=response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]||fallback;
+    document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    return response;
+  }
+  ui("collector-identity-generate").onclick=async()=>{if(await action("collector-identity-create",{collector_name:ui("collector-name").value.trim()})){identityEditing=false;controls();identityMessage("昵称已保存，采集者 ID 保持不变。停止服务后重新打开仍会保留。");}};
+  ui("collector-name-edit").onclick=()=>{identityEditing=true;controls();ui("collector-name").focus();};
+  ui("collector-name-cancel").onclick=()=>{identityEditing=false;ui("collector-name").value=state?.collector_identity?.collector_name||"";controls();};
+  ui("collector-name-save").onclick=async()=>{if(await action("collector-name",{collector_name:ui("collector-name").value.trim()})){identityEditing=false;controls();identityMessage("昵称已修改，采集者 ID 保持不变。");}};
+  ui("collector-identity-export").onclick=async()=>{
+    if(busy)return;busy=true;controls();
+    try{await downloadAttachment("/api/maintenance/collector-identity-export","collector-identity.ehcollector.json");identityMessage("采集身份已导出，请在浏览器下载列表查看。换电脑时使用这个文件迁移自己的 ID。");}
+    catch(error){identityMessage(error.message,true);}finally{busy=false;controls();}
+  };
+  ui("collector-identity-file").onchange=()=>{invalidateIdentity();identityMessage("点击「检查采集身份」核对 ID 和昵称，再确认迁移。");};
+  ui("collector-identity-confirm").onchange=controls;
+  ui("collector-identity-check").onclick=async()=>{
+    const file=ui("collector-identity-file").files[0];if(busy||!file)return;
+    if(file.size===0||file.size>16*1024){identityMessage("请选择非空且不超过 16 KiB 的采集身份文件。",true);return;}
+    busy=true;invalidateIdentity();identityMessage("正在检查采集身份…");
+    try{
+      const encoded=btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())));
+      const response=await fetch("/api/maintenance/collector-identity-check",{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify({file:encoded})});
+      const result=await response.json();if(!response.ok)throw new Error(result.error||"采集身份检查失败");
+      identityChecked={...result,file:encoded,key:fileKey(file)};renderIdentity();identityMessage("身份已校验，请核对上方 ID 和昵称，确认后迁移。");
+    }catch(error){identityMessage(error.message,true);}finally{busy=false;controls();}
+  };
+  ui("collector-identity-import").onclick=()=>{if(identityMatches()&&ui("collector-identity-confirm").checked){identityLocalMessage=null;action("collector-identity-import",{file:identityChecked.file,expected_id:identityChecked.current_id});}};
   ui("favorites-export").onclick=async()=>{
     if(busy)return;busy=true;controls();favoritesMessage("正在生成收藏数文件…");
     try{
-      const response=await fetch("/api/maintenance/favorites-export",{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:"{}"});
-      if(!response.ok){const failure=await response.json();throw new Error(failure.error||"收藏数导出失败");}
-      const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
-      link.href=url;link.download=response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]||"favorites.ehfavorites.json";
-      document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-      favoritesMessage(`已导出 ${number(response.headers.get("X-Favorite-Record-Count"))} 条收藏数，请在浏览器下载列表查看。文件保留原始抓取时间。`);
+      const response=await downloadAttachment("/api/maintenance/favorites-export","favorites.ehfavorites.json");
+      favoritesMessage(`已导出 ${number(response.headers.get("X-Favorite-Record-Count"))} 条收藏数，请在浏览器下载列表查看。文件保留原始抓取时间和原采集者。`);
     }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导出。":error.message,true);}
     finally{busy=false;controls();}
   };

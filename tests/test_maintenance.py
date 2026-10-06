@@ -70,7 +70,7 @@ class MaintenanceTests(unittest.TestCase):
         (self.data/'covers.sqlite3').write_bytes(b'cover-index')
         with closing(sqlite3.connect(self.data/'favorites.sqlite3')) as db:
             db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA wal_autocheckpoint=0')
-            db.execute("INSERT INTO favorites VALUES(2,99,1,'exhentai.org')");db.commit()
+            db.execute("INSERT INTO favorites(gid,favorite_count,checked_at,source) VALUES(2,99,1,'exhentai.org')");db.commit()
             self.assertTrue((self.data/'favorites.sqlite3-wal').exists())
             result=self.engine.backup()
         path=Path(result['path'])

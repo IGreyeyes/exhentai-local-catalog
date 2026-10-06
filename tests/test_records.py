@@ -41,7 +41,7 @@ class RecordedWorksTests(unittest.TestCase):
         self.catalog=Catalog(self.path)
         self.now=int(time.time())
         records=[(1,0,self.now-5,'exhentai.org'),(2,20,self.now-10,'e-hentai.org'),(3,100,self.now-31*86400,'exhentai.org'),(4,7,self.now-20,'exhentai.org'),(99,55,self.now-90*86400,'e-hentai.org')]
-        with self.catalog.favorites.connection() as db:db.executemany('INSERT INTO favorites VALUES(?,?,?,?)',records)
+        with self.catalog.favorites.connection() as db:db.executemany('INSERT INTO favorites(gid,favorite_count,checked_at,source) VALUES(?,?,?,?)',records)
 
     def tearDown(self):self.directory.cleanup()
 
@@ -159,7 +159,7 @@ class RecordedWorksTests(unittest.TestCase):
         path=Path(self.directory.name)/'legacy-favorites.sqlite3'
         with closing(sqlite3.connect(path)) as db:
             db.execute('CREATE TABLE favorites(gid INTEGER PRIMARY KEY,favorite_count INTEGER NOT NULL,checked_at INTEGER NOT NULL,source TEXT NOT NULL)')
-            db.execute("INSERT INTO favorites VALUES(7,88,1,'e-hentai.org')");db.commit()
+            db.execute("INSERT INTO favorites(gid,favorite_count,checked_at,source) VALUES(7,88,1,'e-hentai.org')");db.commit()
         store=FavoriteStore(path)
         with store.connection() as db:
             self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=7').fetchone()[0],88)

@@ -156,6 +156,11 @@
       if(item.posted)details.append(node("span","",`发布于 ${dateParts(item.posted).date}`));
       content.append(details);
     }else content.append(node("p","saved-missing-note","当前作品目录中未找到对应标题和标签，已保存的采集结果仍保留。"));
+    if(hasCount){
+      const own=item.collector_id&&item.collector_id===current.collector_identity?.collector_id;
+      const label=item.collector_id?`${own?"我 · ":""}${item.collector_name||"匿名采集者"} · ${item.collector_id.slice(0,8)}`:"未知（旧数据）";
+      const author=node("p","saved-collector",`收藏数采集者：${label}`);author.title=item.collector_id?`采集者 ID：${item.collector_id}`:"旧记录未保存采集者身份";content.append(author);
+    }
     if(failed){
       const failure=node("section","saved-failure-info");failure.setAttribute("aria-label","抓取失败详情");
       failure.append(node("strong","","失败原因"),node("p","saved-failure-reason",item.error||"源站读取失败"));

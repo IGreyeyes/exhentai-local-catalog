@@ -3,7 +3,9 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
+from uuid import uuid4
 import json
+import base64
 import sqlite3
 import tempfile
 import threading
@@ -13,6 +15,7 @@ from app import Catalog, Server
 from favorite_transfer import FORMAT, MAX_FILE_BYTES, export_snapshot, merge_snapshot, parse_snapshot, preview_snapshot
 from favorites import FavoriteStore
 from maintenance import LibraryMaintenance
+from collector_identity import export_identity, parse_identity
 
 
 class FavoriteTransferTests(unittest.TestCase):
@@ -39,15 +42,19 @@ class FavoriteTransferTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def item(self, gid, count, checked_at, source="e-hentai.org"):
-        return {"gid": gid, "favorite_count": count, "checked_at": checked_at, "source": source}
+    def item(self, gid, count, checked_at, source="e-hentai.org", collector_id="", collector_name=""):
+        return {"gid": gid, "favorite_count": count, "checked_at": checked_at, "source": source, "collector_id": collector_id, "collector_name": collector_name}
 
     def raw(self, records):
-        return json.dumps({"format": FORMAT, "version": 1, "exported_at": "2026-10-07T00:00:00Z", "records": records}, ensure_ascii=False).encode("utf-8")
+        return json.dumps({"format": FORMAT, "version": 2, "exported_at": "2026-10-07T00:00:00Z", "records": records}, ensure_ascii=False).encode("utf-8")
 
-    def save(self, gid, count=100, checked_at=100):
+    def save(self, gid, count=100, checked_at=100, collector_id="", collector_name=""):
         with self.store.connection() as db:
-            db.execute("INSERT INTO favorites VALUES(?,?,?,'exhentai.org') ON CONFLICT(gid) DO UPDATE SET favorite_count=excluded.favorite_count,checked_at=excluded.checked_at", (gid, count, checked_at))
+            db.execute("""INSERT INTO favorites(gid,favorite_count,checked_at,source,collector_id,collector_name)
+                VALUES(?,?,?,'exhentai.org',?,?) ON CONFLICT(gid) DO UPDATE SET
+                favorite_count=excluded.favorite_count,checked_at=excluded.checked_at,
+                collector_id=excluded.collector_id,collector_name=excluded.collector_name
+            """, (gid, count, checked_at, collector_id, collector_name))
 
     def rows(self):
         with self.store.connection() as db:
@@ -81,7 +88,7 @@ class FavoriteTransferTests(unittest.TestCase):
         incoming = [self.item(1, 101, 101), self.item(2, 99, 101), self.item(3, 100, 101), self.item(4, 200, 100), self.item(5, 200, 99), self.item(6, 0, 90), self.item(7, 1, 101), self.item(999, 20, 80)]
         before = self.rows()
         summary = preview_snapshot(self.store.path, self.catalog, incoming)
-        self.assertEqual(summary, {"total": 8, "added": 2, "updated": 2, "kept": 4, "kept_older_or_equal_time": 2, "kept_count_not_increased": 2, "missing_catalog": 1})
+        self.assertEqual(summary, {"total": 8, "added": 2, "updated": 2, "kept": 4, "kept_older_or_equal_time": 2, "kept_count_not_increased": 2, "missing_catalog": 1, "own_records": 0, "other_records": 0, "unknown_records": 8})
         self.assertEqual(self.rows(), before)
         result = merge_snapshot(self.store.path, incoming)
         self.assertEqual(result["added"], 2)
@@ -152,7 +159,7 @@ class FavoriteTransferTests(unittest.TestCase):
 
     def test_invalid_json_versions_and_repeated_json_fields_reject(self):
         payload = json.loads(self.raw([]))
-        payload["version"] = 2
+        payload["version"] = 3
         for raw in (b"invalid", b'{"format":"x","format":"y"}', json.dumps(payload).encode()):
             with self.assertRaises(ValueError):
                 parse_snapshot(raw)
@@ -205,6 +212,215 @@ class FavoriteTransferTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.engine.import_favorites(ready["id"])
         self.assertEqual(self.rows(), {})
+
+    def test_own_other_unknown_merge_matrix_and_preview_match(self):
+        own_id = self.store.collector_identity()["collector_id"]
+        other_id = str(uuid4())
+        records, accepted = [], set()
+        gid = 0
+        for collector_id in (own_id, other_id, ""):
+            for count in (99, 100, 101):
+                for checked_at in (99, 100, 101):
+                    gid += 1
+                    self.save(gid, collector_id=own_id, collector_name="本地昵称")
+                    records.append(self.item(gid, count, checked_at, collector_id=collector_id))
+                    if count > 100 and (collector_id == other_id or checked_at > 100):
+                        accepted.add(gid)
+        before = self.rows()
+        preview = preview_snapshot(self.store.path, self.catalog, records)
+        self.assertEqual((preview["own_records"], preview["other_records"], preview["unknown_records"]), (9, 9, 9))
+        self.assertEqual((preview["updated"], preview["kept"]), (5, 22))
+        result = merge_snapshot(self.store.path, records)
+        self.assertEqual({key: value for key, value in preview.items() if key != "missing_catalog"}, result)
+        after = self.rows()
+        for record in records:
+            with self.subTest(gid=record["gid"]):
+                self.assertEqual(after[record["gid"]], record if record["gid"] in accepted else before[record["gid"]])
+
+    def test_rule_uses_my_current_id_not_existing_records_author(self):
+        own_id = self.store.collector_identity()["collector_id"]
+        other_id = str(uuid4())
+        self.save(1, 10, 100, other_id, "用户乙")
+        # Even if both snapshots are from B, B differs from my current identity.
+        result = merge_snapshot(self.store.path, [self.item(1, 20, 90, collector_id=other_id, collector_name="用户乙")])
+        self.assertEqual(result["updated"], 1)
+        result = merge_snapshot(self.store.path, [self.item(1, 30, 80, collector_id=own_id)])
+        self.assertEqual(result["kept"], 1)
+        self.assertEqual(self.rows()[1]["checked_at"], 90)
+
+    def test_import_reexport_keeps_original_author_and_local_fetch_sets_own_identity(self):
+        other = FavoriteStore(self.data / "other.sqlite3")
+        identity = other.set_collector_name("用户乙")
+        with patch("favorites.time.time", return_value=10):
+            other.save(1, 200, "e-hentai.org")
+        self.save(1, 100, 100)
+        raw, _ = export_snapshot(other.path)
+        result = self.engine.import_favorites(self.prepare(raw)["id"])
+        self.assertEqual(result["summary"]["updated"], 1)
+        raw, _ = export_snapshot(self.store.path)
+        self.assertEqual(parse_snapshot(raw)["records"], [self.item(1, 200, 10, **identity)])
+        displayed = Catalog(self.catalog).recorded({})["items"][0]
+        self.assertEqual((displayed["collector_id"], displayed["collector_name"]), (identity["collector_id"], "用户乙"))
+        with patch("favorites.time.time", return_value=150):
+            self.store.save(1, 180, "exhentai.org")
+        own = self.store.collector_identity()
+        self.assertEqual(self.rows()[1], self.item(1, 180, 150, "exhentai.org", **own))
+
+    def test_legacy_file_and_schema_remain_unknown_and_keep_strict_rule(self):
+        legacy = self.data / "legacy.sqlite3"
+        with closing(sqlite3.connect(legacy)) as db:
+            db.executescript("CREATE TABLE favorites(gid INTEGER PRIMARY KEY,favorite_count INTEGER NOT NULL,checked_at INTEGER NOT NULL,source TEXT NOT NULL); INSERT INTO favorites VALUES(1,10,100,'e-hentai.org');")
+        migrated = FavoriteStore(legacy)
+        identity = migrated.collector_identity()
+        self.assertEqual(FavoriteStore(legacy).collector_identity(), identity)
+        with migrated.connection() as db:
+            self.assertEqual(tuple(db.execute("SELECT collector_id,collector_name FROM favorites").fetchone()), ("", ""))
+        payload = json.loads(self.raw([self.item(1, 20, 90), self.item(2, 0, 80)]))
+        payload["version"] = 1
+        for item in payload["records"]:
+            item.pop("collector_id");item.pop("collector_name")
+        parsed = parse_snapshot(json.dumps(payload).encode())
+        summary = merge_snapshot(legacy, parsed["records"])
+        self.assertEqual((summary["added"], summary["updated"], summary["kept"], summary["unknown_records"]), (1, 0, 1, 2))
+
+    def test_identity_is_stable_nickname_can_change_and_migration_keeps_authorship(self):
+        original = self.store.collector_identity()
+        self.store.save(1, 10, "e-hentai.org")
+        other = {"collector_id": str(uuid4()), "collector_name": "用户乙"}
+        merge_snapshot(self.store.path, [self.item(2, 20, 100, **other)])
+        changed = self.store.set_collector_name("  我的新昵称  ")
+        self.assertEqual(changed, {**original, "collector_name": "我的新昵称"})
+        self.assertEqual(self.rows()[1]["collector_name"], "我的新昵称")
+        self.assertEqual(self.rows()[2]["collector_name"], "用户乙")
+        self.assertEqual(FavoriteStore(self.store.path).collector_identity(), changed)
+        self.assertEqual(parse_identity(export_identity(changed)), changed)
+        ready = self.prepare(self.raw([]))
+        before = self.rows()
+        result = self.engine.import_collector_identity(other, changed["collector_id"])
+        self.assertEqual(self.store.collector_identity(), other)
+        self.assertEqual(self.rows(), before)
+        self.assertIsNone(self.engine.prepared_favorites())
+        with closing(sqlite3.connect(Path(result["backup"]["path"]) / "data" / "favorites.sqlite3")) as db:
+            self.assertEqual(db.execute("SELECT value FROM app_settings WHERE key='collector_id'").fetchone()[0], original["collector_id"])
+        with self.assertRaisesRegex(ValueError, "已变化"):
+            self.engine.import_collector_identity(original, original["collector_id"])
+        self.assertEqual(self.store.collector_identity(), other)
+
+    def test_invalid_identity_and_record_provenance_reject_before_write(self):
+        own = self.store.collector_identity()
+        invalid = [dict(own, collector_id="user-a"), dict(own, collector_id=True), dict(own, collector_id=""), dict(own, collector_id=own["collector_id"].upper()), dict(own, collector_name="x"*41), dict(own, collector_name="x\ny"), dict(own, collector_name=123)]
+        for identity in invalid:
+            with self.subTest(identity=identity):
+                with self.assertRaises(ValueError):
+                    parse_identity(json.dumps({"format": "local-tag-catalog-collector-identity", "version": 1, **identity}).encode())
+                if identity["collector_id"] != "":
+                    with self.assertRaises(ValueError):
+                        self.prepare(self.raw([self.item(1, 10, 100, **identity)]))
+        with self.assertRaises(ValueError):
+            self.prepare(self.raw([self.item(1, 10, 100, collector_name="未知姓名")]))
+        self.assertEqual(self.rows(), {})
+        self.assertEqual(self.store.collector_identity(), own)
+        with self.assertRaises(ValueError):parse_identity(b'{"format":"x","format":"y"}')
+        with self.assertRaises(ValueError):parse_identity(b'x'*16385)
+
+    def test_identity_backup_failure_leaves_identity_and_records_intact(self):
+        own = self.store.collector_identity()
+        self.store.save(1, 10, "e-hentai.org")
+        before = self.rows()
+        with patch.object(self.engine, "backup", side_effect=OSError("simulated full disk")):
+            with self.assertRaises(OSError):
+                self.engine.import_collector_identity({"collector_id": str(uuid4()), "collector_name": ""}, own["collector_id"])
+        self.assertEqual(self.store.collector_identity(), own)
+        self.assertEqual(self.rows(), before)
+
+    def test_identity_generation_is_idempotent_and_anonymous_state_is_persistent(self):
+        own = self.store.collector_identity()
+        self.assertFalse(self.engine.collector_identity_status()["collector_identity_initialized"])
+        self.assertEqual(self.store.set_collector_name("", initialize=True), own)
+        self.assertTrue(self.engine.collector_identity_status()["collector_identity_initialized"])
+        self.assertEqual(self.store.set_collector_name("", initialize=True), own)
+        with self.assertRaisesRegex(ValueError, "修改昵称"):
+            self.store.set_collector_name("其他昵称", initialize=True)
+        self.assertEqual(self.store.collector_identity(), own)
+        self.assertEqual(FavoriteStore(self.store.path).collector_identity(), own)
+        self.assertTrue(self.engine.collector_identity_status()["collector_identity_initialized"])
+        changed = self.store.set_collector_name("新昵称")
+        self.assertEqual(changed["collector_id"], own["collector_id"])
+
+    def test_identity_and_nickname_survive_service_stop_and_restart(self):
+        identity = self.store.collector_identity()
+        for restart in range(3):
+            server = Server(("127.0.0.1", 0), Catalog(self.catalog))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                if restart == 0:
+                    with urlopen(Request(base+"/api/maintenance/collector-identity-create",data=json.dumps({"collector_name":"测试用户"}).encode(),headers={"Content-Type":"application/json","X-Catalog-Token":server.action_token}),timeout=10) as response:
+                        state = json.load(response)
+                    identity = {**identity, "collector_name": "测试用户"}
+                else:
+                    with urlopen(base+"/api/maintenance",timeout=10) as response:
+                        state = json.load(response)
+                self.assertEqual(state["collector_identity"], identity)
+                self.assertTrue(state["collector_identity_initialized"])
+                if restart == 1:
+                    with urlopen(Request(base+"/api/maintenance/collector-name",data=json.dumps({"collector_name":"新昵称"}).encode(),headers={"Content-Type":"application/json","X-Catalog-Token":server.action_token}),timeout=10) as response:
+                        changed = json.load(response)
+                    identity = {**identity, "collector_name": "新昵称"}
+                    self.assertEqual(changed["collector_identity"], identity)
+            finally:
+                server.shutdown();server.server_close();thread.join()
+
+    def test_web_identity_settings_export_check_migrate_and_authentication(self):
+        server = Server(("127.0.0.1", 0), Catalog(self.catalog))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        own = self.store.collector_identity()
+        self.store.save(1, 10, "e-hentai.org")
+        def post(name, payload=None, authorized=True):
+            return urlopen(Request(base + "/api/maintenance/" + name, data=json.dumps(payload or {}).encode(), headers={"Content-Type": "application/json", "X-Catalog-Token": server.action_token if authorized else "", "Origin": base}), timeout=10)
+        try:
+            for name in ("collector-identity-create", "collector-name", "collector-identity-export", "collector-identity-check", "collector-identity-import"):
+                with self.subTest(name=name), self.assertRaises(HTTPError) as failure:
+                    post(name, authorized=False)
+                self.assertEqual(failure.exception.code, 403)
+                failure.exception.close()
+            for _ in range(2):
+                with post("collector-identity-create", {"collector_name": "测试昵称"}) as response:
+                    state = json.load(response)
+                    self.assertEqual(state["collector_identity"], {**own, "collector_name": "测试昵称"})
+                    self.assertTrue(state["collector_identity_initialized"])
+            with self.assertRaises(HTTPError) as failure:
+                post("collector-identity-create", {"collector_name": "重建昵称"})
+            self.assertEqual(failure.exception.code, 400)
+            failure.exception.close()
+            with post("collector-name", {"collector_name": "修改后的昵称"}) as response:
+                self.assertEqual(json.load(response)["collector_identity"], {**own, "collector_name": "修改后的昵称"})
+            with post("collector-identity-export") as response:
+                self.assertIn(".ehcollector.json", response.headers["Content-Disposition"])
+                self.assertEqual(parse_identity(response.read()), {**own, "collector_name": "修改后的昵称"})
+            target = {"collector_id": str(uuid4()), "collector_name": "迁移身份"}
+            encoded = base64.b64encode(export_identity(target)).decode("ascii")
+            with post("collector-identity-check", {"file": encoded}) as response:
+                checked = json.load(response)
+                self.assertEqual(checked, {"identity": target, "current_id": own["collector_id"]})
+            self.assertEqual(self.store.collector_identity()["collector_id"], own["collector_id"])
+            with self.assertRaises(HTTPError) as failure:
+                post("collector-identity-import", {"file": encoded, "expected_id": str(uuid4())})
+            self.assertEqual(failure.exception.code, 400)
+            failure.exception.close()
+            with post("collector-identity-import", {"file": encoded, "expected_id": checked["current_id"]}) as response:
+                json.load(response)
+            server.maintenance.thread.join(timeout=5)
+            self.assertEqual(server.maintenance.status()["phase"], "completed")
+            self.assertEqual(server.maintenance.status()["collector_identity"], target)
+            self.assertEqual(self.rows()[1]["collector_id"], own["collector_id"])
+            self.assertTrue(Path(server.maintenance.status()["result"]["backup"]["path"]).is_dir())
+            self.assertIsNone(server.collector.preview_data)
+        finally:
+            server.shutdown();server.server_close();thread.join()
 
     def test_web_export_upload_over_32k_and_authenticated_merge_preserve_login(self):
         self.save(1, 10, 100)

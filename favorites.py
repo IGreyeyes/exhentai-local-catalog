@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from uuid import uuid4
 import json
 import hashlib
 import math
@@ -16,6 +17,8 @@ import secrets
 import sqlite3
 import threading
 import time
+
+from collector_identity import read_identity, validate_collector
 
 HOSTS = {"exhentai.org", "e-hentai.org"}
 JOIN_FAVORITES = " LEFT JOIN collected.favorites AS f ON f.gid = g.gid "
@@ -159,7 +162,8 @@ class FavoriteStore:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS favorites (
                     gid INTEGER PRIMARY KEY, favorite_count INTEGER NOT NULL CHECK(favorite_count >= 0),
-                    checked_at INTEGER NOT NULL, source TEXT NOT NULL
+                    checked_at INTEGER NOT NULL, source TEXT NOT NULL,
+                    collector_id TEXT NOT NULL DEFAULT '', collector_name TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS jobs (
                     id INTEGER PRIMARY KEY, query_json TEXT NOT NULL, host TEXT NOT NULL,
@@ -195,6 +199,18 @@ class FavoriteStore:
                 CREATE INDEX IF NOT EXISTS record_status_state_gid ON record_status(state,gid DESC);
                 CREATE INDEX IF NOT EXISTS record_status_opened_gid ON record_status(last_opened_at DESC,gid DESC);
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(favorites)")}
+            for column in ("collector_id", "collector_name"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE favorites ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            # Legacy counts may include imported data, so their authors remain unknown.
+            db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('collector_id',?)", (str(uuid4()),))
+            db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('collector_name','')")
+            db.execute("""INSERT OR IGNORE INTO app_settings(key,value)
+                SELECT 'collector_identity_initialized',CASE WHEN value='' THEN '0' ELSE '1' END
+                FROM app_settings WHERE key='collector_name'
+            """)
+            read_identity(db)
             if "selection_json" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
                 db.execute("ALTER TABLE jobs ADD COLUMN selection_json TEXT NOT NULL DEFAULT '{}'")
             if "priority" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
@@ -218,6 +234,39 @@ class FavoriteStore:
                     ORDER BY t.job_id DESC
                 """)
                 db.execute("INSERT INTO app_settings(key,value) VALUES('failure_records_migrated','1')")
+
+    def collector_identity(self):
+        with self.connection() as db:
+            return read_identity(db)
+
+    def set_collector_name(self, name, initialize=False):
+        if not isinstance(name, str):
+            raise ValueError("采集者昵称必须是文本。")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            identity = read_identity(db)
+            updated = validate_collector(identity["collector_id"], name.strip())
+            initialized = db.execute("SELECT value FROM app_settings WHERE key='collector_identity_initialized'").fetchone()
+            if initialize and initialized and initialized[0] == '1' and updated != identity:
+                raise ValueError("采集身份已生成，请点击「修改昵称」修改；已有 ID 不会重新生成。")
+            identity = updated
+            self._set_identity(db, identity)
+        return identity
+
+    def set_collector_identity(self, identity, expected_id):
+        identity = validate_collector(**identity)
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if read_identity(db)["collector_id"] != expected_id:
+                raise ValueError("当前采集身份已变化，请重新检查身份文件。")
+            self._set_identity(db, identity)
+        return identity
+
+    @staticmethod
+    def _set_identity(db, identity):
+        db.executemany("UPDATE app_settings SET value=? WHERE key=?", ((value, key) for key, value in identity.items()))
+        db.execute("INSERT INTO app_settings(key,value) VALUES('collector_identity_initialized','1') ON CONFLICT(key) DO UPDATE SET value='1'")
+        db.execute("UPDATE favorites SET collector_name=? WHERE collector_id=?", (identity["collector_name"], identity["collector_id"]))
 
     def get_tag_blacklist(self):
         with self.connection() as db:
@@ -263,7 +312,14 @@ class FavoriteStore:
     def _save(db, gid, count, host):
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise ValueError("Invalid favorite count")
-        db.execute("INSERT INTO favorites VALUES (?,?,?,?) ON CONFLICT(gid) DO UPDATE SET favorite_count=excluded.favorite_count,checked_at=excluded.checked_at,source=excluded.source", (gid,count,int(time.time()),host))
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        identity = read_identity(db)
+        db.execute("""INSERT INTO favorites(gid,favorite_count,checked_at,source,collector_id,collector_name)
+            VALUES (?,?,?,?,?,?) ON CONFLICT(gid) DO UPDATE SET
+            favorite_count=excluded.favorite_count,checked_at=excluded.checked_at,source=excluded.source,
+            collector_id=excluded.collector_id,collector_name=excluded.collector_name
+        """, (gid,count,int(time.time()),host,identity["collector_id"],identity["collector_name"]))
         db.execute("DELETE FROM collection_failures WHERE gid=?",(gid,))
 
     @staticmethod

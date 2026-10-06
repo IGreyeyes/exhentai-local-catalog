@@ -24,6 +24,7 @@ from maintenance import LibraryMaintenance, MaintenanceManager, recover_import
 from covers import CoverCache, CoverUnavailable
 from credentials import export_credentials, import_credentials
 from favorite_transfer import MAX_FILE_BYTES
+from collector_identity import MAX_IDENTITY_BYTES, parse_identity
 
 ROOT = Path(__file__).resolve().parent
 APP_ID = "local-tag-catalog-v1"
@@ -257,13 +258,13 @@ class Catalog:
             with self.connection() as db:
                 db.execute("BEGIN")
                 records_cte="""WITH recorded AS (
-                    SELECT f.gid,f.favorite_count,f.checked_at,f.source AS last_success_source,
+                    SELECT f.gid,f.favorite_count,f.checked_at,f.source AS last_success_source,f.collector_id,f.collector_name,
                            COALESCE(e.source,f.source) AS source,COALESCE(e.failed_at,f.checked_at) AS recorded_at,
                            CASE WHEN e.gid IS NULL THEN 'success' ELSE 'failed' END AS collection_status,
                            e.failed_at,e.error,e.attempts AS failure_attempts,e.job_id,e.token AS failure_token
                     FROM collected.favorites AS f LEFT JOIN collected.collection_failures AS e ON e.gid=f.gid
                     UNION ALL
-                    SELECT e.gid,NULL,NULL,NULL,e.source,e.failed_at,'failed',e.failed_at,e.error,e.attempts,e.job_id,e.token
+                    SELECT e.gid,NULL,NULL,NULL,'','',e.source,e.failed_at,'failed',e.failed_at,e.error,e.attempts,e.job_id,e.token
                     FROM collected.collection_failures AS e WHERE NOT EXISTS(SELECT 1 FROM collected.favorites AS f WHERE f.gid=e.gid)
                 ) """
                 joined=" FROM recorded AS f LEFT JOIN collected.record_status AS rs ON rs.gid=f.gid LEFT JOIN gallery AS g ON g.gid=f.gid "
@@ -309,6 +310,7 @@ class Catalog:
         finally:self.slots.release()
         return {
             "items":items,"total":total,"page":page,"pages":pages,"limit":limit,"tags":list(tags),"sort":sort,"collection":collection,"job_id":job_id,
+            "collector_identity":self.favorites.collector_identity(),
             "summary":{"total":summary_row[0],"recent_7_days":summary_row[1] or 0,"last_checked_at":summary_row[2],"missing_metadata":summary_row[3] or 0,"opened":summary_row[4] or 0,
                        "states":{"none":summary_row[5] or 0,"planned":summary_row[6] or 0,"reading":summary_row[7] or 0,"watched":summary_row[8] or 0,"ignored":summary_row[9] or 0},
                        "successful":summary_row[10] or 0,"failed":summary_row[11] or 0,"last_recorded_at":summary_row[12]},
@@ -588,7 +590,31 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("请求格式不正确。")
             if self.path.startswith("/api/maintenance/"):
                 manager=self.server.maintenance
-                if self.path == "/api/maintenance/favorites-export":
+                if self.path in {"/api/maintenance/collector-name", "/api/maintenance/collector-identity-create"}:
+                    if set(payload) != {"collector_name"}:
+                        raise ValueError("请只填写采集者昵称。")
+                    result = manager.set_collector_name(payload["collector_name"], initialize=self.path.endswith("-create"))
+                elif self.path == "/api/maintenance/collector-identity-export":
+                    if payload:
+                        raise ValueError("导出采集身份不接受额外选项。")
+                    self.reply_attachment(manager.export_collector_identity(), "collector-identity.ehcollector.json")
+                    return
+                elif self.path in {"/api/maintenance/collector-identity-check", "/api/maintenance/collector-identity-import"}:
+                    checking = self.path.endswith("-check")
+                    if set(payload) != ({"file"} if checking else {"file", "expected_id"}):
+                        raise ValueError("请选择并检查采集身份文件后再确认迁移。")
+                    encoded = payload["file"]
+                    if not isinstance(encoded, str) or len(encoded) > 4*((MAX_IDENTITY_BYTES+2)//3):
+                        raise ValueError("采集身份文件超过 16 KiB 或格式不正确。")
+                    try:
+                        raw = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError):
+                        raise ValueError("采集身份文件编码不正确。") from None
+                    if checking:
+                        result = manager.check_collector_identity(raw)
+                    else:
+                        result = manager.start("collector-identity-import", identity=parse_identity(raw), expected_collector_id=payload["expected_id"])
+                elif self.path == "/api/maintenance/favorites-export":
                     if payload:
                         raise ValueError("导出收藏数不接受额外选项。")
                     body, count = manager.export_favorites()

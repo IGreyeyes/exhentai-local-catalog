@@ -41,16 +41,53 @@
         </section>
         <section class="maintenance-card maintenance-section" id="favorites-section" aria-labelledby="favorites-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">⇄</span><div><h2 id="favorites-title">仅导出 / 合并收藏数</h2><p>在资料库之间迁移已采集的收藏数，按作品 ID 合并。</p></div></div>
-          <p class="field-hint">文件只包含作品 ID、收藏数、原抓取时间和源站标识。不包含作品目录、阅读状态、黑名单、采集队列或登录信息。</p>
+          <div class="collector-identity">
+            <h3>我的采集身份</h3>
+            <p class="field-hint">采集者 ID 在首次启动服务时自动生成并固定保存。填写昵称后点击「生成昵称」，以后可单独修改；停止服务、重新打开后 ID 和昵称保持不变。</p>
+            <p class="collector-id">我的 ID：<code id="collector-id">正在读取…</code></p>
+            <label class="maintenance-field" for="collector-name">显示昵称（选填，最多 40 个字符）</label>
+            <div class="maintenance-path-row"><input id="collector-name" type="text" maxlength="40" autocomplete="off" placeholder="不填写时显示为匿名采集者"><button class="button primary" id="collector-identity-generate" disabled>生成昵称</button><button class="button secondary" id="collector-name-edit" disabled hidden>修改昵称</button><button class="button primary" id="collector-name-save" disabled hidden>保存修改</button><button class="button secondary" id="collector-name-cancel" disabled hidden>取消</button></div>
+            <details class="collector-migration">
+              <summary>换电脑：导出或迁移我的采集身份</summary>
+              <p class="field-hint">在原电脑导出身份，在新电脑检查并迁移，可继续使用同一个 ID。分享收藏数只需下方的收藏数文件。</p>
+              <button class="button secondary" id="collector-identity-export" disabled>导出我的采集身份</button>
+              <label class="maintenance-field favorites-file-label" for="collector-identity-file">选择自己的采集身份文件</label>
+              <div class="maintenance-path-row"><input id="collector-identity-file" type="file" accept=".ehcollector.json,.json,application/json"><button class="button secondary" id="collector-identity-check" disabled>检查采集身份</button></div>
+              <div id="collector-identity-preview" class="prepared-import" hidden>
+                <h3>准备迁移的身份</h3><p class="collector-id">ID：<code id="collector-identity-new-id"></code></p><p id="collector-identity-new-name"></p>
+                <p class="field-hint">迁移前自动备份并暂停采集。已有记录的原采集者 ID 保留；之后自行采集使用这个身份。</p>
+                <label class="checkbox"><input id="collector-identity-confirm" type="checkbox">我确认将当前采集身份切换为上方 ID</label>
+                <button class="button primary" id="collector-identity-import" disabled>备份并迁移我的身份</button>
+              </div>
+            </details>
+            <p id="collector-identity-feedback" class="translation-feedback" role="status" aria-live="polite">旧记录没有采集者信息，会显示为采集者未知；新采集自动记录我的 ID。</p>
+          </div>
+          <p class="field-hint">收藏数文件包含作品 ID、收藏数、原抓取时间、源站及原采集者 ID 和昵称。不包含作品目录、阅读状态、黑名单、采集队列或登录信息。</p>
           <button class="button secondary" id="favorites-export" disabled>仅导出收藏数</button>
           <label class="maintenance-field favorites-file-label" for="favorites-file">选择要合并的收藏数文件</label>
           <div class="maintenance-path-row"><input id="favorites-file" type="file" accept=".ehfavorites.json,.json,application/json"><button class="button secondary" id="favorites-check" disabled>检查收藏数文件</button></div>
           <p class="field-hint">选择本程序导出的 .ehfavorites.json 文件，最大 128 MiB。检查后先核对数量，再确认合并。</p>
+          <section class="favorites-merge-rules" aria-labelledby="favorites-rules-title">
+            <h3 id="favorites-rules-title">收藏数如何合并</h3>
+            <p>先按作品 ID（GID）匹配。同一个作品只保留一条收藏数记录。</p>
+            <p><strong>自己的 / 他人的数据：</strong>用导入记录的原采集者 ID，与上方「我的 ID」比较。昵称相同不代表同一个采集者。</p>
+            <table>
+              <thead><tr><th scope="col">导入记录的情况</th><th scope="col">程序如何处理</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">本地还没有成功收藏数</th><td>直接新增，收藏数为 0 也可新增；保留原抓取时间、源站和采集者。</td></tr>
+                <tr><th scope="row">自己的数据<br><span>采集者 ID 与我的 ID 相同</span></th><td>须同时满足：<strong>抓取时间更晚，而且收藏数更大</strong>，才覆盖；任一条件不满足就保留本地记录。</td></tr>
+                <tr><th scope="row">他人的数据<br><span>采集者 ID 非空且与我的 ID 不同</span></th><td>只要<strong>收藏数更大</strong>就覆盖，<strong>不比较抓取时间</strong>；时间相同或更旧也可以。</td></tr>
+                <tr><th scope="row">采集者未知的旧数据</th><td>沿用原规则：<strong>抓取时间更晚，而且收藏数更大</strong>，才覆盖。</td></tr>
+              </tbody>
+            </table>
+            <p><strong>已有记录的收藏数相同或减少时，一律保留本地记录。</strong>接受覆盖时，收藏数、原抓取时间、源站和原采集者一起替换；不会改成导入时间，也不会归到导入者名下。</p>
+            <p class="favorites-rule-example">例如：本地收藏数为 100，导入的是更早抓取的 120。来自他人时会更新为 120；来自自己或未知采集者时会保留 100。即使本地原记录也是这位他人采集的，仍以「我的 ID」判断。</p>
+            <p>检查文件只显示预计结果。确认合并后，程序暂停采集并自动备份，再按当时的数据执行上述规则。重复导入同一文件不会新增重复作品；阅读状态、黑名单和采集队列保留。</p>
+          </section>
           <div id="favorites-preview" class="prepared-import" hidden>
             <h3>收藏数文件已校验</h3><p class="path-hint" id="favorites-file-name"></p>
             <dl class="translation-stats"><div><dt>文件记录</dt><dd id="favorites-total">—</dd></div><div><dt>预计新增</dt><dd id="favorites-added">—</dd></div><div><dt>预计更新</dt><dd id="favorites-updated">—</dd></div><div><dt>保留现有</dt><dd id="favorites-kept">—</dd></div></dl>
             <p class="field-hint" id="favorites-preview-detail"></p>
-            <p class="maintenance-warning">相同作品仅在导入抓取时间更晚、且收藏数更大时更新。时间相同或更旧、收藏数相同或减少时保留现有值；未记录的作品直接新增，并保留原抓取时间。</p>
             <label class="checkbox"><input id="favorites-confirm" type="checkbox">我确认按上述规则合并收藏数</label>
             <button class="button primary" id="favorites-import" disabled>备份当前资料并合并收藏数</button>
           </div>

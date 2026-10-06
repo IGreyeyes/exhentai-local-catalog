@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>已记录 · EX资料库</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/records.css">
+  <script src="/records.js" defer></script>
+</head>
+<body class="records-page">
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="EX资料库首页"><span class="brand-icon" aria-hidden="true">Ex</span><span>EX资料库<small>LOCAL CATALOG</small></span></a>
+      <div class="nav-caption">我的资料库</div>
+      <a class="nav-item" href="/"><span aria-hidden="true">⌕</span> 标签搜索</a>
+      <a class="nav-item selected" href="/records" aria-current="page"><span aria-hidden="true">✓</span> 已记录 <span class="saved-nav-count" id="nav-count">—</span></a>
+      <a class="nav-item" href="/maintenance"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <div class="sidebar-note"><span class="small-dot"></span> 每一份记录，都留在本机<p>浏览和筛选只读取本地数据，无需登录源站。</p></div>
+      <div class="sidebar-bottom"><span>关于这些记录</span><strong>成功与失败，都有记录</strong><p>保存收藏数，也保留失败原因和访问链接。重新采集成功后，自动更新为成功记录。</p><a class="sidebar-back" href="/">返回搜索，继续采集 ↗</a></div>
+    </aside>
+    <main>
+      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>已记录</strong></span><div class="topbar-actions"><span class="connection" id="records-connection"><i></i> 本地采集记录</span><a class="button secondary" href="/">标签搜索</a><a class="button secondary" href="/maintenance">维护</a></div></header>
+      <div class="main-content">
+        <section class="records-intro"><div><div class="eyebrow">SAVED RECORDS</div><h1>采集过的，都在这里。</h1><p>查看收藏数与失败记录，直接打开作品核对访问情况。</p></div><button class="button secondary" id="refresh-records"><span aria-hidden="true">↻</span> 刷新记录</button></section>
+        <section class="stats" aria-label="全部记录概况"><div><span>已记录作品</span><strong id="saved-total">—</strong><small>每个作品保留一条最新记录</small></div><div><span>抓取失败</span><strong id="saved-failed">—</strong><small>重试成功后移出失败列表</small></div><div><span>最近 7 天成功采集</span><strong id="saved-recent">—</strong><small>包括首次记录和更新的作品</small></div><div><span>最近一次采集</span><strong id="saved-latest" class="date-value">—</strong><small id="saved-latest-time">—</small></div></section>
+        <section class="record-collection-tabs" id="record-collection-tabs" aria-label="按采集状态筛选"></section>
+        <div class="record-job-filter" id="record-job-filter" hidden><span id="record-job-label"></span><button class="button secondary" id="clear-record-job" type="button">查看全部任务的失败作品</button></div>
+        <section class="search-panel recorded-filters" aria-labelledby="record-filter-title">
+          <div class="panel-heading"><h2 id="record-filter-title">查找已记录的作品</h2><span>仅搜索已保存的记录</span></div>
+          <form id="records-form">
+            <div class="record-search-top"><label class="records-query-label" for="record-query">标题或作品 ID<input id="record-query" type="search" placeholder="输入标题关键词，或作品 ID" maxlength="200"></label><label>排序方式<select id="record-sort"><option value="favorites_desc">收藏数 · 从高到低</option><option value="favorites_asc">收藏数 · 从低到高</option><option value="recorded_desc">采集时间 · 最近优先</option><option value="recorded_asc">采集时间 · 最早优先</option><option value="rating_desc">平均评分 · 从高到低</option><option value="state_updated_desc">标记时间 · 最近优先</option></select></label></div>
+            <label class="field-label" for="record-tag">标签筛选 <span>可选，可组合</span></label>
+            <div class="record-tag-box" id="record-tag-box"><div id="record-chips" class="record-chips"></div><div class="record-tag-wrap"><input id="record-tag" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="record-suggestions" autocomplete="off" maxlength="200" placeholder="支持中文或英文标签，例如 中文"><ul id="record-suggestions" role="listbox" hidden></ul></div></div>
+            <div class="record-filter-bottom"><label>阅读状态<select id="record-state"><option value="all">全部状态</option><option value="none">未分类</option><option value="planned">待看</option><option value="reading">在看</option><option value="watched">看过</option><option value="ignored">不看</option></select></label><label>是否点开<select id="record-opened"><option value="all">全部</option><option value="no">从未从本页点开</option><option value="yes">已从本页点开</option></select></label><label>采集来源<select id="record-source"><option value="">全部来源</option><option value="exhentai.org">ExHentai</option><option value="e-hentai.org">E-Hentai</option></select></label><label>记录时间<select id="record-age"><option value="all">全部时间</option><option value="7d">最近 7 天</option><option value="30d">最近 30 天</option><option value="90d">最近 90 天</option><option value="older30">30 天以前</option></select></label><div class="record-filter-actions"><button type="button" class="button secondary" id="clear-record-filters">清空筛选</button><button type="submit" class="button primary" id="filter-records">筛选记录</button></div></div>
+          </form>
+        </section>
+        <div id="records-error" class="message" role="alert" hidden></div>
+        <section class="record-state-overview" id="record-state-overview" aria-label="阅读状态统计"></section>
+        <section class="results-section" aria-labelledby="records-heading"><div class="results-heading"><div><h2 id="records-heading">我的记录</h2><p id="record-summary" aria-live="polite">正在读取记录…</p></div><span class="record-local-note"><span class="small-dot"></span> 打开与阅读状态分开记录</span></div><div id="record-bulk" class="record-bulk" hidden><label class="checkbox"><input id="select-record-page" type="checkbox">选择本页</label><strong id="selected-record-count">已选 0 条</strong><select id="bulk-record-state" aria-label="批量阅读状态"><option value="planned">标记为待看</option><option value="reading">标记为在看</option><option value="watched">标记为看过</option><option value="ignored">标记为不看</option><option value="none">恢复未分类</option></select><button id="apply-bulk-state" class="button primary">应用到已选记录</button><button id="clear-record-selection" class="button secondary">取消选择</button></div><div id="records-list" aria-busy="true"><div class="loading">正在读取已保存的作品…</div></div><nav id="records-pagination" class="pagination" aria-label="记录翻页" hidden><span id="records-range"></span><div><button id="records-previous" class="button secondary">上一页</button><label><input id="records-page" type="number" min="1" value="1" aria-label="记录页码"><span id="records-pages"></span></label><button id="records-jump" class="button secondary">跳转</button><button id="records-next" class="button secondary">下一页</button></div></nav></section>
+        <p class="records-footnote">“已点开”只记录你从本页面点击源站链接的操作，无法判断你是否在其他标签页或设备上看过。手动阅读状态以你的标记为准，不会被收藏数重新采集覆盖。</p>
+        <footer><span>EX资料库 · 我的采集记录</span><div class="data-credits"><span>标签译文：<a href="https://github.com/EhTagTranslation/Database" target="_blank" rel="noopener noreferrer">EhTagTranslation 全体编辑者</a> · <a href="https://creativecommons.org/licenses/by-nc-sa/3.0/cn/" target="_blank" rel="noopener noreferrer">CC BY-NC-SA 3.0 CN</a></span></div></footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

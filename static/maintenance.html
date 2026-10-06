@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>资料库维护 · EX资料库</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/maintenance.css">
+  <script src="/maintenance.js" defer></script>
+</head>
+<body class="maintenance-page">
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="EX资料库首页"><span class="brand-icon" aria-hidden="true">Ex</span><span>EX资料库<small>LOCAL CATALOG</small></span></a>
+      <div class="nav-caption">我的资料库</div>
+      <a class="nav-item" href="/"><span aria-hidden="true">⌕</span> 标签搜索</a>
+      <a class="nav-item" href="/records"><span aria-hidden="true">✓</span> 已记录</a>
+      <a class="nav-item selected" href="/maintenance" aria-current="page"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <div class="sidebar-note"><span class="small-dot"></span> 给资料留一份副本<p>备份到本机文件夹、其他磁盘，或已连接的网络共享文件夹。</p></div>
+      <div class="sidebar-bottom"><span>资料管理</span><strong>备份与导入，都在这里</strong><p>导入前先校验文件，再自动备份当前资料。每份备份独立保存。</p></div>
+    </aside>
+    <main>
+      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>资料库维护</strong></span><div class="topbar-actions"><span class="connection" id="connection"><i></i> 正在连接本地服务</span><a class="button secondary" href="/">标签搜索</a><a class="button secondary" href="/records">已记录</a><button class="button secondary" id="maintenance-stop-request">停止服务</button></div></header>
+      <div class="main-content">
+        <section class="intro"><div class="eyebrow">LIBRARY CARE</div><h1>管理资料，安心保存。</h1><p>选择备份位置、导入已有备份，或更新本地作品目录。</p></section>
+        <nav class="maintenance-tabs" aria-label="维护功能"><a href="#backup-section">备份资料</a><a href="#restore-section">导入备份</a><a href="#catalog-section">更新作品目录</a><a href="#covers-section">封面缓存</a></nav>
+        <div id="maintenance-status" class="maintenance-status" role="status" aria-live="polite">维护工具正在连接…</div>
+        <section class="maintenance-card maintenance-section" id="backup-section" aria-labelledby="backup-title">
+          <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↗</span><div><h2 id="backup-title">备份我的资料</h2><p>保存收藏数、阅读状态、黑名单、采集进度、中文词库和程序文件。</p></div></div>
+          <label class="maintenance-field" for="backup-directory">备份到哪个文件夹</label>
+          <div class="maintenance-path-row"><input id="backup-directory" type="text" placeholder="例如 D:\EX备份，或粘贴文件夹的完整路径" autocomplete="off" spellcheck="false"><button class="button secondary" id="backup-browse">选择文件夹</button><button class="button secondary" id="backup-save-directory">保存位置</button><button class="button secondary" id="backup-default-directory">恢复默认</button></div>
+          <p class="field-hint">支持本机文件夹、移动硬盘及已连接的网络共享路径。不存在的文件夹会自动创建；每次备份生成独立子文件夹。</p>
+          <p class="path-hint">当前备份位置：<span id="backup-path">—</span></p>
+          <div class="maintenance-row"><label class="checkbox"><input id="backup-full" type="checkbox">同时备份作品目录 <span id="backup-catalog-size"></span></label><button class="button primary" id="maintenance-backup" disabled>立即备份</button></div>
+          <label class="checkbox automatic-backup"><input id="backup-automatic" type="checkbox">采集任务完成后，自动备份到上述位置</label>
+          <p class="field-hint">自动备份默认关闭，只备份收藏资料与词库。完整备份还包含作品目录；封面缓存和 Cookie 不包含在备份中。</p>
+          <div class="maintenance-list-heading"><h3>这个位置的最近备份</h3><span>显示最近 10 份，旧备份会保留</span></div>
+          <div id="backup-list" class="backup-list"><p class="backup-empty">正在读取备份…</p></div>
+        </section>
+        <section class="maintenance-card maintenance-section" id="restore-section" aria-labelledby="restore-title">
+          <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↙</span><div><h2 id="restore-title">导入已有备份</h2><p>从备份恢复收藏数、阅读状态、黑名单、采集进度和中文词库。</p></div></div>
+          <label class="maintenance-field" for="restore-directory">备份文件夹</label>
+          <div class="maintenance-path-row"><input id="restore-directory" type="text" placeholder="粘贴包含 manifest.json 的那一份备份文件夹路径" autocomplete="off" spellcheck="false"><button class="button secondary" id="restore-browse">选择文件夹</button><button class="button primary" id="maintenance-check-restore" disabled>检查备份</button></div>
+          <p class="field-hint">可粘贴其他磁盘上的备份路径，也可点击上方备份的「导入这份」。选择具体的一份备份，而不是存放所有备份的父文件夹。</p>
+          <label class="checkbox"><input id="restore-full" type="checkbox">同时恢复作品目录（需要完整备份）</label>
+          <div id="prepared-restore" class="prepared-import" hidden>
+            <h3>备份已校验，可以导入</h3><p class="path-hint" id="restore-source"></p>
+            <dl class="restore-stats"><div><dt>收藏数记录</dt><dd id="restore-favorites">—</dd></div><div><dt>阅读状态标记</dt><dd id="restore-reading">—</dd></div><div><dt>采集计划</dt><dd id="restore-jobs">—</dd></div></dl>
+            <p id="restore-scope"></p>
+            <p class="maintenance-warning">导入会用备份中的资料替换当前对应资料。继续前会自动备份现有资料；导入后的采集计划保持暂停。</p>
+            <label class="checkbox"><input id="restore-confirm" type="checkbox">我确认将当前对应资料恢复为这份备份</label>
+            <button class="button primary" id="maintenance-restore" disabled>备份当前资料并导入</button>
+          </div>
+        </section>
+        <section class="maintenance-card maintenance-section" id="catalog-section" aria-labelledby="catalog-title">
+          <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↻</span><div><h2 id="catalog-title">更新作品目录</h2><p>导入已下载的新版目录，继续保留你的收藏资料和登录设置。</p></div></div>
+          <p>从 <a href="https://github.com/URenko/e-hentai-db/releases/tag/nightly" target="_blank" rel="noopener noreferrer">GitHub 发布页 ↗</a> 下载新的 <strong>e-hentai.db.zstd</strong>，放到下面的位置，再点击检查。</p>
+          <p class="path-hint" id="archive-path">—</p><p id="archive-state" class="field-hint"></p>
+          <label class="maintenance-hash">SHA-256 校验值（可选）<input id="archive-sha256" type="text" maxlength="64" placeholder="粘贴发布文件的校验值，或留空" autocomplete="off" spellcheck="false"></label>
+          <div class="maintenance-row"><span>自动解压 → 检查完整性 → 建立索引</span><button class="button primary" id="maintenance-prepare" disabled>检查并准备新版目录</button></div>
+          <div id="prepared-import" class="prepared-import" hidden><h3>新版目录已准备好</h3><table><thead><tr><th>项目</th><th>当前目录</th><th>准备导入</th></tr></thead><tbody><tr><td>作品记录</td><td id="import-old-count">—</td><td id="import-new-count">—</td></tr><tr><td>标签数量</td><td id="import-old-tags">—</td><td id="import-new-tags">—</td></tr><tr><td>最新作品发布日</td><td id="import-old-date">—</td><td id="import-new-date">—</td></tr></tbody></table><p id="import-warning" class="maintenance-warning" hidden></p><label id="allow-older-label" class="checkbox" hidden><input id="allow-older-import" type="checkbox">我确认要使用这个较旧的快照</label><p class="field-hint">应用时暂停采集，并自动完整备份旧版目录。</p><button class="button primary" id="maintenance-apply">备份旧版并应用更新</button></div>
+        </section>
+        <section class="maintenance-card maintenance-section" id="covers-section" aria-labelledby="covers-title">
+          <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">▧</span><div><h2 id="covers-title">封面缓存</h2><p>可见封面首次下载后保存在本机，再次查看直接读取缓存。</p></div></div>
+          <div class="cover-cache-stats"><div><span>已缓存</span><strong id="cover-cache-count">—</strong></div><div><span>缓存大小</span><strong id="cover-cache-size">—</strong></div><div><span>暂时失败</span><strong id="cover-cache-failed">—</strong></div></div>
+          <p class="path-hint">缓存位置：<span id="cover-cache-path">—</span></p><p class="field-hint">封面请求不携带登录 Cookie。失败地址 24 小时内不会重复请求；封面缓存可重新生成，不包含在资料备份中。</p>
+        </section>
+        <section id="maintenance-stop-confirm" class="maintenance-stop-confirm" hidden><h3>停止本地服务</h3><p>当前采集会暂停，已抓取的数据会保留。再次使用时，双击项目中的「启动搜索.cmd」。Cookie 只存在内存中，下次可重新填写或导入加密登录文件。</p><div class="collector-buttons"><button id="maintenance-stop" class="button stop-button">确认停止服务</button><button id="maintenance-stop-cancel" class="button secondary">继续使用</button></div></section>
+        <footer><span>EX资料库 · 资料库维护</span><a href="/records">查看我的记录 ↗</a></footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-label="封面暂不可用">
+  <rect width="240" height="320" fill="#edf1e8"/>
+  <rect x="58" y="72" width="124" height="164" rx="8" fill="none" stroke="#aebba5" stroke-width="7"/>
+  <circle cx="96" cy="116" r="14" fill="#bdc9b5"/>
+  <path d="M70 210l42-54 30 34 20-23 20 43z" fill="#bdc9b5"/>
+  <text x="120" y="273" text-anchor="middle" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="15" fill="#899780">封面暂不可用</text>
+</svg>

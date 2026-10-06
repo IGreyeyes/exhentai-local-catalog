@@ -1,4 +1,4 @@
-"""Local library backup and staged catalog replacement; no remote downloads."""
+"""Local library maintenance and official Tag dictionary updates."""
 
 from contextlib import closing
 from datetime import datetime, timezone
@@ -19,6 +19,7 @@ import time
 from initialize_catalog import initialize
 from prepare_database import prepare, inspect_database
 from favorites import FavoriteStore
+from update_translations import check_latest, compare_version, latest_release, local_status, update
 
 ROOT = Path(__file__).resolve().parent
 
@@ -134,6 +135,57 @@ class LibraryMaintenance:
         self.staging = self.data/".maintenance"
         self.prepared_file = self.data/"prepared-import.json"
         self.restore_file = self.data/"prepared-restore.json"
+        self.translation_check_path = self.data/"tag-translations-check.json"
+        self.translation_signature = None
+        self.translation_local = {}
+        self.translation_check_memory = None
+
+    def translation_status(self):
+        paths = [self.data/"tag-translations.json", self.data/"tag-translations-info.json"]
+        signature = tuple((path.stat().st_mtime_ns, path.stat().st_size) if path.is_file() else None for path in paths)
+        if signature != self.translation_signature:
+            self.translation_local = local_status(paths[0])
+            self.translation_signature = signature
+        local = dict(self.translation_local)
+        try:
+            checked = self.translation_check_memory if self.translation_check_memory is not None else read_json(self.translation_check_path, {})
+        except (OSError, ValueError):
+            checked = {}
+        if not isinstance(checked, dict):
+            checked = {}
+        matches = checked and checked.get("dictionary_sha256") == local.get("dictionary_sha256")
+        state = checked.get("state", "unchecked") if matches else "unchecked" if local.get("available") else "not_installed"
+        return {"local": local, "state": state, "latest": checked.get("latest"), "checked_at": checked.get("checked_at", "")}
+
+    def save_translation_check(self, result):
+        self.translation_check_memory = result
+        try:
+            save_json(self.translation_check_path, result)
+        except OSError:
+            result["message"] += " 本次结果已显示，但检查记录未能保存；请检查磁盘空间与文件权限。"
+
+    def check_translations(self, progress=lambda message: None):
+        progress("正在查询官方中文词库版本…")
+        result = check_latest(self.data/"tag-translations.json")
+        self.save_translation_check(result)
+        return result
+
+    def update_translations(self, reload_translations, progress=lambda message: None):
+        progress("正在核对官方最新词库版本…")
+        destination = self.data/"tag-translations.json"
+        latest = latest_release()
+        if compare_version(local_status(destination), latest) == "up_to_date":
+            changed = False
+            # Also reload when a CLI update has already installed the same release.
+            reload_translations()
+        else:
+            update(latest["download_url"], latest.get("archive_sha256") or None, destination, release=latest, progress=progress, on_installed=reload_translations)
+            changed = True
+        local = local_status(destination)
+        result = {"state": "up_to_date", "latest": latest, "checked_at": datetime.now(timezone.utc).isoformat(), "dictionary_sha256": local["dictionary_sha256"], "changed": changed, "message": "中文词库更新成功，已立即生效。已打开的搜索和记录页刷新后即可显示新译名。" if changed else "当前词库已是官方最新版本，并已载入；无需重复下载。"}
+        self.save_translation_check(result)
+        self.translation_signature = None
+        return result
 
     def backup_directory(self, value):
         if not isinstance(value,str) or len(value)>4096:raise ValueError("备份位置格式不正确。")
@@ -406,8 +458,9 @@ class LibraryMaintenance:
 
 
 class MaintenanceManager:
-    def __init__(self,engine,exclusive,reload_catalog):
+    def __init__(self,engine,exclusive,reload_catalog,reload_translations=None):
         self.engine,self.exclusive,self.reload_catalog=engine,exclusive,reload_catalog
+        self.reload_translations = reload_translations or (lambda: None)
         self.lock=threading.RLock()
         self.state_path=engine.data/"maintenance-state.json"
         self.settings_path=engine.data/"maintenance-settings.json"
@@ -452,7 +505,7 @@ finally:
 
     def status(self):
         with self.lock:
-            return {**self.state,"settings":dict(self.settings),"recent_tasks":list(self.history),"backup_directory":str(self.engine.backups),"default_backup_directory":str(self.engine.root/"backups"),"archive_path":str(self.engine.root/"e-hentai.db.zstd"),"archive_exists":(self.engine.root/"e-hentai.db.zstd").is_file(),"catalog_size":self.engine.catalog_path.stat().st_size if self.engine.catalog_path.exists() else 0,"prepared":self.engine.prepared(),"prepared_restore":self.engine.prepared_restore(),"backups":self.engine.list_backups()}
+            return {**self.state,"settings":dict(self.settings),"recent_tasks":list(self.history),"backup_directory":str(self.engine.backups),"default_backup_directory":str(self.engine.root/"backups"),"archive_path":str(self.engine.root/"e-hentai.db.zstd"),"archive_exists":(self.engine.root/"e-hentai.db.zstd").is_file(),"catalog_size":self.engine.catalog_path.stat().st_size if self.engine.catalog_path.exists() else 0,"prepared":self.engine.prepared(),"prepared_restore":self.engine.prepared_restore(),"backups":self.engine.list_backups(),"translations":self.engine.translation_status()}
 
     def publish(self,message,**updates):
         with self.lock:
@@ -480,7 +533,7 @@ finally:
         with self.lock:
             if self.stopping:raise ValueError("服务正在停止，暂时不能启动维护。")
             if self.state.get("busy"):raise ValueError("已有维护任务正在运行，请等待完成。")
-            if kind not in {"backup","prepare","apply","prepare-restore","restore"}:raise ValueError("未知维护操作。")
+            if kind not in {"backup","prepare","apply","prepare-restore","restore","translations-check","translations-update"}:raise ValueError("未知维护操作。")
             if not isinstance(include_catalog,bool) or not isinstance(allow_older,bool) or not isinstance(expected_sha256,str) or not isinstance(restore_path,str):raise ValueError("维护选项格式不正确。")
             self.state={"kind":kind,"phase":"running","message":"正在准备维护任务…","busy":True,"id":secrets.token_hex(8),"started_at":datetime.now(timezone.utc).isoformat()}
             task_id=self.state["id"]
@@ -498,7 +551,13 @@ finally:
 
     def _run(self,kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path):
         try:
-            if kind=="backup":
+            if kind=="translations-check":
+                result=self.engine.check_translations(self.publish)
+                message=result["message"]
+            elif kind=="translations-update":
+                result=self.engine.update_translations(self.reload_translations,self.publish)
+                message=result["message"]
+            elif kind=="backup":
                 result=self.engine.backup(include_catalog,reason,self.publish)
                 message="备份完成："+result["path"]
             elif kind=="prepare":

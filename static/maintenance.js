@@ -16,9 +16,31 @@
     ui("restore-confirm").disabled=working||!matches;
     ui("maintenance-restore").disabled=working||!matches||!ui("restore-confirm").checked;
     document.querySelectorAll(".backup-row button").forEach(button=>button.disabled=working);
+    const translationTask=state?.kind?.startsWith("translations-")&&state.busy;
+    ui("translation-check").disabled=working;
+    ui("translation-update").disabled=working;
+    ui("translation-check").textContent=translationTask&&state.kind==="translations-check"?"正在检查…":"检查更新";
+    ui("translation-update").textContent=translationTask&&state.kind==="translations-update"?"正在更新…":state?.translations?.local?.available?"更新到最新版":"安装中文词库";
+  }
+  function renderTranslations(){
+    const translations=state.translations||{},local=translations.local||{},latest=translations.latest;
+    const labels={unchecked:"尚未检查更新",not_installed:"尚未安装中文词库",up_to_date:"已是官方最新版本",update_available:"发现新版词库",unknown:"需要核对词库版本"};
+    const task=state.kind?.startsWith("translations-")?state:[...(state.recent_tasks||[])].reverse().find(item=>item.kind?.startsWith("translations-"));
+    const running=task?.busy,failed=task?.phase==="failed"||task?.phase==="interrupted";
+    ui("translation-state").textContent=running?(task.kind==="translations-check"?"正在检查官方版本…":"正在更新中文词库…"):failed?(task.phase==="interrupted"?"上次词库操作被中断":task.kind==="translations-check"?"检查更新失败":"词库更新失败"):labels[translations.state]||labels.unchecked;
+    ui("translation-state").className=`translation-badge ${failed?"failed":running?"working":translations.state||"unchecked"}`;
+    ui("translation-local-version").textContent=local.available?(local.release_tag||local.revision?.slice(0,8)||"版本未记录"):"未安装";
+    ui("translation-entry-count").textContent=local.available?number(local.entry_count):"—";
+    const formatted=value=>{if(!value)return "—";const when=new Date(value);return Number.isNaN(when.getTime())?value:when.toLocaleString("zh-CN",{timeZone:"Asia/Hong_Kong"});};
+    ui("translation-local-date").textContent=formatted(local.updated_at||local.downloaded_at);
+    ui("translation-latest-version").textContent=latest?.tag||"尚未检查";
+    ui("translation-checked-at").textContent=translations.checked_at?formatted(translations.checked_at):"尚未检查";
+    ui("translation-feedback").textContent=task?.message||(local.error||"点击「检查更新」查询官方版本；检查本身不会安装词库。");
+    ui("translation-feedback").classList.toggle("error",Boolean(failed||local.error));
   }
   function render(){
     if(!state)return;
+    renderTranslations();
     ui("backup-path").textContent=state.backup_directory;
     if(!directoryLoaded){ui("backup-directory").value=state.backup_directory;directoryLoaded=true;}
     ui("archive-path").textContent=state.archive_path;
@@ -122,6 +144,8 @@
   ui("maintenance-check-restore").onclick=()=>{ui("restore-confirm").checked=false;action("prepare-restore",{path:ui("restore-directory").value.trim(),include_catalog:ui("restore-full").checked});};
   ui("maintenance-restore").onclick=()=>{if(state?.prepared_restore&&ui("restore-confirm").checked)action("restore",{prepared_id:state.prepared_restore.id});};
   ui("maintenance-prepare").onclick=()=>action("prepare",{sha256:ui("archive-sha256").value.trim()});
+  ui("translation-check").onclick=()=>action("translations-check");
+  ui("translation-update").onclick=()=>action("translations-update");
   ui("allow-older-import").onchange=controls;
   ui("maintenance-apply").onclick=()=>{if(state?.prepared)action("apply",{prepared_id:state.prepared.id,allow_older:ui("allow-older-import").checked});};
   function showStop(){ui("maintenance-stop-confirm").hidden=false;ui("maintenance-stop-confirm").scrollIntoView({block:"nearest",behavior:"smooth"});}

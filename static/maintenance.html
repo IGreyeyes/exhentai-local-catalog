@@ -24,8 +24,8 @@
     <main>
       <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>资料库维护</strong></span><div class="topbar-actions"><span class="connection" id="connection"><i></i> 正在连接本地服务</span><a class="button secondary" href="/">标签搜索</a><a class="button secondary" href="/records">已记录</a><button class="button secondary" id="maintenance-stop-request">停止服务</button></div></header>
       <div class="main-content">
-        <section class="intro"><div class="eyebrow">LIBRARY CARE</div><h1>管理资料，安心保存。</h1><p>选择备份位置、导入已有备份，或更新本地作品目录。</p></section>
-        <nav class="maintenance-tabs" aria-label="维护功能"><a href="#backup-section">备份资料</a><a href="#restore-section">导入备份</a><a href="#catalog-section">更新作品目录</a><a href="#covers-section">封面缓存</a></nav>
+        <section class="intro"><div class="eyebrow">LIBRARY CARE</div><h1>管理资料，安心保存。</h1><p>备份与恢复资料，更新作品目录和中文词库。</p></section>
+        <nav class="maintenance-tabs" aria-label="维护功能"><a href="#backup-section">备份资料</a><a href="#restore-section">导入备份</a><a href="#catalog-section">更新作品目录</a><a href="#translations-section">中文词库</a><a href="#covers-section">封面缓存</a></nav>
         <div id="maintenance-status" class="maintenance-status" role="status" aria-live="polite">维护工具正在连接…</div>
         <section class="maintenance-card maintenance-section" id="backup-section" aria-labelledby="backup-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↗</span><div><h2 id="backup-title">备份我的资料</h2><p>保存收藏数、阅读状态、黑名单、采集进度、中文词库和程序文件。</p></div></div>
@@ -61,6 +61,15 @@
           <label class="maintenance-hash">SHA-256 校验值（可选）<input id="archive-sha256" type="text" maxlength="64" placeholder="粘贴发布文件的校验值，或留空" autocomplete="off" spellcheck="false"></label>
           <div class="maintenance-row"><span>自动解压 → 检查完整性 → 建立索引</span><button class="button primary" id="maintenance-prepare" disabled>检查并准备新版目录</button></div>
           <div id="prepared-import" class="prepared-import" hidden><h3>新版目录已准备好</h3><table><thead><tr><th>项目</th><th>当前目录</th><th>准备导入</th></tr></thead><tbody><tr><td>作品记录</td><td id="import-old-count">—</td><td id="import-new-count">—</td></tr><tr><td>标签数量</td><td id="import-old-tags">—</td><td id="import-new-tags">—</td></tr><tr><td>最新作品发布日</td><td id="import-old-date">—</td><td id="import-new-date">—</td></tr></tbody></table><p id="import-warning" class="maintenance-warning" hidden></p><label id="allow-older-label" class="checkbox" hidden><input id="allow-older-import" type="checkbox">我确认要使用这个较旧的快照</label><p class="field-hint">应用时暂停采集，并自动完整备份旧版目录。</p><button class="button primary" id="maintenance-apply">备份旧版并应用更新</button></div>
+        </section>
+        <section class="maintenance-card maintenance-section" id="translations-section" aria-labelledby="translations-title">
+          <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">译</span><div><h2 id="translations-title">中文词库</h2><p>检查官方版本，一键更新标签译名。更新成功后立即生效。</p></div></div>
+          <div class="translation-heading"><strong id="translation-state" class="translation-badge">正在读取本地词库…</strong><a href="https://github.com/EhTagTranslation/Database" target="_blank" rel="noopener noreferrer">EhTagTranslation 官方词库 ↗</a></div>
+          <dl class="translation-stats"><div><dt>本地版本</dt><dd id="translation-local-version">—</dd></div><div><dt>词条数量</dt><dd id="translation-entry-count">—</dd></div><div><dt>词库日期</dt><dd id="translation-local-date">—</dd></div><div><dt>官方最新版</dt><dd id="translation-latest-version">尚未检查</dd></div></dl>
+          <p class="path-hint">最近检查：<span id="translation-checked-at">尚未检查</span></p>
+          <div class="translation-actions"><button class="button secondary" id="translation-check" disabled>检查更新</button><button class="button primary" id="translation-update" disabled>更新到最新版</button></div>
+          <p id="translation-feedback" class="translation-feedback" role="status" aria-live="polite">点击「检查更新」查询官方版本；检查本身不会安装词库。</p>
+          <p class="field-hint">检查和下载需要网络。更新失败会保留原词库；成功后刷新已打开的搜索或记录页即可显示新译名，无需停止服务。词库只用于标签，不翻译作品标题。</p>
         </section>
         <section class="maintenance-card maintenance-section" id="covers-section" aria-labelledby="covers-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">▧</span><div><h2 id="covers-title">封面缓存</h2><p>可见封面首次下载后保存在本机，再次查看直接读取缓存。</p></div></div>

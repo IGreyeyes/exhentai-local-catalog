@@ -11,6 +11,8 @@ import sys
 import time
 import webbrowser
 
+from first_run import prepare_library
+
 ROOT = Path(__file__).resolve().parent
 BASE_URL = "http://127.0.0.1:8765"
 APP_ID = "local-tag-catalog-v1"
@@ -48,9 +50,8 @@ def main():
             raise RuntimeError("The current request is still finishing. Please wait before restarting.")
         print("Catalog stopped.")
         return
-    if not any((ROOT/"data"/name).is_file() for name in ("catalog.sqlite3","catalog-swap.json","restore-swap.json")):
-        raise FileNotFoundError("Database missing. Run prepare_database.py and initialize_catalog.py first.")
     if not running():
+        prepare_library(ROOT)
         (ROOT / "logs").mkdir(exist_ok=True)
         with (ROOT / "logs" / "server.log").open("ab") as log:
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

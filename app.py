@@ -392,7 +392,7 @@ class Server(ThreadingHTTPServer):
         self.collector = Collector(catalog)
         project_root = catalog.path.parent.parent if catalog.path.parent.name=="data" else catalog.path.parent
         self.cover_cache = CoverCache(project_root/"data"/"covers", project_root/"data"/"covers.sqlite3")
-        self.maintenance = MaintenanceManager(LibraryMaintenance(catalog.path,project_root),self.exclusive_maintenance,self.reload_catalog)
+        self.maintenance = MaintenanceManager(LibraryMaintenance(catalog.path,project_root),self.exclusive_maintenance,self.reload_catalog,self.reload_translations)
         self.collector.on_completed = self.maintenance.on_collection_completed
 
     @contextmanager
@@ -416,6 +416,15 @@ class Server(ThreadingHTTPServer):
             stored=db.execute("SELECT value FROM collector_state WHERE key='cooldown_until'").fetchone()
             cooldown=db.execute("SELECT MAX(cooldown_until) FROM jobs").fetchone()[0] or 0
         self.collector.cooldown_until=max(self.collector.cooldown_until,cooldown,stored[0] if stored else 0)
+
+    def reload_translations(self):
+        with self.catalog_gate:
+            translations = Translations(self.catalog.path.with_name("tag-translations.json"), self.catalog.available_tags)
+            if not translations.status()["available"]:
+                raise ValueError("新版词库无法载入，原词库已保留。")
+            self.catalog.translations = translations
+            with self.collector.lock:
+                self.collector.preview_data = None
 
     def request_stop(self):
         self.maintenance.reserve_stop()
@@ -561,7 +570,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("请求格式不正确。")
             if self.path.startswith("/api/maintenance/"):
                 manager=self.server.maintenance
-                if self.path.endswith("/backup"):
+                if self.path in {"/api/maintenance/translations-check", "/api/maintenance/translations-update"}:
+                    if payload:
+                        raise ValueError("词库操作不接受自定义下载地址或额外选项。")
+                    result=manager.start(self.path.rsplit("/",1)[1])
+                elif self.path.endswith("/backup"):
                     result=manager.start("backup",include_catalog=payload.get("include_catalog",False))
                 elif self.path.endswith("/prepare"):
                     result=manager.start("prepare",expected_sha256=payload.get("sha256",""))

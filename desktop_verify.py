@@ -88,6 +88,35 @@ def verify_desktop(report_path):
                     if not state["content"] or state["bridge"] != "function" or state["platform"] != "function":
                         raise AssertionError(state)
                     report["checks"].append({"page": page, **state})
+                    client = promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#client-check-update')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Update UI did not initialize'));}},50);})")
+                    if not client:
+                        raise AssertionError("Client update controls missing")
+                    if page == "/":
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#client-update-dialog[open]')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Update notes did not open'));}},50);})")
+                        styled = window.evaluate_js("(()=>{const dialog=document.querySelector('#client-update-dialog'),notes=dialog.querySelector('.client-release-notes');return {width:dialog.getBoundingClientRect().width,font:getComputedStyle(notes).fontSize,items:notes.querySelectorAll('li').length,highlights:notes.querySelectorAll('strong').length,display:getComputedStyle(dialog).display};})()")
+                        if not 620 <= styled["width"] <= 680 or styled["font"] != "14px" or styled["items"] < 1 or styled["display"] != "flex":
+                            raise AssertionError(styled)
+                        report["checks"].append({"styled_update_dialog":styled})
+                        asset = promise("fetch('/client-updates.css').then(r=>({status:r.status,type:r.headers.get('Content-Type')}))")
+                        if asset["status"] != 200 or not asset["type"].startswith("text/css"):
+                            raise AssertionError(asset)
+                        result = promise("window.pywebview.api.client_info()")
+                        if not result.get("show_notes"):
+                            raise AssertionError("New version notes were not pending")
+                        promise("window.pywebview.api.acknowledge_client_notes()")
+                        window.evaluate_js("document.querySelector('#client-update-dialog').close()")
+                        report["checks"].append("client version and native notes acknowledgement bridge work")
+                    else:
+                        result = promise("window.pywebview.api.client_info()")
+                        if result.get("show_notes"):
+                            raise AssertionError("Read notes were shown again after navigation")
+                    if page == "/records":
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('.saved-card')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Records did not load'));}},50);})")
+                        for mode in ("minimal", "minimal-tags", "compact", "extended", "thumbnails"):
+                            check_view = window.evaluate_js("(()=>{const select=document.querySelector('#record-view');select.value=" + json.dumps(mode) + ";select.dispatchEvent(new Event('change'));return {cards:document.querySelectorAll('.saved-card').length,overflow:document.documentElement.scrollWidth>innerWidth+1};})()")
+                            if check_view["cards"] != 1 or check_view["overflow"]:
+                                raise AssertionError(check_view)
+                        report["checks"].append("all five record views render in actual packaged WebView2")
                 stage("search API")
                 result = promise("fetch('/api/search?tag=language%3Aenglish').then(r=>r.json()).then(d=>({total:d.total}))")
                 if result["total"] != 1:

@@ -7,6 +7,7 @@
   <title>EX资料库 · 本地 Tag 搜索</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/client-updates.css">
   <script src="/app.js" defer></script>
   <script src="/collector.js" defer></script>
   <script src="/service.js" defer></script>
@@ -79,7 +80,7 @@
               <h3>1. 配置源站访问</h3>
               <div class="filter-grid">
                 <label>采集源站<select id="collector-host"><option value="exhentai.org">ExHentai</option><option value="e-hentai.org">E-Hentai</option></select></label>
-                <label>请求间隔（秒）<input id="collector-interval" type="number" min="3" max="60" value="4"></label>
+                <label>请求间隔<select id="collector-interval"><option value="4" selected>4 秒（默认）</option><option value="3.5">3.5 秒</option><option value="3">3 秒</option><option value="2.5">2.5 秒</option><option value="2">2 秒</option><option value="1.5">1.5 秒</option><option value="1">1 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option><option value="60">60 秒</option></select></label>
                 <label>缓存刷新周期<select id="collector-refresh"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option><option value="custom">自定义天数</option></select></label>
               </div>
               <div class="filter-grid collection-mode-grid"><label>采集模式<select id="collector-mode"><option value="rounds" selected>分轮抓取 · 每轮结束自动停止（推荐）</option><option value="batch">分批补充 · 每次挑选一批</option><option value="full">全量采集所有待处理作品</option></select></label><label>每轮 / 每批抓取数量<select id="collector-batch-size"><option value="100">100 条</option><option value="300">300 条</option><option value="1000" selected>1,000 条</option><option value="3000">3,000 条</option><option value="5000">5,000 条</option><option value="custom">自定义数量</option></select></label></div>

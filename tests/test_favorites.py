@@ -82,8 +82,18 @@ class FavoriteCollectionTests(unittest.TestCase):
     def ready(self):
         self.collector.configure({'host':'exhentai.org','ipb_member_id':'123','ipb_pass_hash':'test-secret-hash','igneous':'test-igneous','interval':3})
         self.collector.verify(self.query)
-        # Only mocked requests use this tiny interval; the public API enforces >=3s.
+        # Only mocked requests use this tiny interval; the public API enforces >=1s.
         self.collector.settings['interval']=0.001
+
+    def test_request_intervals_and_restart_default(self):
+        for seconds in (4,3.5,3,2.5,2,1.5,1,60):
+            status = self.collector.configure({'host':'e-hentai.org','interval':seconds})
+            self.assertEqual(status['interval'],seconds)
+        for seconds in (0.5,61,True,float('nan'),float('inf')):
+            with self.subTest(seconds=seconds),self.assertRaises(ValueError):
+                self.collector.configure({'host':'e-hentai.org','interval':seconds})
+        restarted = Collector(self.catalog,self.fetch)
+        self.assertEqual(restarted.status()['interval'],4)
 
     def finish(self):
         if self.collector.thread:

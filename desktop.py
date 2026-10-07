@@ -16,6 +16,7 @@ import threading
 import webbrowser
 
 from runtime_paths import library_root, resource_root
+from desktop_updates import ClientUpdater
 
 TITLE = "藏目 · ExHentai 资料库"
 WEBVIEW_HELP = "https://developer.microsoft.com/microsoft-edge/webview2/"
@@ -67,6 +68,39 @@ class DesktopApi:
         self._session = session
         self._window = None
         self._dialog_lock = threading.Lock()
+        self._updates = ClientUpdater(session.root)
+        self._install_callback = None
+
+    def _local_page(self):
+        current = urlparse(self._window.get_current_url() or "")
+        base = urlparse(self._session.base_url or "")
+        if current.scheme != "http" or not base.netloc or current.netloc != base.netloc:
+            raise ValueError("请从本机资料库页面操作客户端更新。")
+
+    def _update_action(self, action):
+        try:
+            self._local_page()
+            return action()
+        except Exception as error:
+            return {"error": str(error)}
+
+    def client_info(self):
+        return self._update_action(self._updates.info)
+
+    def acknowledge_client_notes(self):
+        return self._update_action(self._updates.acknowledge)
+
+    def check_client_update(self):
+        return self._update_action(self._updates.check)
+
+    def prepare_client_update(self):
+        return self._update_action(self._updates.prepare)
+
+    def client_update_status(self):
+        return self._update_action(lambda: dict(self._updates.state))
+
+    def install_client_update(self):
+        return self._update_action(lambda: self._install_callback() if self._install_callback else {"error": "更新入口尚未准备好。"})
 
     def save_attachment(self, endpoint):
         try:
@@ -178,10 +212,43 @@ def open_desktop(root):
             if api._dialog_lock.locked():
                 notice("文件保存窗口已打开，请先完成保存或取消，再退出应用。")
                 return False
+            if api._updates.lock.locked():
+                notice("正在检查或下载客户端更新，请等待处理完成后退出。")
+                return False
             if not state["closing"]:
                 state["closing"] = True
                 threading.Thread(target=stop, name="safe-desktop-exit", daemon=False).start()
             return False
+
+    def install_update():
+        with gate:
+            if state["closing"] or state["starting"] or api._dialog_lock.locked():
+                raise ValueError("请等待当前窗口操作结束，再安装更新。")
+            if api._updates.state["phase"] != "ready":
+                raise ValueError("请先下载并校验新版客户端。")
+            if session.server.maintenance.status().get("busy") or session.server.maintenance.picker_lock.locked():
+                raise ValueError("请先完成维护任务或关闭文件选择窗口，再安装更新。")
+            state["closing"] = True
+            api._updates.state = {"phase": "installing", "message": "正在保存采集进度并安装更新…", "percent": 100}
+
+        def install():
+            try:
+                window.set_title("正在保存进度并更新客户端…")
+                session.close()
+                api._updates.launch_installer()
+                state["closed"] = True
+                window.destroy()
+            except Exception as error:
+                logging.exception("Client update was deferred")
+                state["closing"] = False
+                api._updates.state = {"phase": "ready", "message": "本次安装未开始：" + str(error), "percent": 100}
+                window.set_title(TITLE)
+                notice(str(error))
+
+        threading.Thread(target=install, name="safe-client-update", daemon=False).start()
+        return {"installing": True}
+
+    api._install_callback = install_update
 
     window.events.closing += closing
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
@@ -212,6 +279,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path)
     options, remaining = parser.parse_known_args()
+    if remaining and remaining[0] == "--apply-client-update":
+        from desktop_updates import apply_update
+        return apply_update(Path(remaining[1]))
     if remaining and remaining[0] == "--verify-desktop":
         from desktop_verify import verify_desktop
         return verify_desktop(Path(remaining[1]))

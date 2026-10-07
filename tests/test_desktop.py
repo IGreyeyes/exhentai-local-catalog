@@ -64,6 +64,13 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(result["total"], 1)
         with urlopen(url + "/platform.js") as response:
             self.assertIn(b"catalogSaveAttachment", response.read())
+        with urlopen(url + "/client-updates.css") as response:
+            self.assertEqual(response.status,200)
+            self.assertTrue(response.headers["Content-Type"].startswith("text/css"))
+            self.assertIn(b".client-update-dialog",response.read())
+        for page in ("/", "/records", "/maintenance"):
+            with urlopen(url + page) as response:
+                self.assertIn(b'href="/client-updates.css"',response.read())
         self.session.close()
         self.assertFalse(self.session.thread.is_alive())
         self.assertEqual(hashlib.sha256(self.database.read_bytes()).digest(), before)
@@ -140,6 +147,20 @@ class DesktopTests(unittest.TestCase):
                 self.assertIn("error", api.save_attachment("/api/maintenance/favorites-export"))
             self.assertEqual(protected.read_bytes(), b"runtime sentinel")
         self.assertIn("error", api.save_attachment("https://example.com"))
+
+    def test_update_bridge_rejects_remote_pages_and_persists_notes(self):
+        self.start()
+        api = DesktopApi(self.session)
+        api._window = SimpleNamespace(get_current_url=lambda: "https://example.com")
+        self.assertIn("error",api.client_info())
+        self.assertIn("error",api.acknowledge_client_notes())
+        with patch.object(api._updates,"check") as check:
+            self.assertIn("error",api.check_client_update())
+            check.assert_not_called()
+        api._window = SimpleNamespace(get_current_url=lambda: self.session.base_url)
+        self.assertTrue(api.client_info()["show_notes"])
+        self.assertTrue(api.acknowledge_client_notes()["acknowledged"])
+        self.assertFalse(api.client_info()["show_notes"])
 
     def test_packaged_backups_include_exe_and_runtime_without_changing_database(self):
         exe = self.root / "ExCatalog.exe"

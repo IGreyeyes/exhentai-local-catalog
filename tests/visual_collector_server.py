@@ -31,6 +31,13 @@ def main():
             db.executemany("INSERT INTO gallery(gid,token,title,title_jpn,category,posted,filecount,rating) VALUES (?,'abcdef0123','示例作品','','Non-H',1760000000,10,'4.0')",((gid,) for gid in range(1,10002)))
             db.executemany('INSERT INTO gid_tid VALUES(?,1)',((gid,) for gid in range(1,10002)))
     catalog = Catalog(path)
+    if len(sys.argv)>2 and sys.argv[2]=='features':
+        with sqlite3.connect(path) as db:
+            db.execute("INSERT OR IGNORE INTO tag VALUES(2,'artist:example')")
+            for gid,category in enumerate(('Doujinshi','Image Set','Artist CG','Manga','Game CG','Misc'),1):
+                db.execute("UPDATE gallery SET category=?,title=? WHERE gid=?",(category,'示例作品 · '+category,gid))
+                db.execute("INSERT OR IGNORE INTO gid_tid VALUES(?,2)",(gid,))
+        for gid in range(1,7):catalog.favorites.save(gid,gid*1234,'e-hentai.org')
     if len(sys.argv)>2 and sys.argv[2]=='failures':
         for gid,count in ((1,842),(2,0),(3,288)):catalog.favorites.save(gid,count,'e-hentai.org')
         with catalog.favorites.connection() as db:

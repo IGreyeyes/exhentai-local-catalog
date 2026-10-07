@@ -435,7 +435,7 @@ class Collector:
             return {
                 "configured": bool(self.settings), "verified": self.verified,
                 "has_credentials": bool(settings.get("cookies")),
-                "host": settings.get("host","exhentai.org"), "interval": settings.get("interval",4),
+                "host": settings.get("host","exhentai.org"), "interval": (self.settings or {}).get("interval",4),
                 "proxy": settings.get("proxy",""), "refresh_days": settings.get("refresh_days",7),
                 "skip_existing": settings.get("skip_existing",False),
                 "collection_mode": settings.get("collection_mode","rounds"),
@@ -473,13 +473,16 @@ class Collector:
                     parsed.port
                 except ValueError:
                     raise ValueError("代理端口不正确。") from None
-            interval = float(values.get("interval",4))
+            raw_interval = values.get("interval",4)
+            if isinstance(raw_interval, bool):
+                raise ValueError("请求间隔须为 1～60 秒。")
+            interval = float(raw_interval)
             raw_days = values.get("refresh_days",7)
             if isinstance(raw_days,bool) or not re.fullmatch(r"[0-9]+",str(raw_days)):
                 raise ValueError("缓存刷新天数须为整数。")
             days = int(raw_days)
-            if not 3 <= interval <= 60 or not 1 <= days <= 3650:
-                raise ValueError("请求间隔须为 3～60 秒，刷新周期须为 1～3650 天。")
+            if not math.isfinite(interval) or not 1 <= interval <= 60 or not 1 <= days <= 3650:
+                raise ValueError("请求间隔须为 1～60 秒，刷新周期须为 1～3650 天。")
             skip_existing = values.get("skip_existing",False)
             if not isinstance(skip_existing,bool):
                 raise ValueError("跳过已采集选项须为开关值。")

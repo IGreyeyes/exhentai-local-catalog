@@ -3,6 +3,15 @@
   let state=null,token="",actionBusy=false,pollBusy=false,settingsDirty=false;
   let preview=null,previewRevision=0,initialStatus=true,errorRowsKey="";
   const ui=id=>document.getElementById(id);
+  function acceptState(data){
+    if(state?.job?.state==="running"&&data.job?.state!=="running"&&Number(ui("collector-interval").value)!==4){ui("collector-interval").value="4";settingsDirty=true;invalidatePreview();}
+    state=data;render();
+  }
+  ui("collector-interval").onchange=()=>{
+    const seconds=Number(ui("collector-interval").value);
+    if(seconds<4&&!window.confirm(`你选择了 ${seconds} 秒请求间隔。\n\n抓取过快可能不符合源站规定，导致限流、账号或 IP 被封禁。4 秒默认值也不保证不会受限，请遵守网站规则。\n\n是否仍使用这个速度？`))ui("collector-interval").value="4";
+    settingsDirty=true;invalidatePreview();render();
+  };
   const labels={running:"采集中",paused:"已暂停",awaiting_next:"本轮已结束 · 等待继续",completed:"采集完成",completed_with_errors:"已处理完 · 有失败项",cancelled:"任务已结束",preparing:"正在准备"};
   function feedback(text,error=false){ui("collector-feedback").textContent=text;ui("collector-feedback").classList.toggle("error",error);}
   function refreshDays(){return Number(ui("collector-refresh").value==="custom"?ui("collector-custom-days").value:ui("collector-refresh").value);}
@@ -186,7 +195,9 @@
   async function refresh(){
     if(pollBusy||actionBusy||window.catalogStopped||window.catalogMaintenanceActive)return;
     pollBusy=true;
-    try{const response=await fetch("/api/collector");if(response.ok){const data=await response.json();if(!actionBusy){state=data;render();}}}
+    try{const response=await fetch("/api/collector");if(response.ok){const data=await response.json();if(!actionBusy){
+      acceptState(data);
+    }}}
     catch(error){ /* The next local status poll can recover. */ }
     finally{pollBusy=false;}
   }
@@ -207,7 +218,7 @@
       else feedback({settings:"设置已应用。可先预估耗时，再确认采集。",start:data.job?.state==="completed"?data.job.message:"计划已保存，本轮已开始采集，可随时暂停。",next_round:"下一轮已开始。本轮结束后会再次自动停止。",next_batch:data.job?.state==="completed"?data.job.message:"下一批已开始采集，沿用上一批的搜索条件。",pause:"已请求暂停，正在发出的请求会等待结束。",resume:"已按预估继续采集。",retry:"已按预估重试失败项。",cancel:"任务已结束，已采集的收藏数保留。"}[path]||"操作完成。");
       if(path==="settings") {settingsDirty=false;["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");}
       if(path!=="preview"&&path!=="verify"){
-        state=data;render();
+        acceptState(data);
         focusProgress=["start","next_round","next_batch","resume","retry"].includes(path);
       }
       if(path==="verify"&&submittedFilters) await search(responseData?.page||1,false,false);
@@ -269,7 +280,7 @@
       const response=await fetch("/api/status");
       const data=await response.json();token=data.action_token||"";
       await refresh();
-      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=state.proxy;ui("collector-interval").value=state.interval;ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);updateControls();}
+      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=state.proxy;ui("collector-interval").value=state.busy?String(state.interval):"4";settingsDirty=Boolean(state.configured&&!state.busy&&state.interval!==4);ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);updateControls();}
     }catch(error){feedback("采集工具尚未连接，请重新启动服务后刷新页面。",true);}
   })();
   setInterval(()=>{if(!document.hidden)refresh();},3000);

@@ -3,6 +3,10 @@
   const $=id=>document.getElementById(id);
   const number=value=>Number(value||0).toLocaleString("zh-CN");
   const categories={Doujinshi:"同人志",Manga:"漫画","Artist CG":"画师 CG","Game CG":"游戏 CG","Image Set":"图片集","Non-H":"非成人内容",Western:"欧美作品",Cosplay:"角色扮演","Asian Porn":"亚洲写真",Misc:"其他",private:"私有记录"};
+  const categoryStyles={Doujinshi:"doujinshi",Manga:"manga","Artist CG":"artist-cg","Game CG":"game-cg","Image Set":"image-set","Non-H":"non-h",Western:"western",Cosplay:"cosplay","Asian Porn":"asian-porn",Misc:"misc"};
+  const views=["minimal","minimal-tags","compact","extended","thumbnails"];
+  let view="extended";
+  try{const saved=localStorage.getItem("records-view");if(views.includes(saved))view=saved;}catch(failure){ /* Storage can be disabled. */ }
   const sources={"exhentai.org":"ExHentai","e-hentai.org":"E-Hentai"};
   const stateNames={none:"未分类",planned:"待看",reading:"在看",watched:"看过",ignored:"不看"};
   const labels=new Map();
@@ -126,7 +130,15 @@
   }
   function renderTagSummary(item){
     const groups=groupedTags(item),total=item.tags.length,section=node("section","saved-tag-section");
-    if(!total)return section;
+    if(!total||["minimal","thumbnails"].includes(view))return section;
+    if(view==="minimal-tags"){
+      const relevant=groups.flatMap(group=>group.items).filter(part=>part.matched);
+      if(!relevant.length)relevant.push(...groups.filter(group=>["language","artist","parody"].includes(group.namespace)).flatMap(group=>group.items).slice(0,12));
+      section.append(...relevant.map(tagButton));section.classList.add("saved-focus-tags");return section;
+    }
+    if(view==="compact"){
+      section.classList.add("saved-flat-tags");section.append(...groups.flatMap(group=>group.items).map(tagButton));return section;
+    }
     const all=node("div","saved-tag-preview saved-tag-all-visible");
     all.append(...groups.map(group=>tagGroupRow(group,group.items)));
     section.append(all);
@@ -135,10 +147,12 @@
   function recordCard(item){
     const failed=item.collection_status==="failed",hasCount=item.favorite_count!=null;
     const card=node("article",`saved-card${failed?" failed":""}${selected.has(item.gid)?" selected":""}`);const content=node("div","saved-content");
-    const cover=node("div","saved-cover"),image=node("img");image.src=item.cover_path||"/cover-placeholder.svg";image.alt="";image.loading="lazy";image.decoding="async";image.width=176;image.height=235;image.onerror=()=>{if(!image.src.endsWith("/cover-placeholder.svg"))image.src="/cover-placeholder.svg";};cover.append(image);card.append(cover);
+    if(["extended","thumbnails"].includes(view)){
+      const cover=node("div","saved-cover"),image=node("img");image.src=item.cover_path||"/cover-placeholder.svg";image.alt="";image.loading="lazy";image.decoding="async";image.width=176;image.height=235;image.onerror=()=>{if(!image.src.endsWith("/cover-placeholder.svg"))image.src="/cover-placeholder.svg";};cover.append(image);card.append(cover);
+    }
     const head=node("div","saved-card-head");
     const choose=node("input","record-select");choose.type="checkbox";choose.checked=selected.has(item.gid);choose.setAttribute("aria-label",`选择作品 ID ${item.gid}`);choose.onchange=()=>{choose.checked?selected.add(item.gid):selected.delete(item.gid);render();};head.append(choose);
-    head.append(node("span","category-badge",item.metadata_available?(categories[item.category]||item.category||"未分类"):"目录信息缺失"));
+    head.append(node("span",`category-badge gallery-category category-${categoryStyles[item.category]||"misc"}`,item.metadata_available?(categories[item.category]||item.category||"未分类"):"目录信息缺失"));
     head.append(node("span",`collection-badge ${failed?"failed":"success"}`,failed?(hasCount?"刷新失败":"抓取失败"):"采集成功"));
     if(item.replaced)head.append(node("span","record-state","旧版本"));
     if(item.removed||item.expunged)head.append(node("span","record-state","已移除 / 隐藏"));
@@ -147,6 +161,7 @@
     else head.append(node("span","opened-badge","从未点开"));
     head.append(node("span","saved-id",`ID ${item.gid}`));content.append(head);
     const link=sourceURL(item.source_url),title=node(link?"a":"span","saved-title",item.title||item.title_jpn||`作品 ID ${item.gid}`);
+    const captured=dateParts(item.recorded_at||item.checked_at);title.title=`${title.textContent}\nID ${item.gid} · ${sources[item.source]||"来源未知"}\n记录于 ${captured.date} ${captured.time}`;
     if(link){title.href=link;title.target="_blank";title.rel="noopener noreferrer";trackLink(title,item);}content.append(title);
     if(item.title_jpn&&item.title_jpn!==item.title)content.append(node("p","saved-subtitle",item.title_jpn));
     const details=node("div","saved-metadata");
@@ -209,7 +224,7 @@
       }
       $("records-list").replaceChildren(empty);$("records-pagination").hidden=true;
     }else{
-      const list=node("div","saved-list");list.append(...current.items.map(recordCard));$("records-list").replaceChildren(list);
+      const list=node("div",`saved-list view-${view}`);list.append(...current.items.map(recordCard));$("records-list").replaceChildren(list);
       $("records-pagination").hidden=false;$("records-range").textContent=`显示 ${number((current.page-1)*current.limit+1)}–${number((current.page-1)*current.limit+current.items.length)} / ${number(current.total)} 条`;
       $("records-page").value=current.page;$("records-page").max=current.pages;$("records-pages").textContent=`/ ${number(current.pages)} 页`;
     }
@@ -264,6 +279,8 @@
   $("select-record-page").onchange=event=>{for(const item of current?.items||[]){event.target.checked?selected.add(item.gid):selected.delete(item.gid);}render();};
   $("clear-record-selection").onclick=()=>{selected.clear();render();};
   $("apply-bulk-state").onclick=()=>setState([...selected],$("bulk-record-state").value);
+  $("record-view").value=view;
+  $("record-view").onchange=()=>{view=$("record-view").value;try{localStorage.setItem("records-view",view);}catch(failure){}if(current)render();};
   window.addEventListener("popstate",restore);
   (async()=>{
     try{const response=await fetch("/api/status");const status=await response.json();if(!response.ok)throw new Error(status.error||"无法读取服务状态");actionToken=status.action_token||"";restore();}

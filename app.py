@@ -538,6 +538,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 files = {"/": ("index.html", "text/html"), "/records": ("records.html", "text/html"), "/records/": ("records.html", "text/html"), "/maintenance": ("maintenance.html", "text/html"), "/maintenance/": ("maintenance.html", "text/html"), "/maintenance.css": ("maintenance.css", "text/css"), "/service.js": ("service.js", "text/javascript"), "/records.js": ("records.js", "text/javascript"), "/records.css": ("records.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/collector.js": ("collector.js", "text/javascript"), "/maintenance.js": ("maintenance.js", "text/javascript"), "/style.css": ("style.css", "text/css"), "/favicon.svg": ("favicon.svg", "image/svg+xml"), "/cover-placeholder.svg": ("cover-placeholder.svg", "image/svg+xml")}
                 files["/platform.js"] = ("platform.js", "text/javascript")
+                files["/client-updates.css"] = ("client-updates.css", "text/css")
                 if request.path not in files:
                     self.reply({"error": "页面不存在。"}, status=404)
                     return

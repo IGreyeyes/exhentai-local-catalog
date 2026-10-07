@@ -1,0 +1,53 @@
+.client-update-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.client-version { font-size: 10px; color: #829178; margin-right: 2px; }
+.client-update-controls .button { font-size: 11px; padding: 7px 10px; }
+.client-update-dialog {
+  width: min(660px, calc(100vw - 40px));
+  max-width: none;
+  max-height: min(760px, calc(100dvh - 48px));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #dce5d8;
+  border-radius: 18px;
+  background: #fff;
+  color: #294331;
+  font-family: inherit;
+  box-shadow: 0 24px 90px #14251c35;
+}
+.client-update-dialog[open] { display: flex; flex-direction: column; }
+.client-update-dialog::backdrop { background: #14251c66; }
+.client-update-header { display: flex; align-items: center; gap: 16px; padding: 27px 30px 23px; border-bottom: 1px solid #edf1e9; flex-shrink: 0; }
+.client-update-icon { display: grid; place-items: center; width: 46px; height: 46px; flex-shrink: 0; border-radius: 14px; background: #eaf3e7; color: #3b6f48; font-size: 24px; font-weight: 600; }
+.client-update-heading { min-width: 0; }
+.client-update-eyebrow { margin: 0 0 5px; font-size: 11px; color: #7a8c72; }
+.client-update-dialog h2 { font-size: 22px; line-height: 1.45; margin: 0; overflow-wrap: anywhere; }
+.client-update-body { padding: 23px 30px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.client-release-notes { font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
+.client-release-notes p { margin: 0 0 14px; }
+.client-release-notes h3 { font-size: 15px; font-weight: 650; line-height: 1.6; margin: 19px 0 10px; }
+.client-release-notes h3:first-child { margin-top: 0; }
+.client-note-list { margin: 0 0 16px; padding-left: 23px; }
+.client-note-list li { padding-left: 6px; margin: 0 0 13px; }
+.client-note-list li:last-child { margin-bottom: 0; }
+.client-note-list li::marker { color: #63845b; font-size: 12px; font-weight: 600; }
+.client-release-notes strong { font-weight: 650; color: #284d32; }
+.client-release-notes code { font-size: 12px; padding: 2px 5px; border-radius: 4px; background: #f0f4ec; word-break: break-word; }
+.client-update-message { margin: 18px 0 0; padding: 12px 14px; border-radius: 8px; background: #f3f7ef; font-size: 12px; line-height: 1.75; color: #76866a; overflow-wrap: anywhere; }
+.client-release-notes[hidden] + .client-update-message { margin-top: 0; }
+.client-update-message.error { color: #a05734; background: #fff3e9; }
+.client-update-dialog progress { width: 100%; height: 7px; margin-top: 17px; accent-color: #668b49; }
+.client-update-actions { display: flex; flex-shrink: 0; justify-content: flex-end; gap: 10px; padding: 17px 30px 22px; border-top: 1px solid #edf1e9; background: #fbfcf9; }
+.client-update-actions .button { min-width: 98px; min-height: 39px; justify-content: center; }
+.topbar:has(.client-update-controls) { height: auto; min-height: 74px; padding-top: 12px; padding-bottom: 12px; }
+.topbar:has(.client-update-controls) .topbar-actions { flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 760px) {
+  .client-update-controls .button { font-size: 10px; }
+  .client-update-dialog { width: calc(100vw - 28px); max-height: calc(100dvh - 28px); border-radius: 14px; }
+  .client-update-header { gap: 12px; padding: 21px 20px 19px; }
+  .client-update-icon { width: 40px; height: 40px; border-radius: 12px; font-size: 21px; }
+  .client-update-dialog h2 { font-size: 19px; }
+  .client-update-body { padding: 20px; }
+  .client-release-notes { font-size: 13px; }
+  .client-update-actions { padding: 15px 20px 18px; }
+}

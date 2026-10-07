@@ -97,6 +97,10 @@ powershell -ExecutionPolicy Bypass -File build_desktop.ps1
 
 - `dist/ExCatalog/ExCatalog.exe`：完整文件夹版中的启动程序。
 - `dist/ExCatalog-Windows-x64.zip`：可分发的完整程序包。
+- `dist/SHA256SUMS.txt`：压缩包的 SHA-256 校验值。
+- `dist/RELEASE_NOTES.md`：可复制到 GitHub Releases 的中文更新说明。
+
+构建前扫描将上传的源码；打包后扫描 ZIP、内置 ZIP 和 exe 中的解压 Python 模块，检查本机用户路径、明显密钥及个人资料文件。任何检查失败都不能上传。另可运行 `.venv-desktop\Scripts\python.exe -X utf8 verify_release.py --package dist/ExCatalog-Windows-x64.zip`。
 
 构建不会收集 `data`、`logs`、`backups` 或作品压缩包。若发布输出目录已有用户资料，脚本会拒绝覆盖，请先另存资料。
 
@@ -258,3 +262,11 @@ py -3.14 -m unittest discover -s tests -v
 测试使用临时目录 / 数据库、模拟源站响应，覆盖查询、标签汉化、收藏数解析与缓存、预估确认、分批 / 分轮队列、失败记录、阅读状态、采集身份生成与迁移、原采集者转存、自己 / 他人 / 未知采集者的合并规则、旧版文件兼容、封面处理、加密登录文件、在线备份、目录更新回退、恢复与停止服务等行为，不需要真实账号或真实采集。真实源站访问需在本地页面通过 **验证并读取一条**单独确认。
 
 `tests/visual_*.cjs` 与 `tests/visual_collector_server.py` 是浏览器回归辅助脚本，使用 Node.js / Playwright 等额外开发工具，不属于普通运行依赖，也不会随上述 `unittest` 命令执行。部分脚本包含本机测试环境路径，运行前需按自己的环境调整。
+
+## 发布新版客户端
+
+遵循 `AGENTS.md` 的持续要求。每次用户功能更新：同步递增 `client_version.py` 的版本并填写中文更新内容，更新用户 README 与 `RELEASE_NOTES.md`，运行单元测试、构建脚本与隔离 exe 验证。
+
+用户在 GitHub Desktop 中检查并提交源码后，在本仓库 Releases 创建对应的正式版本标签（本次为 `v1.1.1`），复制 `dist/RELEASE_NOTES.md` 的内容，上传 `dist/ExCatalog-Windows-x64.zip` 和 `dist/SHA256SUMS.txt`。GitHub 自动记录上传资产的 SHA-256 digest，应用更新器会读取并核对它。只上传上述公开发布文件，不要上传整个项目文件夹、日志、数据、备份或构建中间文件。发布完成后，通过客户端检查更新，核对版本号与资产名称。
+
+客户端更新说明的已读版本保存在 `data/client-update-state.json`，属于本机配置，不写入发布包。安装器只替换允许清单内的程序文件，下载包含个人资料、路径穿越、重复成员、链接或校验不符时拒绝安装。

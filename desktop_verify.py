@@ -1,0 +1,145 @@
+"""Exercise the actual packaged WebView2 against an isolated miniature library."""
+
+from contextlib import closing, redirect_stdout
+from pathlib import Path
+import base64
+import hashlib
+import io
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+import threading
+import faulthandler
+import traceback
+
+
+def verify_desktop(report_path):
+    import webview
+    from desktop import DesktopApi
+    from desktop_service import DesktopSession
+    from initialize_catalog import initialize
+    report_path = report_path.resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {"passed": False, "frozen": bool(getattr(sys, "frozen", False)), "python": sys.version.split()[0], "checks": []}
+    trace_file = report_path.with_suffix(".stack.txt").open("w", encoding="utf-8")
+    faulthandler.dump_traceback_later(25, file=trace_file)
+    def stage(value):
+        report["stage"] = value
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="excatalog-desktop-check-") as directory:
+        root = Path(directory)
+        data = root / "data"
+        data.mkdir()
+        import tkinter
+        picker = tkinter.Tk()
+        picker.withdraw()
+        picker.destroy()
+        report["checks"].append("bundled Tk file-dialog runtime initializes")
+        database = data / "catalog.sqlite3"
+        with closing(sqlite3.connect(database)) as db:
+            db.executescript("""
+                CREATE TABLE gallery(gid INTEGER PRIMARY KEY,token TEXT,title TEXT,title_jpn TEXT,category TEXT,posted INTEGER,filecount INTEGER,rating TEXT,removed INTEGER DEFAULT 0,replaced INTEGER DEFAULT 0,expunged INTEGER DEFAULT 0);
+                CREATE TABLE tag(id INTEGER PRIMARY KEY,name TEXT UNIQUE);
+                CREATE TABLE gid_tid(gid INTEGER,tid INTEGER);
+                INSERT INTO gallery VALUES(1,'abcdef0123','Desktop verification','','Non-H',1,10,'4.0',0,0,0);
+                INSERT INTO tag VALUES(1,'language:english');
+                INSERT INTO gid_tid VALUES(1,1);
+            """)
+        with redirect_stdout(io.StringIO()):
+            initialize(database)
+        (data / "tag-translations.json").write_text(json.dumps({"data":[{"namespace":"language","data":{"english":{"name":"英语"}}}]}), encoding="utf-8")
+        before = hashlib.sha256(database.read_bytes()).hexdigest()
+        session = DesktopSession(root)
+        url = session.start(lambda message: None)
+        session.server.catalog.favorites.save(1, 123, "exhentai.org")
+        api = DesktopApi(session)
+        window = webview.create_window("桌面版隔离验证", url=url, js_api=api, width=1360, height=900, hidden=True)
+        api._window = window
+
+        def promise(script):
+            event = threading.Event()
+            value = []
+            def done(result):
+                value.append(result)
+                event.set()
+            window.evaluate_js(script, callback=done)
+            if not event.wait(20):
+                raise TimeoutError("WebView2 JavaScript verification timed out")
+            return value[0]
+
+        def check():
+            try:
+                stage("waiting for WebView2 page")
+                if not window.events.loaded.wait(30):
+                    raise TimeoutError("WebView2 did not load")
+                report["renderer"] = window.gui.renderer
+                if report["renderer"] != "edgechromium":
+                    raise AssertionError("Embedded renderer is not WebView2")
+                for page, selector in (("/", "#search-form"), ("/records", "#records-list"), ("/maintenance", "#favorites-export")):
+                    stage("loading " + page)
+                    if page != "/":
+                        window.events.loaded.clear()
+                        window.load_url(url + page)
+                        if not window.events.loaded.wait(30):
+                            raise TimeoutError("Page did not load: " + page)
+                    state = window.evaluate_js("({title:document.title, content:!!document.querySelector(" + json.dumps(selector) + "), bridge:typeof window.pywebview?.api?.save_attachment, platform:typeof window.catalogSaveAttachment})")
+                    if not state["content"] or state["bridge"] != "function" or state["platform"] != "function":
+                        raise AssertionError(state)
+                    report["checks"].append({"page": page, **state})
+                stage("search API")
+                result = promise("fetch('/api/search?tag=language%3Aenglish').then(r=>r.json()).then(d=>({total:d.total}))")
+                if result["total"] != 1:
+                    raise AssertionError(result)
+                report["checks"].append("search returns fixture record")
+                stage("native export bridge")
+                destination = root / "export.json"
+                real_dialog = window.create_file_dialog
+                window.create_file_dialog = lambda *args, **kwargs: (str(destination),)
+                try:
+                    result = promise("window.pywebview.api.save_attachment('/api/maintenance/favorites-export')")
+                finally:
+                    window.create_file_dialog = real_dialog
+                if result.get("error") or result.get("record_count") != 1 or not destination.is_file():
+                    raise AssertionError(result)
+                report["checks"].append("native bridge exports favorites to chosen file")
+                # Capture only this application-owned test page, never the user's desktop.
+                stage("screenshot")
+                from System import Action, Func, Object, String
+                from System.Threading.Tasks import Task
+                form = window.gui.BrowserView.instances[window.uid]
+                task = form.Invoke(Func[Object](lambda: form.browser.webview.CoreWebView2.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", '{"format":"png","captureBeyondViewport":false}')))
+                captured = threading.Event()
+                captures = []
+                def captured_image(completed):
+                    captures.append(str(completed.Result))
+                    captured.set()
+                task.ContinueWith(Action[Task[String]](captured_image))
+                if not captured.wait(10):
+                    raise TimeoutError("WebView2 screenshot timed out")
+                screenshot = json.loads(captures[0])["data"]
+                report_path.with_suffix(".png").write_bytes(base64.b64decode(screenshot))
+                report["checks"].append("WebView2 rendered screenshot")
+                session.close()
+                if before != hashlib.sha256(database.read_bytes()).hexdigest():
+                    raise AssertionError("Catalog changed during desktop checks")
+                report["checks"].append("safe shutdown leaves catalog bytes unchanged")
+                report["passed"] = True
+            except Exception:
+                report["error"] = traceback.format_exc()
+            finally:
+                session.close(wait_for_maintenance=True)
+                report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                window.destroy()
+
+        try:
+            webview.start(check, gui="edgechromium", private_mode=True)
+        except Exception:
+            report["error"] = traceback.format_exc()
+            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        finally:
+            session.close(wait_for_maintenance=True)
+    faulthandler.cancel_dump_traceback_later()
+    trace_file.close()
+    return 0 if report["passed"] else 1

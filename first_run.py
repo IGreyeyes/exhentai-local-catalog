@@ -67,7 +67,7 @@ def prepare_library(root, progress=None):
         if not database.is_file():
             archive = root / "e-hentai.db.zstd"
             if not archive.is_file():
-                raise ValueError("请先下载 e-hentai.db.zstd 并放到项目根目录，再双击「首次安装.cmd」或「启动搜索.cmd」。下载地址：https://github.com/URenko/e-hentai-db/releases/tag/nightly")
+                raise ValueError("请先下载 e-hentai.db.zstd 并放到程序文件夹，再重新打开应用。下载地址：https://github.com/URenko/e-hentai-db/releases/tag/nightly")
             if database.with_suffix(".sqlite3.partial").exists():
                 raise ValueError("上次解压未完成。请确认没有其他准备任务，核对并另存 data/catalog.sqlite3.partial 后再重试；不要将未完成文件直接改名为正式数据库。")
             progress("[1/3] 首次准备：正在解压作品目录，请保持窗口打开…")

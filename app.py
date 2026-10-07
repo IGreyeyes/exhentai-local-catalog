@@ -25,8 +25,10 @@ from covers import CoverCache, CoverUnavailable
 from credentials import export_credentials, import_credentials
 from favorite_transfer import MAX_FILE_BYTES
 from collector_identity import MAX_IDENTITY_BYTES, parse_identity
+from runtime_paths import library_lock, library_root, resource_root
 
-ROOT = Path(__file__).resolve().parent
+ROOT = library_root()
+STATIC_ROOT = resource_root() / "static"
 APP_ID = "local-tag-catalog-v1"
 SORTS = {
     "newest": "g.posted DESC, g.gid DESC",
@@ -515,7 +517,7 @@ class Handler(BaseHTTPRequestHandler):
                     path, content_type = self.server.cover_cache.get(source)
                     self.reply_file(path, content_type)
                 except (ValueError, CoverUnavailable):
-                    self.reply_file(ROOT / "static" / "cover-placeholder.svg", "image/svg+xml", "private, max-age=3600")
+                    self.reply_file(STATIC_ROOT / "cover-placeholder.svg", "image/svg+xml", "private, max-age=3600")
             elif request.path.startswith("/api/"):
                 with self.server.catalog_gate:
                     if request.path == "/api/status":
@@ -535,11 +537,12 @@ class Handler(BaseHTTPRequestHandler):
                     else:self.reply({"error":"接口不存在。"},status=404)
             else:
                 files = {"/": ("index.html", "text/html"), "/records": ("records.html", "text/html"), "/records/": ("records.html", "text/html"), "/maintenance": ("maintenance.html", "text/html"), "/maintenance/": ("maintenance.html", "text/html"), "/maintenance.css": ("maintenance.css", "text/css"), "/service.js": ("service.js", "text/javascript"), "/records.js": ("records.js", "text/javascript"), "/records.css": ("records.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/collector.js": ("collector.js", "text/javascript"), "/maintenance.js": ("maintenance.js", "text/javascript"), "/style.css": ("style.css", "text/css"), "/favicon.svg": ("favicon.svg", "image/svg+xml"), "/cover-placeholder.svg": ("cover-placeholder.svg", "image/svg+xml")}
+                files["/platform.js"] = ("platform.js", "text/javascript")
                 if request.path not in files:
                     self.reply({"error": "页面不存在。"}, status=404)
                     return
                 filename, mime = files[request.path]
-                self.reply((ROOT / "static" / filename).read_bytes(), mime + "; charset=utf-8")
+                self.reply((STATIC_ROOT / filename).read_bytes(), mime + "; charset=utf-8")
         except ValueError as exc:
             self.reply({"error": str(exc)}, status=400)
         except (sqlite3.OperationalError, TimeoutError):
@@ -739,14 +742,21 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args()
+    root = args.database.resolve().parent.parent if args.database.parent.name == "data" else args.database.resolve().parent
+    with library_lock(root):
+        serve(args, root)
+
+
+def serve(args, root):
     recovery=recover_import(args.database)
     if recovery:print(recovery,flush=True)
     catalog = Catalog(args.database)
     server = Server(("127.0.0.1", args.port), catalog)
-    runtime = ROOT / "logs" / f"server-{args.port}.json"
+    runtime = root / "logs" / f"server-{server.server_port}.json"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
     runtime.parent.mkdir(exist_ok=True)
-    runtime.write_text(json.dumps({"port": args.port, "token": server.shutdown_token}), encoding="utf-8")
-    print(f"Ready: http://127.0.0.1:{args.port} | {catalog.info['gallery_count']:,} catalog records", flush=True)
+    runtime.write_text(json.dumps({"port": server.server_port, "token": server.shutdown_token}), encoding="utf-8")
+    print(f"Ready: http://127.0.0.1:{server.server_port} | {catalog.info['gallery_count']:,} catalog records", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

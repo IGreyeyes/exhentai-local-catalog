@@ -15,3 +15,9 @@
 ## 作品元数据库
 
 本地基础作品目录来自用户下载的 [URenko/e-hentai-db](https://github.com/URenko/e-hentai-db/releases/tag/nightly)。它与标签译文库是两个独立数据来源。
+
+## 桌面版运行组件
+
+Windows 桌面版额外包含 Python 运行环境、[pywebview](https://github.com/r0x0r/pywebview)（BSD 3-Clause）、[Python.NET](https://github.com/pythonnet/pythonnet)（MIT）及其运行依赖。使用 PyInstaller 构建，适用其允许分发打包程序的许可例外。随发行包附带的许可文本位于 `_internal/licenses`。
+
+内嵌网页使用 Microsoft Edge WebView2 SDK 的运行组件；WebView2 Evergreen Runtime 由系统或用户通过微软官方下载页安装，适用微软相关许可。程序包不包含作品数据库、译文数据库、个人资料或登录信息。

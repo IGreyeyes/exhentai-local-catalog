@@ -223,11 +223,8 @@
     if(actionBusy)return;
     actionBusy=true;updateControls();feedback("正在生成仅限当前 Windows 用户使用的加密登录文件…");
     try{
-      const response=await fetch("/api/credentials/export",{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:"{}"});
-      if(!response.ok){const data=await response.json();throw new Error(data.error||"登录文件导出失败。");}
-      const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
-      link.href=url;link.download="exhentai-login.ehcred";document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-      feedback("加密登录文件已导出。它只能由这台电脑上的当前 Windows 用户解密。");
+      const result=await window.catalogSaveAttachment("/api/credentials/export","exhentai-login.ehcred",token);
+      feedback(result.cancelled?"已取消导出。":"加密登录文件已导出。"+window.catalogExportLocation()+"它只能由这台电脑上的当前 Windows 用户解密。");
     }catch(error){feedback(error.message==="Failed to fetch"?"无法连接本地服务，登录文件没有导出。":error.message,true);}
     finally{actionBusy=false;updateControls();}
   }

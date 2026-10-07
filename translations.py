@@ -5,10 +5,11 @@ See THIRD_PARTY_NOTICES.md. This module does not render upstream HTML or images.
 """
 
 from pathlib import Path
+from runtime_paths import library_root
 import json
 import sys
 
-DEFAULT_TRANSLATIONS = Path(__file__).resolve().parent / "data" / "tag-translations.json"
+DEFAULT_TRANSLATIONS = library_root() / "data" / "tag-translations.json"
 SOURCE = "https://github.com/EhTagTranslation/Database"
 LICENSE = "CC BY-NC-SA 3.0 CN"
 SEARCH_ALIASES = {

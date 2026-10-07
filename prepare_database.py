@@ -3,13 +3,14 @@
 from compression import zstd
 from contextlib import closing
 from pathlib import Path
+from runtime_paths import library_root
 import argparse
 import hashlib
 import sqlite3
 import shutil
 import time
 
-ROOT = Path(__file__).resolve().parent
+ROOT = library_root()
 DEFAULT_DATABASE = ROOT / "data" / "catalog.sqlite3"
 
 

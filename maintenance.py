@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 
 from initialize_catalog import initialize
@@ -22,8 +23,9 @@ from favorites import FavoriteStore
 from favorite_transfer import MAX_FILE_BYTES, export_snapshot, merge_snapshot, parse_snapshot, preview_snapshot
 from collector_identity import export_identity, parse_identity, read_identity, validate_collector
 from update_translations import check_latest, compare_version, latest_release, local_status, update
+from runtime_paths import helper_command, library_root, resource_root
 
-ROOT = Path(__file__).resolve().parent
+ROOT = library_root()
 
 
 def save_json(path, value):
@@ -271,6 +273,8 @@ class LibraryMaintenance:
         path = path.resolve()
         if path==self.root or path==self.data or path.is_relative_to(self.data) or path.is_relative_to(self.root/"static"):
             raise ValueError("请选择独立备份文件夹，不能使用程序或数据文件夹。")
+        if getattr(sys,"frozen",False) and (path==Path(sys.executable).resolve().parent or path.is_relative_to(resource_root())):
+            raise ValueError("请选择独立备份文件夹，不能使用程序运行文件夹。")
         if path.exists() and not path.is_dir():raise ValueError("备份位置必须是文件夹。")
         return path
 
@@ -307,6 +311,21 @@ class LibraryMaintenance:
                 source=contained(source,self.root)
                 shutil.copy2(source,temporary/source.name)
                 files.append(source.name)
+        if getattr(sys, "frozen", False):
+            progress("备份桌面程序运行文件")
+            program_files = [Path(sys.executable)]
+            internal = Path(sys.executable).parent / "_internal"
+            if internal.is_dir():
+                program_files.extend(path for path in internal.rglob("*") if path.is_file())
+            required = sum(path.stat().st_size for path in program_files)
+            if shutil.disk_usage(temporary).free < required + 100*1024**2:
+                raise ValueError("磁盘剩余空间不足，无法备份桌面程序。")
+            for source in program_files:
+                relative = source.relative_to(Path(sys.executable).parent)
+                destination = temporary / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                files.append(relative.as_posix())
         static = self.root/"static"
         if static.is_dir():
             for source in static.iterdir():
@@ -573,7 +592,16 @@ finally:
             initial_path=Path(initial).expanduser() if initial.strip() else self.engine.backups
             while not initial_path.is_dir() and initial_path!=initial_path.parent:initial_path=initial_path.parent
             flags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0
-            result=subprocess.run([sys.executable,"-X","utf8","-c",script,"选择备份保存位置" if purpose=="backup" else "选择要导入的备份文件夹",str(initial_path),purpose],capture_output=True,text=True,encoding="utf-8",timeout=300,creationflags=flags)
+            title="选择备份保存位置" if purpose=="backup" else "选择要导入的备份文件夹"
+            if getattr(sys,"frozen",False):
+                with tempfile.TemporaryDirectory(prefix="folder-picker-",dir=self.engine.data) as folder:
+                    result_path=Path(folder)/"result.json"
+                    command=helper_command("--pick-directory",result_path,title,initial_path,purpose)
+                    result=subprocess.run(command,capture_output=True,text=True,encoding="utf-8",timeout=300,creationflags=flags)
+                    if result.returncode or not result_path.is_file():raise ValueError("无法打开文件夹选择窗口，请直接粘贴文件夹的完整路径。")
+                    return json.loads(result_path.read_text(encoding="utf-8"))
+            command=[sys.executable,"-X","utf8","-c",script,title,str(initial_path),purpose]
+            result=subprocess.run(command,capture_output=True,text=True,encoding="utf-8",timeout=300,creationflags=flags)
             if result.returncode:raise ValueError("无法打开文件夹选择窗口，请直接粘贴文件夹的完整路径。")
             return json.loads(result.stdout)
         except subprocess.TimeoutExpired as error:
@@ -729,7 +757,8 @@ def command_line():
     parser.add_argument("action",choices=["backup","import"])
     parser.add_argument("--full",action="store_true",help="Include the large base catalog in backups")
     options=parser.parse_args()
-    subprocess.run([sys.executable,str(ROOT/"launch.py"),"--no-browser"],cwd=ROOT,check=True)
+    command=helper_command("--ensure-service") if getattr(sys,"frozen",False) else [sys.executable,str(resource_root()/"launch.py"),"--no-browser"]
+    subprocess.run(command,cwd=ROOT,check=True)
     root="http://127.0.0.1:8765"
     with urlopen(root+"/api/status") as response:token=json.load(response)["action_token"]
     def post(action,payload):

@@ -162,7 +162,7 @@
       const result=await response.json();if(!response.ok)throw new Error(result.error||"操作失败");
       if(name==="stop"){
         window.catalogStopped=true;ui("connection").textContent="本地服务正在退出";
-        message("服务已停止，采集进度已保存。再次使用时，请双击「启动搜索.cmd」，然后刷新本页。");
+        message(window.catalogDesktop?"服务已停止，采集进度已保存。请关闭窗口，重新打开应用即可继续使用。":"服务已停止，采集进度已保存。再次使用时，请双击「启动搜索.cmd」，然后刷新本页。");
         document.querySelectorAll("button,input,select").forEach(control=>control.disabled=true);ui("maintenance-stop-confirm").hidden=true;
       }else{
         state={...result,cover_cache:result.cover_cache||state?.cover_cache};render();
@@ -209,12 +209,7 @@
   };
   ui("favorites-confirm").onchange=controls;
   async function downloadAttachment(path,fallback){
-    const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:"{}"});
-    if(!response.ok){const failure=await response.json();throw new Error(failure.error||"文件导出失败");}
-    const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
-    link.href=url;link.download=response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]||fallback;
-    document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-    return response;
+    return window.catalogSaveAttachment(path,fallback,token);
   }
   ui("collector-identity-generate").onclick=async()=>{if(await action("collector-identity-create",{collector_name:ui("collector-name").value.trim()})){identityEditing=false;controls();identityMessage("昵称已保存，采集者 ID 保持不变。停止服务后重新打开仍会保留。");}};
   ui("collector-name-edit").onclick=()=>{identityEditing=true;controls();ui("collector-name").focus();};
@@ -222,7 +217,7 @@
   ui("collector-name-save").onclick=async()=>{if(await action("collector-name",{collector_name:ui("collector-name").value.trim()})){identityEditing=false;controls();identityMessage("昵称已修改，采集者 ID 保持不变。");}};
   ui("collector-identity-export").onclick=async()=>{
     if(busy)return;busy=true;controls();
-    try{await downloadAttachment("/api/maintenance/collector-identity-export","collector-identity.ehcollector.json");identityMessage("采集身份已导出，请在浏览器下载列表查看。换电脑时使用这个文件迁移自己的 ID。");}
+    try{const result=await downloadAttachment("/api/maintenance/collector-identity-export","collector-identity.ehcollector.json");identityMessage(result.cancelled?"已取消导出。":"采集身份已导出。"+window.catalogExportLocation()+"换电脑时使用这个文件迁移自己的 ID。");}
     catch(error){identityMessage(error.message,true);}finally{busy=false;controls();}
   };
   ui("collector-identity-file").onchange=()=>{invalidateIdentity();identityMessage("点击「检查采集身份」核对 ID 和昵称，再确认迁移。");};
@@ -242,8 +237,8 @@
   ui("favorites-export").onclick=async()=>{
     if(busy)return;busy=true;controls();favoritesMessage("正在生成收藏数文件…");
     try{
-      const response=await downloadAttachment("/api/maintenance/favorites-export","favorites.ehfavorites.json");
-      favoritesMessage(`已导出 ${number(response.headers.get("X-Favorite-Record-Count"))} 条收藏数，请在浏览器下载列表查看。文件保留原始抓取时间和原采集者。`);
+      const result=await downloadAttachment("/api/maintenance/favorites-export","favorites.ehfavorites.json");
+      favoritesMessage(result.cancelled?"已取消导出。":`已导出 ${number(result.record_count)} 条收藏数。${window.catalogExportLocation()}文件保留原始抓取时间和原采集者。`);
     }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导出。":error.message,true);}
     finally{busy=false;controls();}
   };

@@ -12,8 +12,9 @@ import time
 import webbrowser
 
 from first_run import prepare_library
+from runtime_paths import helper_command, library_lock, library_root
 
-ROOT = Path(__file__).resolve().parent
+ROOT = library_root()
 BASE_URL = "http://127.0.0.1:8765"
 APP_ID = "local-tag-catalog-v1"
 
@@ -51,11 +52,13 @@ def main():
         print("Catalog stopped.")
         return
     if not running():
-        prepare_library(ROOT)
+        with library_lock(ROOT):
+            prepare_library(ROOT)
         (ROOT / "logs").mkdir(exist_ok=True)
         with (ROOT / "logs" / "server.log").open("ab") as log:
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            process = subprocess.Popen([sys.executable, "-u", str(ROOT / "app.py")], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags, start_new_session=os.name != "nt")
+            command = helper_command("--serve") if getattr(sys, "frozen", False) else [sys.executable, "-u", str(Path(__file__).resolve().parent / "app.py")]
+            process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log, creationflags=flags, start_new_session=os.name != "nt")
         for _ in range(60):
             if running():
                 break

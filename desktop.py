@@ -93,6 +93,15 @@ class DesktopApi:
     def check_client_update(self):
         return self._update_action(self._updates.check)
 
+    def start_client_update_check(self):
+        return self._update_action(self._updates.start_startup_check)
+
+    def startup_client_update_status(self):
+        return self._update_action(self._updates.startup_status)
+
+    def take_startup_update_prompt(self):
+        return self._update_action(self._updates.take_startup_prompt)
+
     def prepare_client_update(self):
         return self._update_action(self._updates.prepare)
 
@@ -212,7 +221,7 @@ def open_desktop(root):
             if api._dialog_lock.locked():
                 notice("文件保存窗口已打开，请先完成保存或取消，再退出应用。")
                 return False
-            if api._updates.lock.locked():
+            if api._updates.lock.locked() and api._updates.startup_status()["phase"] != "checking":
                 notice("正在检查或下载客户端更新，请等待处理完成后退出。")
                 return False
             if not state["closing"]:

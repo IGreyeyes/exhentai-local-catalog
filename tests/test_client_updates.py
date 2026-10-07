@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 
@@ -68,6 +69,42 @@ class ClientUpdateTests(unittest.TestCase):
             self.assertTrue(self.updater.info()["show_notes"])
         (self.root / "data" / "client-update-state.json").write_text("broken", encoding="utf-8")
         self.assertTrue(self.updater.info()["show_notes"])
+
+    def test_startup_check_runs_once_and_notification_is_consumed_once(self):
+        document=json.dumps(self.release()).encode()
+        entered,finish=threading.Event(),threading.Event()
+        def response(*args,**kwargs):
+            entered.set()
+            if not finish.wait(5):raise TimeoutError("Test release check timed out")
+            return io.BytesIO(document)
+        with patch.object(self.updater.opener,"open",side_effect=response) as network:
+            self.updater.start_startup_check()
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(self.updater.start_startup_check()["phase"],"checking")
+            finish.set();self.updater._startup_thread.join(5)
+            self.assertFalse(self.updater._startup_thread.is_alive())
+            self.assertEqual(self.updater.start_startup_check()["phase"],"completed")
+            self.assertEqual(network.call_count,1)
+        self.assertTrue(self.updater.take_startup_prompt()["prompt"])
+        self.assertFalse(self.updater.take_startup_prompt()["prompt"])
+        self.assertIsNone(self.updater.workspace)
+        reopened=updates.ClientUpdater(self.root)
+        with patch.object(reopened.opener,"open",return_value=io.BytesIO(document)) as network:
+            reopened.start_startup_check();reopened._startup_thread.join(5)
+            self.assertEqual(network.call_count,1)
+        self.assertTrue(reopened.take_startup_prompt()["prompt"])
+
+    def test_startup_check_without_update_or_when_offline_stays_quiet(self):
+        with patch.object(self.updater.opener,"open",return_value=io.BytesIO(json.dumps({"tag_name":APP_VERSION}).encode())):
+            self.updater.start_startup_check();self.updater._startup_thread.join(5)
+        self.assertEqual(self.updater.startup_status()["phase"],"completed")
+        self.assertFalse(self.updater.take_startup_prompt()["prompt"])
+        offline=updates.ClientUpdater(self.root)
+        with patch.object(offline.opener,"open",side_effect=TimeoutError("Offline test")) as network:
+            offline.start_startup_check();offline._startup_thread.join(5)
+            self.assertEqual(offline.start_startup_check()["phase"],"failed")
+            self.assertEqual(network.call_count,1)
+        self.assertFalse(offline.take_startup_prompt()["prompt"])
 
     def unpack(self, raw):
         archive = self.root / "package.zip"

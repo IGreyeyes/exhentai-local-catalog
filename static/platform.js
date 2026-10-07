@@ -65,10 +65,27 @@
     title.id="client-update-title";message.id="client-update-message";dialog.setAttribute("aria-labelledby",title.id);dialog.setAttribute("aria-describedby",message.id);icon.setAttribute("aria-hidden","true");
     progress.max=100;progress.hidden=true;install.hidden=true;install.id="client-install-update";close.id="client-notes-read";
     heading.append(eyebrow,title);header.append(icon,heading);body.append(notes,message,progress);actions.append(close,install);dialog.append(header,body,actions);document.body.append(dialog);
-    let info=null,release=null,currentNotes=false,busy=false,phase="idle",poll=null;
+    let info=null,release=null,currentNotes=false,busy=false,phase="idle",poll=null,startupPending=false,startupTimer=null,startupPolling=false;
     const show=()=>{if(!dialog.open)dialog.showModal();};
     const result=async promise=>{const value=await promise;if(value.error)throw new Error(value.error);return value;};
-    function buttons(){check.disabled=busy||phase==="ready";update.disabled=busy||!release?.available||!info?.can_install;install.disabled=busy;install.hidden=!release?.available||!info?.can_install||currentNotes;update.textContent=phase==="ready"?"安装客户端更新":"更新客户端";install.textContent=phase==="ready"?"安装并重新打开":"下载并更新";close.classList.toggle("primary",currentNotes);close.classList.toggle("secondary",!currentNotes);}
+    function buttons(){check.disabled=busy||startupPending||phase==="ready";update.disabled=busy||!release?.available||!info?.can_install;install.disabled=busy;install.hidden=!release?.available||!info?.can_install||currentNotes;update.textContent=phase==="ready"?"安装客户端更新":"更新客户端";install.textContent=phase==="ready"?"安装并重新打开":"下载并更新";close.classList.toggle("primary",currentNotes);close.classList.toggle("secondary",!currentNotes);}
+    async function pollStartupCheck(){
+      if(!api.startup_client_update_status||startupPolling)return;
+      startupPolling=true;clearTimeout(startupTimer);
+      try{
+        const state=await result(api.startup_client_update_status());startupPending=state.phase==="checking";buttons();
+        if(startupPending){check.title="正在自动检查客户端更新…";startupTimer=setTimeout(pollStartupCheck,750);return;}
+        if(state.phase==="failed"){check.title="启动检查未完成，可点击此按钮重试。";return;}
+        check.title="手动检查客户端更新";
+        if(state.release?.available&&!release){release=state.release;buttons();}
+        if(state.phase==="completed"&&state.release?.available&&!currentNotes&&!dialog.open&&!busy){
+          const notification=await result(api.take_startup_update_prompt());
+          if(notification.prompt){release=notification.release;message.classList.remove("error");showRelease();}
+        }
+      }catch(error){startupPending=false;check.title="启动检查未完成，可点击此按钮重试。";buttons();}
+      finally{startupPolling=false;}
+    }
+    dialog.addEventListener("close",()=>{currentNotes=false;pollStartupCheck();});
     function watchUpdate(){
       poll=setInterval(async()=>{
         try{
@@ -77,7 +94,7 @@
         }catch(error){clearInterval(poll);poll=null;busy=false;buttons();fail(error);}
       },750);
     }
-    function showRelease(){currentNotes=false;icon.textContent=release.available?"↑":"✓";close.textContent="关闭";title.textContent=release.available?`发现新版 v${release.latest_version}`:`当前版本 v${info.version}`;renderNotes(release.notes);message.textContent=release.available?(info.can_install?"更新将保留本地资料；安装时安全退出，并自动重新打开客户端。":"当前正在运行源码，请用 GitHub Desktop 更新源码或从 Releases 下载完整客户端。"):"当前客户端已是最新发布版本，或比最新发布版本更新。";show();buttons();}
+    function showRelease(){currentNotes=false;icon.textContent=release.available?"↑":"✓";close.textContent=release.available?"稍后更新":"关闭";title.textContent=release.available?`发现新版 v${release.latest_version}`:`当前版本 v${info.version}`;renderNotes(release.notes);message.textContent=release.available?(info.can_install?"是否现在更新？更新将保留本地资料；安装时安全退出，并自动重新打开客户端。":"当前正在运行源码，请用 GitHub Desktop 更新源码或从 Releases 下载完整客户端。"):"当前客户端已是最新发布版本，或比最新发布版本更新。";show();buttons();}
     function fail(error){message.textContent=error.message||String(error);message.classList.add("error");show();}
     close.onclick=async()=>{
       if(currentNotes){try{await result(api.acknowledge_client_notes());info.show_notes=false;}catch(error){fail(error);return;}}
@@ -85,7 +102,7 @@
     };
     check.onclick=async()=>{
       currentNotes=false;icon.textContent="↻";close.textContent="关闭";title.textContent="正在检查客户端更新";renderNotes("");message.classList.remove("error");message.textContent="正在连接本项目的 GitHub Releases…";busy=true;show();buttons();
-      try{release=await result(api.check_client_update());showRelease();}catch(error){release=null;fail(error);}finally{busy=false;buttons();}
+      try{release=await result(api.check_client_update());if(api.take_startup_update_prompt)await result(api.take_startup_update_prompt());showRelease();}catch(error){release=null;fail(error);}finally{busy=false;buttons();}
     };
     const performUpdate=async()=>{
       currentNotes=false;message.classList.remove("error");show();busy=true;buttons();
@@ -101,6 +118,11 @@
     try{
       info=await result(api.client_info());version.textContent=`v${info.version}`;buttons();
       if(info.show_notes){currentNotes=true;title.textContent=`已更新到 v${info.version}`;renderNotes(info.notes);message.textContent="点击「已读」后，本版本的说明不再自动弹出。";close.textContent="已读";buttons();show();}
+      if(api.start_client_update_check){
+        startupPending=true;buttons();
+        try{await result(api.start_client_update_check());await pollStartupCheck();}
+        catch(error){startupPending=false;check.title="启动检查未完成，可点击此按钮重试。";buttons();}
+      }
     }catch(error){title.textContent="客户端更新";fail(error);}
   }
 })();

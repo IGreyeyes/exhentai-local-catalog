@@ -58,6 +58,12 @@ def verify_desktop(report_path, fixture_root=None):
         url = session.start(lambda message: None)
         session.server.catalog.favorites.save(1, 123, "exhentai.org")
         api = DesktopApi(session)
+        startup_requests=[]
+        def mock_release(request,timeout):
+            from client_version import APP_VERSION
+            startup_requests.append(request.full_url)
+            return io.BytesIO(json.dumps({"tag_name":APP_VERSION,"body":"隔离验证：当前版本已是最新版。"}).encode())
+        api._updates.opener.open=mock_release
         notes_pending = api._updates.info()["show_notes"]
         expected_view = session.server.catalog.favorites.get_record_view() or "extended"
         report["initial_saved_view"] = expected_view
@@ -133,6 +139,10 @@ def verify_desktop(report_path, fixture_root=None):
                             raise AssertionError(preference)
                         report["checks"].append("thumbnail preference committed to local database before exit")
                 stage("search API")
+                startup=promise("window.pywebview.api.startup_client_update_status()")
+                if startup["phase"] != "completed" or len(startup_requests) != 1 or startup["release"]["available"]:
+                    raise AssertionError({"state":startup,"requests":len(startup_requests)})
+                report["checks"].append("one automatic release check per process; page navigation does not repeat it")
                 result = promise("fetch('/api/search?tag=language%3Aenglish').then(r=>r.json()).then(d=>({total:d.total}))")
                 if result["total"] != 1:
                     raise AssertionError(result)

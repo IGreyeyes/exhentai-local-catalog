@@ -164,6 +164,8 @@ class DesktopTests(unittest.TestCase):
         api._window = SimpleNamespace(get_current_url=lambda: "https://example.com")
         self.assertIn("error",api.client_info())
         self.assertIn("error",api.acknowledge_client_notes())
+        self.assertIn("error",api.start_client_update_check())
+        self.assertEqual(api._updates.startup_status()["phase"],"idle")
         with patch.object(api._updates,"check") as check:
             self.assertIn("error",api.check_client_update())
             check.assert_not_called()

@@ -146,7 +146,43 @@ class ClientUpdater:
         self.workspace = None
         self.state = {"phase": "idle", "message": "", "percent": 0}
         self.lock = threading.Lock()
+        self._startup_lock = threading.Lock()
+        self._startup_phase = "idle"
+        self._startup_release = None
+        self._startup_error = ""
+        self._startup_prompted = False
+        self._startup_thread = None
         self.opener = build_opener(ProxyHandler({}))
+
+    def start_startup_check(self):
+        with self._startup_lock:
+            if self._startup_phase == "idle":
+                self._startup_phase = "checking"
+                self._startup_thread = threading.Thread(target=self._check_at_startup, name="client-startup-update-check", daemon=True)
+                self._startup_thread.start()
+        return self.startup_status()
+
+    def _check_at_startup(self):
+        try:
+            release = self.check()
+            with self._startup_lock:
+                self._startup_release = release
+                self._startup_phase = "completed"
+        except Exception as error:
+            with self._startup_lock:
+                self._startup_error = str(error)
+                self._startup_phase = "failed"
+
+    def startup_status(self):
+        with self._startup_lock:
+            return {"phase": self._startup_phase, "release": self._startup_release, "error": self._startup_error}
+
+    def take_startup_prompt(self):
+        with self._startup_lock:
+            if self._startup_phase == "completed" and self._startup_release and self._startup_release["available"] and not self._startup_prompted:
+                self._startup_prompted = True
+                return {"prompt": True, "release": self._startup_release}
+            return {"prompt": False}
 
     def info(self):
         try:

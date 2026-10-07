@@ -20,6 +20,7 @@ def verify_desktop(report_path, fixture_root=None):
     from desktop import DesktopApi
     from desktop_service import DesktopSession
     from initialize_catalog import initialize
+    from client_version import APP_VERSION
     report_path = report_path.resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {"passed": False, "frozen": bool(getattr(sys, "frozen", False)), "python": sys.version.split()[0], "checks": []}
@@ -60,7 +61,6 @@ def verify_desktop(report_path, fixture_root=None):
         api = DesktopApi(session)
         startup_requests=[]
         def mock_release(request,timeout):
-            from client_version import APP_VERSION
             startup_requests.append(request.full_url)
             return io.BytesIO(json.dumps({"tag_name":APP_VERSION,"body":"隔离验证：当前版本已是最新版。"}).encode())
         api._updates.opener.open=mock_release
@@ -153,11 +153,15 @@ def verify_desktop(report_path, fixture_root=None):
                 window.create_file_dialog = lambda *args, **kwargs: (str(destination),)
                 try:
                     result = promise("window.pywebview.api.save_attachment('/api/maintenance/favorites-export')")
+                    sharing = promise("document.querySelector('#favorites-export').onclick().then(()=>({open:document.querySelector('#favorites-share-guide').open,visible:!document.querySelector('#favorites-share-generated').hidden,title:document.querySelector('#favorites-share-title').value,body:document.querySelector('#favorites-share-body').value,steps:document.querySelectorAll('.favorites-share-steps>li').length,overflow:document.documentElement.scrollWidth>innerWidth+1}))")
                 finally:
                     window.create_file_dialog = real_dialog
                 if result.get("error") or result.get("record_count") != 1 or not destination.is_file():
                     raise AssertionError(result)
+                if result.get("share_info", {}).get("client_version") != APP_VERSION or not sharing["open"] or not sharing["visible"] or sharing["steps"] != 8 or sharing["overflow"] or "1 条" not in sharing["title"] or "v" + APP_VERSION not in sharing["body"]:
+                    raise AssertionError({"share_info": result.get("share_info"), "ui": sharing})
                 report["checks"].append("native bridge exports favorites to chosen file")
+                report["checks"].append("share guide expands and generates title/body in actual packaged WebView2")
                 # Capture only this application-owned test page, never the user's desktop.
                 stage("screenshot")
                 from System import Action, Func, Object, String

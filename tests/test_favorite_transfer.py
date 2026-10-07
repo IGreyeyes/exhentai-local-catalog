@@ -12,7 +12,8 @@ import threading
 import unittest
 
 from app import Catalog, Server
-from favorite_transfer import FORMAT, MAX_FILE_BYTES, export_snapshot, merge_snapshot, parse_snapshot, preview_snapshot
+from favorite_transfer import FORMAT, MAX_FILE_BYTES, export_snapshot, merge_snapshot, parse_snapshot, preview_snapshot, snapshot_share_info
+from client_version import APP_VERSION
 from favorites import FavoriteStore
 from maintenance import LibraryMaintenance
 from collector_identity import export_identity, parse_identity
@@ -80,6 +81,18 @@ class FavoriteTransferTests(unittest.TestCase):
         for forbidden in ("token", "title", "tag_blacklist", "reading_state", "opened_count", "cookies", "job_id", "failed_at"):
             self.assertNotIn('"' + forbidden + '"', raw.decode())
         self.assertNotIn(str(self.root), raw.decode())
+        # Metadata must describe the file, even if collection has advanced since export.
+        self.save(4, 500, 999)
+        self.assertEqual(snapshot_share_info(raw), {"record_count": 2, "oldest_checked_at": 10, "newest_checked_at": 20, "exported_at": payload["exported_at"], "client_version": APP_VERSION})
+
+    def test_empty_export_share_info_has_no_invented_capture_time(self):
+        raw, total = export_snapshot(self.store.path)
+        self.assertEqual(total, 0)
+        info = snapshot_share_info(raw)
+        self.assertEqual(info["record_count"], 0)
+        self.assertIsNone(info["oldest_checked_at"])
+        self.assertIsNone(info["newest_checked_at"])
+        self.assertEqual(info["exported_at"], parse_snapshot(raw)["exported_at"])
 
     def test_preview_is_read_only_and_distinguishes_every_conflict_case(self):
         for gid in range(1, 6):
@@ -447,7 +460,9 @@ class FavoriteTransferTests(unittest.TestCase):
             failure.exception.close()
             with post("favorites-export") as response:
                 self.assertIn(".ehfavorites.json", response.headers["Content-Disposition"])
-                self.assertEqual(parse_snapshot(response.read())["records"], [self.item(1, 10, 100, "exhentai.org")])
+                raw = response.read()
+                self.assertEqual(parse_snapshot(raw)["records"], [self.item(1, 10, 100, "exhentai.org")])
+                self.assertEqual(json.loads(response.headers["X-Favorite-Share-Info"]), snapshot_share_info(raw))
             raw = self.raw([self.item(gid, 20, 200) for gid in range(1, 451)])
             self.assertGreater(len(raw), 32000)
             with post("favorites-prepare", raw, "application/octet-stream") as response:

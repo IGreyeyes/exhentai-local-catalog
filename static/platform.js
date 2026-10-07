@@ -17,7 +17,7 @@
     link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || filename;
     document.body.append(link);link.click();link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    return {cancelled: false, record_count: response.headers.get("X-Favorite-Record-Count")};
+    return {cancelled: false, record_count: response.headers.get("X-Favorite-Record-Count"), share_info: JSON.parse(response.headers.get("X-Favorite-Share-Info") || "null")};
   };
   window.catalogExportLocation = () => desktop() ? "文件已保存到你选择的位置。" : "请在浏览器下载列表查看。";
   window.addEventListener("pywebviewready", () => {

@@ -14,6 +14,35 @@
   function identityMatches(){return Boolean(identityChecked&&identityChecked.current_id===state?.collector_identity?.collector_id&&identityChecked.key===fileKey(ui("collector-identity-file").files[0]));}
   function invalidateIdentity(){identityChecked=null;ui("collector-identity-confirm").checked=false;ui("collector-identity-preview").hidden=true;controls();}
   function favoritesMessage(text,error=false){favoritesLocalMessage={text,error};ui("favorites-feedback").textContent=text;ui("favorites-feedback").classList.toggle("error",error);}
+  function shareTime(value){
+    const parts=Object.fromEntries(new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Hong_Kong",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).formatToParts(new Date(typeof value==="number"?value*1000:value)).map(part=>[part.type,part.value]));
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+  }
+  function clearShareInfo(){
+    ui("favorites-share-generated").hidden=true;ui("favorites-share-placeholder").hidden=false;
+    ui("favorites-share-title").value="";ui("favorites-share-body").value="";
+    ui("favorites-share-copy-status").textContent="复制后按下方步骤发帖，并附上本次导出文件的 ZIP。";
+  }
+  function renderShareInfo(info){
+    if(!info)return false;
+    const shareDate=shareTime(info.exported_at).slice(0,10);
+    const range=info.record_count?`${shareTime(info.oldest_checked_at)} ～ ${shareTime(info.newest_checked_at)}（UTC+8，北京时间 / 香港时间）`:"无成功收藏数记录";
+    ui("favorites-share-title").value=`收藏数分享｜${number(info.record_count)} 条｜${shareDate}`;
+    ui("favorites-share-body").value=`- 记录数量：${number(info.record_count)} 条\n- 原抓取时间范围：${range}\n- 导出时的客户端版本：v${info.client_version}\n- 分享日期：${shareDate}\n- 补充说明：（选填，发布前补充）\n\n附件：请将本次导出的 .ehfavorites.json 文件压缩为 ZIP 后上传。`;
+    ui("favorites-share-generated").hidden=false;ui("favorites-share-placeholder").hidden=true;
+    ui("favorites-share-guide").open=true;
+    if(!info.record_count)ui("favorites-share-copy-status").textContent="本次导出为 0 条，无原抓取时间范围。可先采集或合并收藏数，再导出分享。";
+    return true;
+  }
+  async function copyShareInfo(id,label){
+    const field=ui(id),feedback=ui("favorites-share-copy-status");
+    try{await navigator.clipboard.writeText(field.value);feedback.textContent=`${label}已复制。切换到 GitHub 对应输入框，按 Ctrl+V 粘贴。`;}
+    catch(error){
+      field.focus();field.select();
+      let copied=false;try{copied=document.execCommand("copy");}catch(error){}
+      feedback.textContent=copied?`${label}已复制。切换到 GitHub 对应输入框，按 Ctrl+V 粘贴。`:`自动复制未完成，已选中${label}。请按 Ctrl+C 复制，再到 GitHub 按 Ctrl+V 粘贴。`;
+    }
+  }
   const selectedFavoritesFile=()=>ui("favorites-file").files[0];
   const fileKey=file=>file?`${file.name}:${file.size}:${file.lastModified}`:"";
   function favoritesMatches(){
@@ -235,13 +264,19 @@
   };
   ui("collector-identity-import").onclick=()=>{if(identityMatches()&&ui("collector-identity-confirm").checked){identityLocalMessage=null;action("collector-identity-import",{file:identityChecked.file,expected_id:identityChecked.current_id});}};
   ui("favorites-export").onclick=async()=>{
-    if(busy)return;busy=true;controls();favoritesMessage("正在生成收藏数文件…");
+    if(busy)return;busy=true;clearShareInfo();controls();favoritesMessage("正在生成收藏数文件…");
     try{
       const result=await downloadAttachment("/api/maintenance/favorites-export","favorites.ehfavorites.json");
-      favoritesMessage(result.cancelled?"已取消导出。":`已导出 ${number(result.record_count)} 条收藏数。${window.catalogExportLocation()}文件保留原始抓取时间和原采集者。`);
+      if(result.cancelled)favoritesMessage("已取消导出，本次未生成分享信息。");
+      else{
+        const ready=renderShareInfo(result.share_info);
+        favoritesMessage(`已导出 ${number(result.record_count)} 条收藏数。${window.catalogExportLocation()}文件保留原始抓取时间和原采集者。${ready?"下方已生成分享标题和正文，可复制到 GitHub。":"当前后台未提供分享信息，请重启应用后重新导出。"}`);
+      }
     }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导出。":error.message,true);}
     finally{busy=false;controls();}
   };
+  ui("favorites-share-copy-title").onclick=()=>copyShareInfo("favorites-share-title","标题");
+  ui("favorites-share-copy-body").onclick=()=>copyShareInfo("favorites-share-body","正文");
   ui("favorites-check").onclick=async()=>{
     const file=selectedFavoritesFile();if(busy||!file)return;
     if(file.size===0||file.size>128*1024**2){favoritesMessage("请选择非空且不超过 128 MiB 的收藏数文件。",true);return;}

@@ -148,6 +148,7 @@ class DesktopApi:
                 with build_opener(ProxyHandler({})).open(request, timeout=60) as response:
                     body = response.read(128*1024**2 + 1)
                     count = response.headers.get("X-Favorite-Record-Count")
+                    share_info = json.loads(response.headers.get("X-Favorite-Share-Info", "null"))
             except HTTPError as error:
                 with error:
                     raise ValueError(json.load(error).get("error", "文件导出失败。")) from error
@@ -162,7 +163,7 @@ class DesktopApi:
                 os.replace(temporary, destination)
             finally:
                 temporary.unlink(missing_ok=True)
-            return {"cancelled": False, "record_count": int(count) if count is not None else None}
+            return {"cancelled": False, "record_count": int(count) if count is not None else None, "share_info": share_info}
         finally:
             self._dialog_lock.release()
 

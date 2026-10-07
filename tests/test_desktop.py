@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.request import urlopen
+from favorite_transfer import snapshot_share_info
 import hashlib
 import io
 import json
@@ -141,6 +142,7 @@ class DesktopTests(unittest.TestCase):
             result = api.save_attachment("/api/maintenance/favorites-export")
             self.assertFalse(result["cancelled"])
             self.assertEqual(result["record_count"], 1)
+            self.assertEqual(result["share_info"], snapshot_share_info((self.root / "export.json").read_bytes()))
             self.assertEqual(json.loads((self.root / "export.json").read_text())["records"][0]["favorite_count"], 123)
             chosen[0] = [str(self.root / "data" / "catalog_info.json")]
             before = (self.root / "data" / "catalog_info.json").read_bytes()

@@ -23,7 +23,7 @@ from favorites import Collector, FavoriteStore, JOIN_FAVORITES, gallery_url
 from maintenance import LibraryMaintenance, MaintenanceManager, recover_import
 from covers import CoverCache, CoverUnavailable
 from credentials import export_credentials, import_credentials
-from favorite_transfer import MAX_FILE_BYTES
+from favorite_transfer import MAX_FILE_BYTES, snapshot_share_info
 from collector_identity import MAX_IDENTITY_BYTES, parse_identity
 from runtime_paths import library_lock, library_root, resource_root
 
@@ -482,12 +482,14 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
-    def reply_attachment(self, body, filename, record_count=None):
+    def reply_attachment(self, body, filename, record_count=None, share_info=None):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         if record_count is not None:
             self.send_header("X-Favorite-Record-Count", str(record_count))
+        if share_info is not None:
+            self.send_header("X-Favorite-Share-Info", json.dumps(share_info, separators=(",", ":")))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -625,7 +627,7 @@ class Handler(BaseHTTPRequestHandler):
                     body, count = manager.export_favorites()
                     from datetime import datetime, timezone
                     filename="favorites-"+datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")+".ehfavorites.json"
-                    self.reply_attachment(body, filename, count)
+                    self.reply_attachment(body, filename, count, snapshot_share_info(body))
                     return
                 elif self.path == "/api/maintenance/favorites-import":
                     if set(payload) != {"prepared_id"}:

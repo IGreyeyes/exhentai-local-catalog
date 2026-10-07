@@ -20,6 +20,7 @@ cookies*.json
 cookies*.txt
 *.ehcred
 *.ehfavorites.json
+*.zip
 *.ehcollector.json
 
 # Additional local credentials and private keys

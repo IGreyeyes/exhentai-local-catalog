@@ -263,11 +263,13 @@ py -3.14 -m unittest discover -s tests -v
 
 `tests/visual_*.cjs` 与 `tests/visual_collector_server.py` 是浏览器回归辅助脚本，使用 Node.js / Playwright 等额外开发工具，不属于普通运行依赖，也不会随上述 `unittest` 命令执行。部分脚本包含本机测试环境路径，运行前需按自己的环境调整。
 
+`tests/visual_favorites_share.cjs` 在 Git 忽略的 `logs/` 下创建独立模拟资料库并保留截图，验证折叠教程、导出文件对应的数量与原抓取时间范围、复制标题 / 正文、手动复制回退、取消 / 保存失败后清除旧信息、空文件、旧后台兼容及小窗口排版。收藏数 JSON 继续采用 version 2；分享摘要通过导出响应的 `X-Favorite-Share-Info` 传回浏览器或桌面保存桥接，不重新读取可能已变化的资料库。
+
 ## 发布新版客户端
 
 遵循 `AGENTS.md` 的持续要求。每次用户功能更新：同步递增 `client_version.py` 的版本并填写中文更新内容，更新用户 README 与 `RELEASE_NOTES.md`，运行单元测试、构建脚本与隔离 exe 验证。
 
-用户在 GitHub Desktop 中检查并提交源码后，在本仓库 Releases 创建对应的正式版本标签（本次为 `v1.1.4`），复制 `dist/RELEASE_NOTES.md` 的内容，上传 `dist/ExCatalog-Windows-x64.zip` 和 `dist/SHA256SUMS.txt`。GitHub 自动记录上传资产的 SHA-256 digest，应用更新器会读取并核对它。只上传上述公开发布文件，不要上传整个项目文件夹、日志、数据、备份或构建中间文件。发布完成后，通过客户端检查更新，核对版本号与资产名称。
+用户在 GitHub Desktop 中检查并提交源码后，在本仓库 Releases 创建对应的正式版本标签（本次为 `v1.1.5`），复制 `dist/RELEASE_NOTES.md` 的内容，上传 `dist/ExCatalog-Windows-x64.zip` 和 `dist/SHA256SUMS.txt`。GitHub 自动记录上传资产的 SHA-256 digest，应用更新器会读取并核对它。只上传上述公开发布文件，不要上传整个项目文件夹、日志、数据、备份或构建中间文件。发布完成后，通过客户端检查更新，核对版本号与资产名称。
 
 客户端更新说明的已读版本保存在 `data/client-update-state.json`，属于本机配置，不写入发布包。安装器只替换允许清单内的程序文件，下载包含个人资料、路径穿越、重复成员、链接或校验不符时拒绝安装。
 

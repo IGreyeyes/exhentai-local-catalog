@@ -8,6 +8,7 @@ import sqlite3
 
 from favorites import HOSTS
 from collector_identity import read_identity, validate_collector
+from client_version import APP_VERSION
 
 FORMAT = "local-tag-catalog-favorite-counts"
 VERSION = 2
@@ -72,6 +73,19 @@ def export_snapshot(favorites_path):
     # Every exported file must also satisfy the import contract, including size.
     parse_snapshot(raw)
     return raw, len(records)
+
+
+def snapshot_share_info(raw):
+    """Describe the exact exported snapshot without adding fields to its format."""
+    payload = json.loads(raw)
+    times = [item["checked_at"] for item in payload["records"]]
+    return {
+        "record_count": len(times),
+        "oldest_checked_at": min(times, default=None),
+        "newest_checked_at": max(times, default=None),
+        "exported_at": payload["exported_at"],
+        "client_version": APP_VERSION,
+    }
 
 
 def _incoming(db, records):

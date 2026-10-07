@@ -65,6 +65,39 @@
           </div>
           <p class="field-hint">收藏数文件包含作品 ID、收藏数、原抓取时间、源站及原采集者 ID 和昵称。不包含作品目录、阅读状态、黑名单、采集队列或登录信息。</p>
           <button class="button secondary" id="favorites-export" disabled>仅导出收藏数</button>
+          <details class="favorites-share-guide" id="favorites-share-guide">
+            <summary>如何在 GitHub 讨论区分享收藏数（点击展开）</summary>
+            <div class="favorites-share-content">
+              <p>GitHub Discussions 是本项目的交流区。你可以在那里发帖上传收藏数 ZIP，其他用户下载后在客户端检查并合并。首次分享需要注册或登录 GitHub；上传和发布在浏览器中完成。</p>
+              <div class="favorites-share-links">
+                <a class="button secondary" href="https://github.com/IGreyeyes/exhentai-local-catalog/discussions/categories/%E6%94%B6%E8%97%8F%E6%95%B0%E5%88%86%E4%BA%AB" target="_blank" rel="noopener noreferrer">打开收藏数分享区 ↗</a>
+                <a class="button secondary" href="https://github.com/IGreyeyes/exhentai-local-catalog/discussions/new?category=%E6%94%B6%E8%97%8F%E6%95%B0%E5%88%86%E4%BA%AB" target="_blank" rel="noopener noreferrer">新建分享帖 ↗</a>
+              </div>
+              <section class="favorites-share-generated" id="favorites-share-generated" aria-labelledby="favorites-share-generated-title" hidden>
+                <h3 id="favorites-share-generated-title">本次导出的分享信息</h3>
+                <p>以下内容根据本次成功导出的文件自动生成。原抓取时间按北京时间 / 香港时间（UTC+8）显示；分享日期默认使用导出当天，稍后发布时请改为实际分享日期。</p>
+                <label class="maintenance-field" for="favorites-share-title">帖子标题</label>
+                <div class="favorites-share-copy-row"><input id="favorites-share-title" type="text" readonly spellcheck="false"><button class="button secondary" id="favorites-share-copy-title" type="button">复制标题</button></div>
+                <label class="maintenance-field" for="favorites-share-body">帖子正文（可复制后补充说明）</label>
+                <textarea id="favorites-share-body" rows="8" readonly spellcheck="false"></textarea>
+                <button class="button secondary" id="favorites-share-copy-body" type="button">复制正文</button>
+                <p id="favorites-share-copy-status" role="status" aria-live="polite">复制后按下方步骤发帖，并附上本次导出文件的 ZIP。</p>
+              </section>
+              <p class="favorites-share-placeholder" id="favorites-share-placeholder">先点击上方「仅导出收藏数」。导出成功后，这里会自动生成记录数量、原抓取时间范围、客户端版本、分享日期，以及可复制的标题和正文。</p>
+              <ol class="favorites-share-steps">
+                <li><h3>导出并找到收藏数文件</h3><p>点击上方「仅导出收藏数」。桌面客户端会弹出保存窗口，选择容易找到的独立文件夹（例如桌面上的分享文件夹），点击保存；浏览器版可按 <kbd>Ctrl</kbd> + <kbd>J</kbd> 打开下载列表，点击文件旁的文件夹图标或「在文件夹中显示」。找到以 <code>.ehfavorites.json</code> 结尾的文件。取消保存不会生成本次分享信息。</p></li>
+                <li><h3>将文件压缩为 ZIP</h3><p>在 Windows 文件资源管理器里，只选中刚导出的收藏数 JSON 文件。Windows 11：右键 →「压缩为」→「ZIP 文件」；若没有该选项，点击「显示更多选项」→「发送到」→「压缩(zipped)文件夹」。Windows 10：右键 →「发送到」→「压缩(zipped)文件夹」。生成的 ZIP 与原文件通常在同一个文件夹。压缩后可双击 ZIP，确认里面只有本次导出的收藏数文件。</p></li>
+                <li><h3>注册或登录 GitHub</h3><p>点击上方「打开收藏数分享区」，客户端会使用默认浏览器打开。已登录 GitHub 的用户可直接继续。没有账号时，打开 <a href="https://github.com/signup" target="_blank" rel="noopener noreferrer">https://github.com/signup</a>，按页面提示注册并完成邮箱验证；已有账号时，打开 <a href="https://github.com/login" target="_blank" rel="noopener noreferrer">https://github.com/login</a> 登录。登录成功后重新打开分享区。GitHub 账号和源站账号是分别使用的，分享时无需填写源站 Cookie。</p></li>
+                <li><h3>进入正确的分享分类</h3><p>收藏数分享区的完整地址：</p><p class="favorites-share-url"><a href="https://github.com/IGreyeyes/exhentai-local-catalog/discussions/categories/%E6%94%B6%E8%97%8F%E6%95%B0%E5%88%86%E4%BA%AB" target="_blank" rel="noopener noreferrer">https://github.com/IGreyeyes/exhentai-local-catalog/discussions/categories/收藏数分享</a></p><p>进入后点击「New discussion」（新建讨论）。也可点击上方「新建分享帖」。如果出现分类选择页，请选择「收藏数分享」；进入编辑页后确认 Category（分类）显示「收藏数分享」。</p></li>
+                <li><h3>粘贴自动生成的标题和正文</h3><p>在客户端点击「复制标题」，切换到浏览器，点击「Add a title」（添加标题）输入框并按 <kbd>Ctrl</kbd> + <kbd>V</kbd>。再回来点击「复制正文」，切换到浏览器的「Add a body」（添加正文）编辑框，在「Write」（编辑）标签下粘贴。核对数量、原抓取时间范围和版本，按需修改分享日期，并补充说明。若无法自动复制，选中相应文本后按 <kbd>Ctrl</kbd> + <kbd>C</kbd>。</p></li>
+                <li><h3>上传 ZIP 附件</h3><p>把第 2 步生成的 ZIP 拖进正文编辑框；也可点击编辑框下方「Paste, drop, or click to add files」（粘贴、拖放或点击添加文件），选择 ZIP。等待上传完成，编辑框里出现指向 ZIP 的附件链接后再继续；只有填写标题和正文，不会自动上传文件。附件超过 GitHub 当前大小限制或上传失败时，请按页面提示处理，确认附件上传成功后再发布。</p></li>
+                <li><h3>预览并发布</h3><p>点击「Preview」（预览），核对文字、分类和附件链接，然后点击「Start discussion」（发布讨论）。发布成功后会打开帖子页面；确认帖子属于「收藏数分享」并显示 ZIP 附件链接，可以复制浏览器地址栏中的帖子网址给其他用户。之后如需修改，使用帖子正文右上角的「…」菜单 →「Edit」（编辑）。</p></li>
+                <li><h3>其他用户如何下载和合并</h3><p>打开分享帖，点击 ZIP 附件链接下载。下载后右键 ZIP →「全部提取」，取得 <code>.ehfavorites.json</code> 文件。打开客户端的「资料库维护 → 收藏数导入导出」，在下方选择解压后的 JSON，点击「检查收藏数文件」，核对预计新增、更新和保留数量，勾选确认，再点击「备份当前资料并合并收藏数」。合并按下方规则处理，不会把原抓取时间改成分享或导入时间。</p></li>
+              </ol>
+              <div class="favorites-share-scope"><h3>分享前确认公开范围</h3><p>收藏数导出包含本地全部成功记录（含他人数据及成功取得的零收藏），以及作品 ID、收藏数、原抓取时间、源站、原采集者 ID 和昵称。这些信息和你的 GitHub 发帖账号会公开，请核对后自行决定是否分享。</p><p>只上传收藏数导出文件的 ZIP。完整资料库、备份、<code>.ehcollector.json</code> 身份迁移文件、<code>.ehcred</code> 登录文件、Cookie、密码和日志请自行保管。</p></div>
+              <p>讨论区首页：<a href="https://github.com/IGreyeyes/exhentai-local-catalog/discussions" target="_blank" rel="noopener noreferrer">https://github.com/IGreyeyes/exhentai-local-catalog/discussions</a><br>置顶分享说明：<a href="https://github.com/IGreyeyes/exhentai-local-catalog/discussions/1" target="_blank" rel="noopener noreferrer">https://github.com/IGreyeyes/exhentai-local-catalog/discussions/1</a></p>
+            </div>
+          </details>
           <label class="maintenance-field favorites-file-label" for="favorites-file">选择要合并的收藏数文件</label>
           <div class="maintenance-path-row"><input id="favorites-file" type="file" accept=".ehfavorites.json,.json,application/json"><button class="button secondary" id="favorites-check" disabled>检查收藏数文件</button></div>
           <p class="field-hint">选择本程序导出的 .ehfavorites.json 文件，最大 128 MiB。检查后先核对数量，再确认合并。</p>

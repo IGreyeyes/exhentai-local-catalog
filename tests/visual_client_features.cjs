@@ -6,6 +6,7 @@ const assert=(condition,message)=>{if(!condition)throw new Error(message);};
 const fixture=fs.mkdtempSync(path.join(os.tmpdir(),'excatalog-features-'));
 const project=path.resolve(__dirname,'..'),output=path.join(project,'logs');
 const metadata=JSON.parse(execFileSync('py',['-3.14','-X','utf8','-c','import json,client_version as v;print(json.dumps({"version":v.APP_VERSION,"notes":v.RELEASE_NOTES}))'],{cwd:project,encoding:'utf8',windowsHide:true}));
+const views=['minimal','compact','extended','thumbnails'];
 fs.mkdirSync(output,{recursive:true});
 let server,browser;
 
@@ -17,13 +18,17 @@ async function main(){
     server.once('exit',code=>reject(new Error('Fixture exited: '+code)));
   });
   browser=await chromium.launch({headless:true,channel:'chrome'});
-  const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
+  let page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];
   const stylesheet=await page.request.get(base+'/client-updates.css');
   assert(stylesheet.status()===200&&stylesheet.headers()['content-type'].startsWith('text/css'),'Update stylesheet was not served as CSS');
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(base+'/records');await page.locator('.saved-card').first().waitFor();
+  assert(await page.locator('#record-view option').count()===4,'View selector should have four options');
+  await page.evaluate(()=>localStorage.setItem('records-view','minimal-tags'));await page.reload();await page.locator('.saved-card').first().waitFor();
+  assert(await page.inputValue('#record-view')==='minimal','Removed view did not migrate to minimal');
+  assert(await page.evaluate(()=>localStorage.getItem('records-view'))==='minimal','Migrated view was not saved');
   await page.locator('.record-select').first().check();
-  for(const view of ['minimal','minimal-tags','compact','extended','thumbnails']){
+  for(const view of views){
     await page.selectOption('#record-view',view);
     assert(await page.locator('.saved-card').count()===6,'Record count changed in '+view);
     assert((await page.locator('#selected-record-count').textContent()).includes('1'),'Selection lost in '+view);
@@ -34,8 +39,13 @@ async function main(){
     await page.screenshot({path:path.join(output,'features-'+view+'.png')});
   }
   await page.reload();await page.locator('.saved-card').first().waitFor();assert(await page.inputValue('#record-view')==='thumbnails','View was not remembered');
+  await page.waitForFunction(()=>!document.querySelector('#record-view').disabled);
+  await browser.close();browser=await chromium.launch({headless:true,channel:'chrome'});
+  page=await browser.newPage({viewport:{width:1440,height:1000}});page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(base+'/records');await page.locator('.saved-card').first().waitFor();
+  assert(await page.inputValue('#record-view')==='thumbnails','Fresh browser process lost the saved view');
   await page.setViewportSize({width:390,height:844});
-  for(const view of ['minimal','minimal-tags','compact','extended','thumbnails']){
+  for(const view of views){
     await page.selectOption('#record-view',view);
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Mobile overflow in '+view);
   }
@@ -63,8 +73,9 @@ async function main(){
   await page.setViewportSize({width:1440,height:1000});await page.reload();
   await page.locator('#client-update-dialog[open]').waitFor();
   assert((await page.locator('#client-notes-read').textContent())==='已读','Read notes button missing');
-  assert(await page.locator('.client-note-list li').count()===4,'Update notes are not a structured list');
-  assert(await page.locator('.client-release-notes strong').count()===4,'Update highlights are not bold');
+  const expectedNoteItems=metadata.notes.split(/\r?\n/).filter(line=>/^\d+\.\s/.test(line)).length;
+  assert(await page.locator('.client-note-list li').count()===expectedNoteItems,'Update notes are not a structured list');
+  assert(await page.locator('.client-release-notes strong').count()>=1,'Update highlights are not bold');
   const modal=await page.locator('#client-update-dialog').evaluate(e=>({width:e.getBoundingClientRect().width,font:getComputedStyle(e.querySelector('.client-release-notes')).fontSize,display:getComputedStyle(e).display,overflow:e.scrollWidth>e.clientWidth+1}));
   assert(modal.width>=620&&modal.width<=680&&modal.font==='14px'&&modal.display==='flex'&&!modal.overflow,'Update dialog styles missing: '+JSON.stringify(modal));
   await page.screenshot({path:path.join(output,'update-notification-v'+metadata.version+'.png')});
@@ -82,6 +93,6 @@ async function main(){
   await page.screenshot({path:path.join(output,'features-client-update.png')});
   await page.locator('#client-install-update').click();assert((await page.locator('.client-update-message').textContent()).includes('保存'),'Install state missing');
   assert(errors.length===0,'Browser script errors: '+errors.join('; '));
-  console.log(JSON.stringify({passed:true,views:5,mobileViews:5,riskWarnings:warnings.length,rememberedView:true,notesAcknowledged:true,updateButtons:true,updateStyles:true,structuredNotes:true,smallDialog:true,safeReleaseText:true,scriptErrors:errors}));
+  console.log(JSON.stringify({passed:true,views:views.length,mobileViews:views.length,oldViewMigrated:true,riskWarnings:warnings.length,rememberedView:true,browserRestart:true,notesAcknowledged:true,updateButtons:true,updateStyles:true,structuredNotes:true,smallDialog:true,safeReleaseText:true,scriptErrors:errors}));
 }
 main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{if(browser)await browser.close();if(server){server.kill();await new Promise(resolve=>server.once('exit',resolve));}fs.rmSync(fixture,{recursive:true,force:true});});

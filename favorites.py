@@ -291,6 +291,23 @@ class FavoriteStore:
             )
         return values
 
+    def get_record_view(self):
+        with self.connection() as db:
+            row = db.execute("SELECT value FROM app_settings WHERE key='records_view'").fetchone()
+        if row is None:
+            return None
+        if row[0] == "minimal-tags":
+            return "minimal"
+        return row[0] if row[0] in ("minimal", "compact", "extended", "thumbnails") else None
+
+    def set_record_view(self, view):
+        if view not in ("minimal", "compact", "extended", "thumbnails"):
+            raise ValueError("请选择有效的记录页显示方式。")
+        with self.connection() as db:
+            db.execute("INSERT INTO app_settings(key,value) VALUES('records_view',?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (view,))
+        return view
+
     @contextmanager
     def connection(self):
         db = sqlite3.connect(self.path.as_uri(), uri=True, timeout=10)

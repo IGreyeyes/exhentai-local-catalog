@@ -284,7 +284,7 @@ def main():
         return apply_update(Path(remaining[1]))
     if remaining and remaining[0] == "--verify-desktop":
         from desktop_verify import verify_desktop
-        return verify_desktop(Path(remaining[1]))
+        return verify_desktop(Path(remaining[1]), Path(remaining[2]) if len(remaining)>2 else None)
     if options.data_root:
         os.environ["EH_CATALOG_DATA_ROOT"] = str(options.data_root.resolve())
     root = library_root()

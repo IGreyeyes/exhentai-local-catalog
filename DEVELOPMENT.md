@@ -267,6 +267,8 @@ py -3.14 -m unittest discover -s tests -v
 
 遵循 `AGENTS.md` 的持续要求。每次用户功能更新：同步递增 `client_version.py` 的版本并填写中文更新内容，更新用户 README 与 `RELEASE_NOTES.md`，运行单元测试、构建脚本与隔离 exe 验证。
 
-用户在 GitHub Desktop 中检查并提交源码后，在本仓库 Releases 创建对应的正式版本标签（本次为 `v1.1.1`），复制 `dist/RELEASE_NOTES.md` 的内容，上传 `dist/ExCatalog-Windows-x64.zip` 和 `dist/SHA256SUMS.txt`。GitHub 自动记录上传资产的 SHA-256 digest，应用更新器会读取并核对它。只上传上述公开发布文件，不要上传整个项目文件夹、日志、数据、备份或构建中间文件。发布完成后，通过客户端检查更新，核对版本号与资产名称。
+用户在 GitHub Desktop 中检查并提交源码后，在本仓库 Releases 创建对应的正式版本标签（本次为 `v1.1.3`），复制 `dist/RELEASE_NOTES.md` 的内容，上传 `dist/ExCatalog-Windows-x64.zip` 和 `dist/SHA256SUMS.txt`。GitHub 自动记录上传资产的 SHA-256 digest，应用更新器会读取并核对它。只上传上述公开发布文件，不要上传整个项目文件夹、日志、数据、备份或构建中间文件。发布完成后，通过客户端检查更新，核对版本号与资产名称。
 
 客户端更新说明的已读版本保存在 `data/client-update-state.json`，属于本机配置，不写入发布包。安装器只替换允许清单内的程序文件，下载包含个人资料、路径穿越、重复成员、链接或校验不符时拒绝安装。
+
+记录页显示方式保存在 `data/favorites.sqlite3` 的 `app_settings` 表的 `records_view` 配置项中；前端通过 `/api/preferences` 读取，通过受本机操作令牌保护的 `/api/records/view` 保存。旧网页缓存仅作为首次迁移来源，数据库设置优先，桌面 WebView2 继续使用临时浏览环境。打包验证会启动两个独立 exe 进程使用同一临时资料库，确认第二次启动恢复缩略图。

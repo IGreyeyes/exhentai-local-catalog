@@ -4,9 +4,13 @@
   const number=value=>Number(value||0).toLocaleString("zh-CN");
   const categories={Doujinshi:"同人志",Manga:"漫画","Artist CG":"画师 CG","Game CG":"游戏 CG","Image Set":"图片集","Non-H":"非成人内容",Western:"欧美作品",Cosplay:"角色扮演","Asian Porn":"亚洲写真",Misc:"其他",private:"私有记录"};
   const categoryStyles={Doujinshi:"doujinshi",Manga:"manga","Artist CG":"artist-cg","Game CG":"game-cg","Image Set":"image-set","Non-H":"non-h",Western:"western",Cosplay:"cosplay","Asian Porn":"asian-porn",Misc:"misc"};
-  const views=["minimal","minimal-tags","compact","extended","thumbnails"];
-  let view="extended";
-  try{const saved=localStorage.getItem("records-view");if(views.includes(saved))view=saved;}catch(failure){ /* Storage can be disabled. */ }
+  const views=["minimal","compact","extended","thumbnails"];
+  let view="extended",legacyView=null,viewSaveQueue=Promise.resolve(),viewSaveRevision=0;
+  try{
+    const saved=localStorage.getItem("records-view");
+    if(saved==="minimal-tags"){view="minimal";legacyView=view;localStorage.setItem("records-view",view);}
+    else if(views.includes(saved)){view=saved;legacyView=view;}
+  }catch(failure){ /* Storage can be disabled. */ }
   const sources={"exhentai.org":"ExHentai","e-hentai.org":"E-Hentai"};
   const stateNames={none:"未分类",planned:"待看",reading:"在看",watched:"看过",ignored:"不看"};
   const labels=new Map();
@@ -89,7 +93,7 @@
     try{const url=new URL(value);return url.protocol==="https:"&&sources[url.hostname]&&!url.username&&!url.password&&!url.port&&/^\/g\/[1-9]\d*\/[0-9a-fA-F]{10}\/$/.test(url.pathname)?url.href:null;}catch(failure){return null;}
   }
   async function post(path,payload){
-    const response=await fetch(`/api/records/${path}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":actionToken},body:JSON.stringify(payload)});
+    const response=await fetch(`/api/records/${path}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":actionToken},body:JSON.stringify(payload),keepalive:path==="view"});
     const data=await response.json();if(!response.ok)throw new Error(data.error||"操作失败");return data;
   }
   async function markOpened(item){
@@ -131,11 +135,6 @@
   function renderTagSummary(item){
     const groups=groupedTags(item),total=item.tags.length,section=node("section","saved-tag-section");
     if(!total||["minimal","thumbnails"].includes(view))return section;
-    if(view==="minimal-tags"){
-      const relevant=groups.flatMap(group=>group.items).filter(part=>part.matched);
-      if(!relevant.length)relevant.push(...groups.filter(group=>["language","artist","parody"].includes(group.namespace)).flatMap(group=>group.items).slice(0,12));
-      section.append(...relevant.map(tagButton));section.classList.add("saved-focus-tags");return section;
-    }
     if(view==="compact"){
       section.classList.add("saved-flat-tags");section.append(...groups.flatMap(group=>group.items).map(tagButton));return section;
     }
@@ -280,10 +279,28 @@
   $("clear-record-selection").onclick=()=>{selected.clear();render();};
   $("apply-bulk-state").onclick=()=>setState([...selected],$("bulk-record-state").value);
   $("record-view").value=view;
-  $("record-view").onchange=()=>{view=$("record-view").value;try{localStorage.setItem("records-view",view);}catch(failure){}if(current)render();};
+  $("record-view").disabled=true;
+  $("record-view").onchange=()=>{
+    const chosen=$("record-view").value,revision=++viewSaveRevision;view=chosen;
+    try{localStorage.setItem("records-view",view);}catch(failure){}
+    if(current)render();$("record-view").disabled=true;
+    viewSaveQueue=viewSaveQueue.then(()=>post("view",{view:chosen})).then(()=>{
+      error();
+    }).catch(failure=>error(`显示方式已切换，但尚未保存到本地资料库：${failure.message}。请重新选择后再退出。`)).finally(()=>{if(revision===viewSaveRevision)$("record-view").disabled=false;});
+  };
   window.addEventListener("popstate",restore);
   (async()=>{
-    try{const response=await fetch("/api/status");const status=await response.json();if(!response.ok)throw new Error(status.error||"无法读取服务状态");actionToken=status.action_token||"";restore();}
+    try{
+      const [response,preferencesResponse]=await Promise.all([fetch("/api/status"),fetch("/api/preferences")]);
+      const status=await response.json(),preferences=await preferencesResponse.json();
+      if(!response.ok||!preferencesResponse.ok)throw new Error(status.error||preferences.error||"无法读取服务状态");
+      actionToken=status.action_token||"";
+      if(views.includes(preferences.records_view))view=preferences.records_view;
+      else if(legacyView)await post("view",{view:legacyView});
+      $("record-view").value=view;$("record-view").disabled=false;
+      try{localStorage.setItem("records-view",view);}catch(failure){}
+      restore();
+    }
     catch(failure){$("records-connection").textContent="本地服务未连接";error("无法连接本地服务，请双击“启动搜索.cmd”后刷新页面。");busy(false);}
   })();
 })();

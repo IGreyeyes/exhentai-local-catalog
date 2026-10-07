@@ -25,10 +25,14 @@ def verify():
     environment.pop("PYTHONHOME", None)
     environment.pop("PYTHONPATH", None)
     report_path = PROJECT / "logs" / "desktop-exe-check.json"
-    result = subprocess.run([str(exe), "--verify-desktop", str(report_path)], env=environment, creationflags=subprocess.CREATE_NO_WINDOW, timeout=45)
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    if result.returncode or not report.get("passed") or not report.get("frozen"):
-        raise AssertionError(report)
+    report_path.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="excatalog-desktop-check-",dir=PROJECT / "logs") as directory:
+        for expected in ("extended","thumbnails"):
+            result = subprocess.run([str(exe), "--verify-desktop", str(report_path), directory], env=environment, creationflags=subprocess.CREATE_NO_WINDOW, timeout=45)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            if result.returncode or not report.get("passed") or not report.get("frozen") or report.get("initial_rendered_view") != expected:
+                raise AssertionError(report)
+        report["desktop_restart"] = "separate private WebView2 processes restore the thumbnail view from the database"
     opener = build_opener(ProxyHandler({}))
     with tempfile.TemporaryDirectory(prefix="packaged-service-", dir=PROJECT / "logs") as directory:
         root = Path(directory).resolve()

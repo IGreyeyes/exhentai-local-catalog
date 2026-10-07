@@ -212,7 +212,8 @@ class Catalog:
 
     def preferences(self):
         tags = tuple(tag for tag in self.favorites.get_tag_blacklist() if tag in self.available_tags)
-        return {"tag_blacklist": list(tags), "tag_labels": self.translations.labels(tags)}
+        return {"tag_blacklist": list(tags), "tag_labels": self.translations.labels(tags),
+                "records_view": self.favorites.get_record_view()}
 
     def set_preferences(self, payload):
         values = payload.get("tag_blacklist")
@@ -667,6 +668,10 @@ class Handler(BaseHTTPRequestHandler):
                         result=self.server.catalog.favorites.mark_opened(gid)
                     elif self.path.endswith("/state"):
                         result=self.server.catalog.favorites.set_reading_state(payload.get("gids"),payload.get("state"))
+                    elif self.path == "/api/records/view":
+                        if set(payload) != {"view"}:
+                            raise ValueError("请只提交记录页显示方式。")
+                        result={"records_view":self.server.catalog.favorites.set_record_view(payload["view"])}
                     else:
                         self.reply({"error":"接口不存在。"},status=404)
                         return

@@ -87,6 +87,16 @@ class DesktopTests(unittest.TestCase):
         with library_lock(self.root):
             pass
 
+    def test_view_choice_survives_desktop_service_restart(self):
+        self.start()
+        self.session.server.catalog.favorites.set_record_view('thumbnails')
+        self.session.close()
+        self.session=DesktopSession(self.root)
+        base=self.start()
+        with urlopen(base+'/api/preferences') as response:
+            self.assertEqual(json.load(response)['records_view'],'thumbnails')
+        self.assertEqual(self.session.server.catalog.recorded({})['summary']['states']['watched'],1)
+
     def test_browser_launcher_cannot_prepare_an_active_desktop_library(self):
         import launch
         self.start()

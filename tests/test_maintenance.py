@@ -205,6 +205,7 @@ class MaintenanceTests(unittest.TestCase):
         self.library.favorites.set_reading_state([1],'watched')
         self.library.favorites.mark_opened(1)
         self.library.favorites.set_tag_blacklist(['language:english'])
+        self.library.favorites.set_record_view('thumbnails')
         with self.library.favorites.connection() as db:
             db.execute("INSERT INTO jobs(id,query_json,host,state,total,created_at,updated_at) VALUES(7,'{}','e-hentai.org','running',1,1,1)")
             db.execute("INSERT INTO tasks(job_id,gid,token) VALUES(7,2,'abcdef0123')")
@@ -214,6 +215,7 @@ class MaintenanceTests(unittest.TestCase):
         self.library.favorites.save(1,999,'e-hentai.org')
         self.library.favorites.set_reading_state([1],'planned')
         self.library.favorites.set_tag_blacklist([])
+        self.library.favorites.set_record_view('minimal')
         save_json(self.data/'tag-translations.json',{'data':[]})
         ready=self.engine.prepare_restore(result['path'])
         self.assertEqual(ready['summary'],{'favorites':1,'reading_states':1,'jobs':1})
@@ -228,6 +230,7 @@ class MaintenanceTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=7').fetchone()[0],'paused')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM tasks WHERE job_id=7').fetchone()[0],1)
         self.assertEqual(self.library.favorites.get_tag_blacklist(),['language:english'])
+        self.assertEqual(self.library.favorites.get_record_view(),'thumbnails')
         with closing(sqlite3.connect(Path(restored['backup']['path'])/'data/favorites.sqlite3')) as db:
             self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=1').fetchone()[0],999)
         self.assertIsNone(self.engine.prepared_restore())

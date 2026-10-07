@@ -1,6 +1,6 @@
 """Exercise the actual packaged WebView2 against an isolated miniature library."""
 
-from contextlib import closing, redirect_stdout
+from contextlib import closing, nullcontext, redirect_stdout
 from pathlib import Path
 import base64
 import hashlib
@@ -15,7 +15,7 @@ import faulthandler
 import traceback
 
 
-def verify_desktop(report_path):
+def verify_desktop(report_path, fixture_root=None):
     import webview
     from desktop import DesktopApi
     from desktop_service import DesktopSession
@@ -28,10 +28,13 @@ def verify_desktop(report_path):
     def stage(value):
         report["stage"] = value
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    with tempfile.TemporaryDirectory(prefix="excatalog-desktop-check-") as directory:
+    if fixture_root is not None and not fixture_root.resolve().name.startswith("excatalog-desktop-check-"):
+        raise ValueError("隔离验证只接受专用临时测试资料目录。")
+    fixture = nullcontext(str(fixture_root.resolve())) if fixture_root else tempfile.TemporaryDirectory(prefix="excatalog-desktop-check-")
+    with fixture as directory:
         root = Path(directory)
         data = root / "data"
-        data.mkdir()
+        data.mkdir(parents=True, exist_ok=True)
         import tkinter
         picker = tkinter.Tk()
         picker.withdraw()
@@ -40,12 +43,12 @@ def verify_desktop(report_path):
         database = data / "catalog.sqlite3"
         with closing(sqlite3.connect(database)) as db:
             db.executescript("""
-                CREATE TABLE gallery(gid INTEGER PRIMARY KEY,token TEXT,title TEXT,title_jpn TEXT,category TEXT,posted INTEGER,filecount INTEGER,rating TEXT,removed INTEGER DEFAULT 0,replaced INTEGER DEFAULT 0,expunged INTEGER DEFAULT 0);
-                CREATE TABLE tag(id INTEGER PRIMARY KEY,name TEXT UNIQUE);
-                CREATE TABLE gid_tid(gid INTEGER,tid INTEGER);
-                INSERT INTO gallery VALUES(1,'abcdef0123','Desktop verification','','Non-H',1,10,'4.0',0,0,0);
-                INSERT INTO tag VALUES(1,'language:english');
-                INSERT INTO gid_tid VALUES(1,1);
+                CREATE TABLE IF NOT EXISTS gallery(gid INTEGER PRIMARY KEY,token TEXT,title TEXT,title_jpn TEXT,category TEXT,posted INTEGER,filecount INTEGER,rating TEXT,removed INTEGER DEFAULT 0,replaced INTEGER DEFAULT 0,expunged INTEGER DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS tag(id INTEGER PRIMARY KEY,name TEXT UNIQUE);
+                CREATE TABLE IF NOT EXISTS gid_tid(gid INTEGER,tid INTEGER,PRIMARY KEY(gid,tid));
+                INSERT OR IGNORE INTO gallery VALUES(1,'abcdef0123','Desktop verification','','Non-H',1,10,'4.0',0,0,0);
+                INSERT OR IGNORE INTO tag VALUES(1,'language:english');
+                INSERT OR IGNORE INTO gid_tid VALUES(1,1);
             """)
         with redirect_stdout(io.StringIO()):
             initialize(database)
@@ -55,6 +58,9 @@ def verify_desktop(report_path):
         url = session.start(lambda message: None)
         session.server.catalog.favorites.save(1, 123, "exhentai.org")
         api = DesktopApi(session)
+        notes_pending = api._updates.info()["show_notes"]
+        expected_view = session.server.catalog.favorites.get_record_view() or "extended"
+        report["initial_saved_view"] = expected_view
         window = webview.create_window("桌面版隔离验证", url=url, js_api=api, width=1360, height=900, hidden=True)
         api._window = window
 
@@ -91,7 +97,7 @@ def verify_desktop(report_path):
                     client = promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#client-check-update')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Update UI did not initialize'));}},50);})")
                     if not client:
                         raise AssertionError("Client update controls missing")
-                    if page == "/":
+                    if page == "/" and notes_pending:
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#client-update-dialog[open]')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Update notes did not open'));}},50);})")
                         styled = window.evaluate_js("(()=>{const dialog=document.querySelector('#client-update-dialog'),notes=dialog.querySelector('.client-release-notes');return {width:dialog.getBoundingClientRect().width,font:getComputedStyle(notes).fontSize,items:notes.querySelectorAll('li').length,highlights:notes.querySelectorAll('strong').length,display:getComputedStyle(dialog).display};})()")
                         if not 620 <= styled["width"] <= 680 or styled["font"] != "14px" or styled["items"] < 1 or styled["display"] != "flex":
@@ -112,11 +118,20 @@ def verify_desktop(report_path):
                             raise AssertionError("Read notes were shown again after navigation")
                     if page == "/records":
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('.saved-card')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Records did not load'));}},50);})")
-                        for mode in ("minimal", "minimal-tags", "compact", "extended", "thumbnails"):
+                        actual_view = window.evaluate_js("document.querySelector('#record-view').value")
+                        if actual_view != expected_view:
+                            raise AssertionError({"expected":expected_view,"actual":actual_view})
+                        report["initial_rendered_view"] = actual_view
+                        for mode in ("minimal", "compact", "extended", "thumbnails"):
                             check_view = window.evaluate_js("(()=>{const select=document.querySelector('#record-view');select.value=" + json.dumps(mode) + ";select.dispatchEvent(new Event('change'));return {cards:document.querySelectorAll('.saved-card').length,overflow:document.documentElement.scrollWidth>innerWidth+1};})()")
                             if check_view["cards"] != 1 or check_view["overflow"]:
                                 raise AssertionError(check_view)
-                        report["checks"].append("all five record views render in actual packaged WebView2")
+                        report["checks"].append("all four record views render in actual packaged WebView2")
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(!document.querySelector('#record-view').disabled){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('View preference did not save'));}},50);})")
+                        preference = promise("fetch('/api/preferences').then(r=>r.json())")
+                        if preference["records_view"] != "thumbnails":
+                            raise AssertionError(preference)
+                        report["checks"].append("thumbnail preference committed to local database before exit")
                 stage("search API")
                 result = promise("fetch('/api/search?tag=language%3Aenglish').then(r=>r.json()).then(d=>({total:d.total}))")
                 if result["total"] != 1:

@@ -644,7 +644,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif self.path.endswith("/prepare"):
                     result=manager.start("prepare",expected_sha256=payload.get("sha256",""))
                 elif self.path.endswith("/apply"):
-                    result=manager.start("apply",identifier=payload.get("prepared_id",""),allow_older=payload.get("allow_older",False))
+                    result=manager.start("apply",identifier=payload.get("prepared_id",""),allow_older=payload.get("allow_older",False),create_backup=payload.get("create_backup",True))
                 elif self.path.endswith("/settings"):
                     result=manager.configure(payload.get("backup_on_completion"),payload.get("backup_directory"))
                 elif self.path.endswith("/prepare-restore"):

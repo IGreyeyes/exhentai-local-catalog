@@ -9,6 +9,7 @@
   let favoritesTaskId="",favoritesFileKey="",favoritesPreparedId="";
   let favoritesLocalMessage=null;
   let identityLoadedKey="",identityChecked=null,identityLocalMessage=null,identityEditing=false;
+  let catalogRequest=null,catalogLocalError="",catalogConnectionError="",catalogUnconfirmed=false,actionRevision=0;
   const identityApiAvailable=()=>Boolean(state?.collector_identity?.collector_id&&typeof state?.collector_identity_initialized==="boolean");
   function identityMessage(text,error=false){identityLocalMessage={text,error};ui("collector-identity-feedback").textContent=text;ui("collector-identity-feedback").classList.toggle("error",error);}
   function identityMatches(){return Boolean(identityChecked&&identityChecked.current_id===state?.collector_identity?.collector_id&&identityChecked.key===fileKey(ui("collector-identity-file").files[0]));}
@@ -51,9 +52,14 @@
   }
   function message(text,error=false){ui("maintenance-status").textContent=text;ui("maintenance-status").classList.toggle("error",error);}
   function controls(){
-    const working=Boolean(busy||state?.busy||window.catalogStopped||!token||!state);
+    const working=Boolean(busy||catalogUnconfirmed||state?.busy||window.catalogStopped||!token||!state);
     ["maintenance-backup","backup-full","maintenance-prepare","archive-sha256","maintenance-stop","maintenance-stop-request","backup-directory","backup-save-directory","backup-default-directory","backup-automatic","backup-browse","restore-browse","restore-directory","restore-full","maintenance-check-restore"].forEach(id=>ui(id).disabled=working);
     ui("maintenance-apply").disabled=working||!state?.prepared||(state.prepared.older&&!ui("allow-older-import").checked);
+    ui("maintenance-apply-no-backup").disabled=ui("maintenance-apply").disabled;
+    const catalogTask=catalogRequest||(state?.busy&&["prepare","apply"].includes(state.kind)?state:null);
+    ui("maintenance-prepare").textContent=catalogTask?.kind==="prepare"?"正在检查并准备…":"检查并准备新版目录";
+    ui("maintenance-apply").textContent=catalogTask?.kind==="apply"&&catalogTask.create_backup!==false?"正在备份并应用…":"备份旧版并应用更新";
+    ui("maintenance-apply-no-backup").textContent=catalogTask?.kind==="apply"&&catalogTask.create_backup===false?"正在直接应用…":"不备份直接应用更新";
     const restore=state?.prepared_restore;
     const matches=restore&&ui("restore-directory").value.trim()===restore.source&&ui("restore-full").checked===restore.include_catalog;
     ui("restore-confirm").disabled=working||!matches;
@@ -122,11 +128,47 @@
     ui("translation-feedback").textContent=task?.message||(local.error||"点击「检查更新」查询官方版本；检查本身不会安装词库。");
     ui("translation-feedback").classList.toggle("error",Boolean(failed||local.error));
   }
+  function renderCatalog(){
+    if(!state)return;
+    const counts=state.backup_summary||{total:(state.backups||[]).length};
+    const countText=`当前目录共有 ${number(counts.total)} 份成功备份${counts.full!==undefined?`（完整 ${number(counts.full)} 份，轻量 ${number(counts.data)} 份）`:""}。列表显示最近 10 份，未完成的备份不计入。`;
+    ui("backup-count").textContent=countText;ui("catalog-backup-count").textContent=countText;
+    ui("catalog-backup-path").textContent=state.backup_directory||"—";
+    const info=state.catalog_info||{};
+    ui("catalog-current").textContent=info.gallery_count!==undefined?`当前已生效目录：${number(info.gallery_count)} 条作品，${number(info.tag_count)} 个标签，最新作品发布日期 ${date(info.latest_posted)}。`:"";
+    const tasks=state.catalog_tasks||state.recent_tasks||[];
+    const task=catalogRequest||(["prepare","apply"].includes(state.kind)?state:[...tasks].reverse().find(item=>["prepare","apply"].includes(item.kind)));
+    const running=Boolean(task?.busy),failed=Boolean(catalogLocalError||task?.phase==="failed"||task?.phase==="interrupted");
+    const label=catalogLocalError?"操作未提交":running?(task.kind==="prepare"?"正在检查并准备新版目录":"正在应用作品目录更新"):task?.phase==="interrupted"?"上次目录操作被中断":failed?"目录操作未完成":task?.kind==="apply"?"作品目录更新完成":task?.result?.same_archive?"当前压缩包已应用":state.prepared?"新版已准备好，等待确认应用":"检查与应用是两个步骤";
+    ui("catalog-phase").textContent=label;
+    ui("catalog-feedback").classList.toggle("running",running);ui("catalog-feedback").classList.toggle("error",failed);
+    ui("catalog-feedback").setAttribute("aria-busy",String(running));ui("catalog-progress").hidden=!running;
+    ui("catalog-message").textContent=catalogLocalError||task?.message||"检查只准备新版目录；确认应用后才会切换。";
+    if(running&&task.started_at){
+      const seconds=Math.max(0,Math.floor((Date.now()-new Date(task.started_at).getTime())/1000));
+      ui("catalog-elapsed").textContent=`已用时 ${Math.floor(seconds/60)} 分 ${seconds%60} 秒`;
+    }else ui("catalog-elapsed").textContent=task?.updated_at?new Date(task.updated_at).toLocaleString("zh-CN",{timeZone:"Asia/Hong_Kong"}):"";
+    ui("catalog-connection-error").hidden=!catalogConnectionError;ui("catalog-connection-error").textContent=catalogConnectionError;
+    const backup=task?.backup||task?.result?.backup;
+    ui("catalog-task-backup").hidden=task?.kind!=="apply";
+    ui("catalog-task-backup").textContent=backup?`本次旧版完整备份已保存：${backup.path}`:task?.create_backup===false?"本次选择不备份，不会生成新的备份文件夹。":running?"本次旧版完整备份尚未完成，以完成后的路径提示为准。":"本次未生成成功备份。";
+    const last=[...tasks].reverse().find(item=>item.kind==="apply");
+    ui("catalog-last-result").hidden=!last;
+    if(last){
+      const saved=last.backup||last.result?.backup,success=last.phase==="completed";
+      ui("catalog-last-result").classList.toggle("error",!success);
+      ui("catalog-last-title").textContent=`最近一次应用${success?"已完成":"未完成"} · ${new Date(last.updated_at).toLocaleString("zh-CN",{timeZone:"Asia/Hong_Kong"})}`;
+      ui("catalog-last-message").textContent=success?`已生效：${number(last.result.new.gallery_count)} 条作品，${number(last.result.new.tag_count)} 个标签，最新作品发布日期 ${date(last.result.new.latest_posted)}。`:last.message;
+      ui("catalog-last-backup").textContent=saved?`旧版完整备份保存于：${saved.path}`:last.create_backup===false?"该次应用未创建备份。":"该次应用没有成功完成备份。";
+      ui("catalog-view").hidden=!success;
+    }
+  }
   function render(){
     if(!state)return;
     renderIdentity();
     renderTranslations();
     renderFavorites();
+    renderCatalog();
     ui("backup-path").textContent=state.backup_directory;
     if(!directoryLoaded){ui("backup-directory").value=state.backup_directory;directoryLoaded=true;}
     ui("archive-path").textContent=state.archive_path;
@@ -176,33 +218,38 @@
   async function refresh(){
     if(polling||busy||window.catalogStopped)return;
     polling=true;
+    const revision=actionRevision;
     try{
-      const response=await fetch("/api/maintenance");if(!response.ok)throw new Error("无法读取维护信息，请重启服务后刷新。");
-      state=await response.json();if(!busy)render();
+      const response=await fetch("/api/maintenance",{signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error("无法读取维护信息，请重启服务后刷新。");
+      const updated=await response.json();if(revision!==actionRevision||busy)return;
+      state=updated;catalogConnectionError="";if(catalogUnconfirmed)catalogLocalError="";catalogUnconfirmed=false;render();
       ui("connection").replaceChildren(element("i",""),document.createTextNode(state.busy?" 维护任务进行中":" 本地服务已连接"));
-    }catch(error){message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击「启动搜索.cmd」再刷新。":error.message,true);ui("connection").textContent="本地服务未连接";}
+    }catch(error){if(revision!==actionRevision||busy)return;catalogConnectionError="暂时无法读取最新进度，将自动重试。操作可能仍在后台运行，请勿重复应用；重新连接后会显示最终结果。";renderCatalog();message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击「启动搜索.cmd」再刷新。":error.message,true);ui("connection").textContent="本地服务未连接";}
     finally{polling=false;}
   }
   async function action(name,payload={}){
     if(busy)return false;
+    actionRevision++;
+    const catalogAction=["prepare","apply"].includes(name);
+    if(catalogAction){catalogLocalError="";catalogConnectionError="";catalogRequest={kind:name,busy:true,create_backup:payload.create_backup!==false,started_at:new Date().toISOString(),message:name==="prepare"?"正在提交检查请求，完成后仍需确认应用。":payload.create_backup===false?"正在提交直接应用请求，本次不创建备份…":"正在提交应用请求，先完整备份旧版再切换…"};renderCatalog();}
     busy=true;controls();message(name==="stop"?"正在暂停采集并等待当前请求结束，请稍候…":"正在提交维护操作…");
     try{
-      const response=await fetch(`/api/maintenance/${name}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify(payload)});
-      const result=await response.json();if(!response.ok)throw new Error(result.error||"操作失败");
+      const response=await fetch(`/api/maintenance/${name}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify(payload),...(catalogAction?{signal:AbortSignal.timeout(15000)}:{})});
+      const result=await response.json();if(!response.ok){const error=new Error(result.error||"操作失败");error.rejected=true;throw error;}
       if(name==="stop"){
         window.catalogStopped=true;ui("connection").textContent="本地服务正在退出";
         message(window.catalogDesktop?"服务已停止，采集进度已保存。请关闭窗口，重新打开应用即可继续使用。":"服务已停止，采集进度已保存。再次使用时，请双击「启动搜索.cmd」，然后刷新本页。");
         document.querySelectorAll("button,input,select").forEach(control=>control.disabled=true);ui("maintenance-stop-confirm").hidden=true;
       }else{
-        state={...result,cover_cache:result.cover_cache||state?.cover_cache};render();
+        catalogRequest=null;state={...result,cover_cache:result.cover_cache||state?.cover_cache};render();
         if(name==="settings"){
           ui("backup-directory").value=state.backup_directory;
           message("备份设置已保存。当前备份位置："+state.backup_directory);
         }
       }
       return true;
-    }catch(error){message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击启动搜索。":error.message,true);return false;}
-    finally{busy=false;if(!window.catalogStopped)controls();}
+    }catch(error){if(catalogAction){catalogRequest=null;catalogUnconfirmed=!error.rejected;catalogLocalError=catalogUnconfirmed?"未能确认请求结果，将自动读取后台状态。请勿重复应用。":error.message;renderCatalog();}message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击启动搜索。":error.message,true);return false;}
+    finally{busy=false;catalogRequest=null;if(!window.catalogStopped)controls();}
   }
   function invalidateRestore(){ui("restore-confirm").checked=false;ui("prepared-restore").hidden=true;controls();}
   async function chooseDirectory(purpose){
@@ -292,6 +339,11 @@
   ui("favorites-import").onclick=()=>{if(favoritesMatches()&&ui("favorites-confirm").checked){favoritesLocalMessage=null;action("favorites-import",{prepared_id:state.prepared_favorites.id});}};
   ui("allow-older-import").onchange=controls;
   ui("maintenance-apply").onclick=()=>{if(state?.prepared)action("apply",{prepared_id:state.prepared.id,allow_older:ui("allow-older-import").checked});};
+  ui("maintenance-apply-no-backup").onclick=()=>{
+    if(!state?.prepared||ui("maintenance-apply-no-backup").disabled)return;
+    if(!confirm("本次不创建旧版备份。更新成功后，无法使用本次操作恢复旧版目录；切换失败仍会尝试回退。收藏数、阅读状态和任务进度会保留。确定直接应用更新吗？"))return;
+    action("apply",{prepared_id:state.prepared.id,allow_older:ui("allow-older-import").checked,create_backup:false});
+  };
   function showStop(){ui("maintenance-stop-confirm").hidden=false;ui("maintenance-stop-confirm").scrollIntoView({block:"nearest",behavior:"smooth"});}
   ui("maintenance-stop-request").onclick=showStop;
   ui("maintenance-stop-cancel").onclick=()=>ui("maintenance-stop-confirm").hidden=true;
@@ -300,4 +352,5 @@
   controls();
   (async()=>{try{const response=await fetch("/api/status");if(!response.ok)throw new Error();const data=await response.json();token=data.action_token||"";await refresh();}catch(error){message("维护工具未连接，请重启服务后刷新。",true);}})();
   setInterval(refresh,3000);
+  setInterval(()=>{if(catalogRequest||state?.busy&&["prepare","apply"].includes(state.kind))renderCatalog();},1000);
 })();

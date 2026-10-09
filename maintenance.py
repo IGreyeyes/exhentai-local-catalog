@@ -56,10 +56,18 @@ def contained(path, root):
     return path
 
 
-def sqlite_backup(source, destination):
+def sqlite_backup(source, destination, progress=None):
     destination.parent.mkdir(parents=True,exist_ok=True)
+    last_report = 0
+    def report(status, remaining, total):
+        nonlocal last_report
+        now = time.monotonic()
+        if progress and (remaining == 0 or now-last_report >= 0.5):
+            last_report = now
+            progress(f"正在一致性备份 {source.name}：{total-remaining:,}/{total:,} 页（{(total-remaining)*100/max(total,1):.0f}%）")
     with closing(sqlite3.connect(source.resolve().as_uri()+"?mode=ro",uri=True,timeout=30)) as original, closing(sqlite3.connect(destination)) as copied:
-        original.backup(copied,pages=2048,sleep=0.05)
+        original.backup(copied,pages=2048,sleep=0.05,progress=report)
+        if progress:progress("正在检查备份数据库完整性："+source.name)
         if [row[0] for row in copied.execute("PRAGMA quick_check")] != ["ok"]:
             raise ValueError("备份数据库完整性检查失败，未标记为成功。")
         copied.execute("PRAGMA journal_mode=DELETE")
@@ -98,7 +106,9 @@ def recover_import(catalog_path):
             elif not journal["had_info"] and info_path.exists():
                 info_path.rename(stage/("interrupted-info-"+secrets.token_hex(4)+".json"))
         elif journal["state"]!="planned":
-            raise ValueError("无法自动找到回退目录，请使用更新前的完整备份恢复。")
+            if journal.get("backup"):
+                raise ValueError("无法自动找到回退目录，请使用更新前的完整备份恢复。")
+            raise ValueError("无法自动找到旧版暂存目录，本次没有完整备份；请保留 data/.maintenance 中的资料并重新检查。")
         inspect_database(catalog_path)
     journal_path.unlink()
     return "上次目录切换已恢复。" if journal["state"]!="committed" else "上次目录更新已完成。"
@@ -294,7 +304,7 @@ class LibraryMaintenance:
                 source=contained(source,self.root)
                 progress("正在一致性备份 "+source.name)
                 destination = temporary/relative
-                sqlite_backup(source,destination)
+                sqlite_backup(source,destination,progress)
                 files.append(relative)
         metadata = ["catalog_info.json","tag-translations.json","tag-translations-info.json","maintenance-settings.json"]
         for name in metadata:
@@ -320,7 +330,12 @@ class LibraryMaintenance:
             required = sum(path.stat().st_size for path in program_files)
             if shutil.disk_usage(temporary).free < required + 100*1024**2:
                 raise ValueError("磁盘剩余空间不足，无法备份桌面程序。")
-            for source in program_files:
+            last_program_report=0
+            for index,source in enumerate(program_files,1):
+                now=time.monotonic()
+                if now-last_program_report>=0.5 or index==len(program_files):
+                    progress(f"正在备份桌面程序文件 {index}/{len(program_files)}")
+                    last_program_report=now
                 relative = source.relative_to(Path(sys.executable).parent)
                 destination = temporary / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -334,10 +349,18 @@ class LibraryMaintenance:
                     (temporary/"static").mkdir(exist_ok=True)
                     shutil.copy2(source,temporary/"static"/source.name)
                     files.append("static/"+source.name)
+        entries = []
+        last_file_report=0
+        for index,name in enumerate(files,1):
+            now=time.monotonic()
+            if now-last_file_report>=0.5 or index==len(files):
+                progress(f"正在校验备份文件 {index}/{len(files)}：{name}")
+                last_file_report=now
+            entries.append({"path":name,"size":(temporary/name).stat().st_size,"sha256":digest_file(temporary/name)})
         manifest = {
             "format":1,"complete":True,"created_at":datetime.now(timezone.utc).isoformat(),
             "include_catalog":include_catalog,"reason":reason,
-            "files":[{"path":name,"size":(temporary/name).stat().st_size,"sha256":digest_file(temporary/name)} for name in files],
+            "files":entries,
         }
         manifest["size_bytes"] = sum(item["size"] for item in manifest["files"])
         save_json(temporary/"manifest.json",manifest)
@@ -345,18 +368,24 @@ class LibraryMaintenance:
         temporary.rename(final)
         return {"path":str(final),"name":final.name,**{key:manifest[key] for key in ("created_at","include_catalog","reason","size_bytes")}}
 
-    def list_backups(self):
-        if not self.backups.is_dir():return []
+    def backup_inventory(self):
+        counts={"total":0,"full":0,"data":0}
+        if not self.backups.is_dir():return {"backups":[],"backup_summary":counts}
         items=[]
         for folder in sorted(self.backups.iterdir(),reverse=True):
             if not folder.is_dir() or folder.name.endswith(".partial"):continue
             try:
                 manifest=read_json(contained(folder,self.backups)/"manifest.json")
-                if manifest and manifest.get("complete"):
-                    items.append({"name":folder.name,"path":str(folder),**{key:manifest.get(key) for key in ("created_at","include_catalog","reason","size_bytes")}})
+                if isinstance(manifest,dict) and manifest.get("complete") is True:
+                    counts["total"]+=1
+                    counts["full" if manifest.get("include_catalog") else "data"]+=1
+                    if len(items)<10:
+                        items.append({"name":folder.name,"path":str(folder),**{key:manifest.get(key) for key in ("created_at","include_catalog","reason","size_bytes")}})
             except (OSError,ValueError):continue
-            if len(items)>=10:break
-        return items
+        return {"backups":items,"backup_summary":counts}
+
+    def list_backups(self):
+        return self.backup_inventory()["backups"]
 
     def prepare_restore(self, folder, include_catalog=False, progress=lambda message:None):
         if not isinstance(folder,str) or not folder.strip():raise ValueError("请选择或填写含 manifest.json 的备份文件夹。")
@@ -505,7 +534,8 @@ class LibraryMaintenance:
         if result and (contained(result["stage"],self.staging)/"catalog.sqlite3").is_file():return result
         return None
 
-    def apply(self,identifier,allow_older=False,reload_catalog=lambda:None,progress=lambda message:None):
+    def apply(self,identifier,allow_older=False,reload_catalog=lambda:None,progress=lambda message:None,create_backup=True,backup_created=lambda backup:None):
+        if not isinstance(create_backup,bool):raise ValueError("备份选项须为开关值。")
         prepared=self.prepared()
         if not prepared or not isinstance(identifier,str) or not secrets.compare_digest(prepared["id"],identifier):
             raise ValueError("请先检查并准备新版目录，再确认应用更新。")
@@ -514,14 +544,21 @@ class LibraryMaintenance:
         current=read_json(self.data/"catalog_info.json",{})
         older=(prepared["new"].get("latest_posted") or 0)<(current.get("latest_posted") or 0)
         if older and not allow_older:raise ValueError("候选目录的最新作品日期较旧，未自动回退；如确有需要，请勾选允许较旧快照。")
+        progress("正在校验已准备的新版目录")
         if digest_file(candidate)!=prepared["catalog_sha256"]:raise ValueError("准备好的目录发生变化，请重新准备。")
-        progress("更新前自动创建完整备份")
-        backup=self.backup(True,"目录更新前自动备份",progress)
+        backup=None
+        if create_backup:
+            progress("更新前自动创建完整备份")
+            backup=self.backup(True,"目录更新前自动备份",progress)
+            backup_created(backup)
+            progress("旧版完整备份已完成："+backup["path"])
+        else:
+            progress("本次跳过备份，正在准备切换作品目录")
         previous=stage/"previous"
         previous.mkdir()
         info_path=self.data/"catalog_info.json"
         journal_path=self.data/"catalog-swap.json"
-        journal={"catalog":str(self.catalog_path),"stage":str(stage),"backup":backup["path"],"state":"planned","had_info":info_path.exists()}
+        journal={"catalog":str(self.catalog_path),"stage":str(stage),"backup":backup["path"] if backup else "","state":"planned","had_info":info_path.exists()}
         checkpoint(self.catalog_path)
         checkpoint(candidate)
         save_json(journal_path,journal)
@@ -539,7 +576,7 @@ class LibraryMaintenance:
             recover_import(self.catalog_path)
             reload_catalog()
             raise
-        # Only remove these named temporary originals after a verified full backup.
+        # Keep temporary originals until the new catalog is loaded and the switch is committed.
         warning=""
         try:
             for name in ("catalog.sqlite3","catalog_info.json"):
@@ -548,8 +585,9 @@ class LibraryMaintenance:
             self.prepared_file.unlink(missing_ok=True)
             journal_path.unlink()
         except OSError:
-            warning="部分旧版暂存文件未能清理，完整备份已保留。"
-        return {"backup":backup,"new":prepared["new"],"message":"新版作品目录已生效；收藏数、任务进度和中文词库已保留。"+warning}
+            warning="部分旧版暂存文件未能清理，请保留暂存资料。"
+        backup_message="旧版完整备份已保存："+backup["path"] if backup else "本次未创建备份。"
+        return {"backup":backup,"new":prepared["new"],"message":"作品目录更新完成，新版已生效；收藏数、任务进度和中文词库已保留。"+backup_message+warning}
 
 
 class MaintenanceManager:
@@ -562,6 +600,8 @@ class MaintenanceManager:
         self.settings_path=engine.data/"maintenance-settings.json"
         self.history_path=engine.data/"maintenance-history.json"
         self.history=read_json(self.history_path,[])
+        self.catalog_history_path=engine.data/"catalog-update-history.json"
+        self.catalog_history=read_json(self.catalog_history_path,[task for task in self.history if task.get("kind") in {"prepare","apply"}])
         self.settings={"backup_on_completion":False,**read_json(self.settings_path,{})}
         self.state=read_json(self.state_path,{"kind":"","phase":"idle","message":"维护工具已就绪。","busy":False})
         if self.state.get("busy"):self.state.update(busy=False,phase="interrupted",message="上次维护被中断，旧数据和暂存文件已保留；请重新检查。")
@@ -610,7 +650,9 @@ finally:
 
     def status(self):
         with self.lock:
-            return {**self.state,"settings":dict(self.settings),"recent_tasks":list(self.history),"backup_directory":str(self.engine.backups),"default_backup_directory":str(self.engine.root/"backups"),"archive_path":str(self.engine.root/"e-hentai.db.zstd"),"archive_exists":(self.engine.root/"e-hentai.db.zstd").is_file(),"catalog_size":self.engine.catalog_path.stat().st_size if self.engine.catalog_path.exists() else 0,"prepared":self.engine.prepared(),"prepared_restore":self.engine.prepared_restore(),"backups":self.engine.list_backups(),"translations":self.engine.translation_status(),"prepared_favorites":self.engine.prepared_favorites(),**self.engine.collector_identity_status()}
+            try:catalog_size=self.engine.catalog_path.stat().st_size
+            except FileNotFoundError:catalog_size=0
+            return {**self.state,"settings":dict(self.settings),"recent_tasks":list(self.history),"catalog_tasks":list(self.catalog_history),"catalog_info":read_json(self.engine.data/"catalog_info.json",{}),"backup_directory":str(self.engine.backups),"default_backup_directory":str(self.engine.root/"backups"),"archive_path":str(self.engine.root/"e-hentai.db.zstd"),"archive_exists":(self.engine.root/"e-hentai.db.zstd").is_file(),"catalog_size":catalog_size,"prepared":self.engine.prepared(),"prepared_restore":self.engine.prepared_restore(),**self.engine.backup_inventory(),"translations":self.engine.translation_status(),"prepared_favorites":self.engine.prepared_favorites(),**self.engine.collector_identity_status()}
 
     def set_collector_name(self, name, initialize=False):
         with self.lock:
@@ -666,7 +708,7 @@ finally:
             self.engine.backups=directory
         return self.status()
 
-    def start(self,kind,include_catalog=False,expected_sha256="",identifier="",allow_older=False,reason="手动备份",restore_path="",favorites_path="",identity=None,expected_collector_id=""):
+    def start(self,kind,include_catalog=False,expected_sha256="",identifier="",allow_older=False,reason="手动备份",restore_path="",favorites_path="",identity=None,expected_collector_id="",create_backup=True):
         with self.lock:
             if self.stopping:raise ValueError("服务正在停止，暂时不能启动维护。")
             if self.state.get("busy"):raise ValueError("已有维护任务正在运行，请等待完成。")
@@ -676,11 +718,11 @@ finally:
                 identity = validate_collector(**identity)
                 if self.engine.collector_identity()["collector_id"] != expected_collector_id:
                     raise ValueError("当前采集身份已变化，请重新检查身份文件。")
-            if not isinstance(include_catalog,bool) or not isinstance(allow_older,bool) or not isinstance(expected_sha256,str) or not isinstance(restore_path,str):raise ValueError("维护选项格式不正确。")
-            self.state={"kind":kind,"phase":"running","message":"正在准备维护任务…","busy":True,"id":secrets.token_hex(8),"started_at":datetime.now(timezone.utc).isoformat()}
+            if not isinstance(create_backup,bool) or not isinstance(include_catalog,bool) or not isinstance(allow_older,bool) or not isinstance(expected_sha256,str) or not isinstance(restore_path,str):raise ValueError("维护选项格式不正确。")
+            self.state={"kind":kind,"phase":"running","message":"正在准备维护任务…","busy":True,"id":secrets.token_hex(8),"started_at":datetime.now(timezone.utc).isoformat(),"create_backup":create_backup}
             task_id=self.state["id"]
             save_json(self.state_path,self.state)
-            self.thread=threading.Thread(target=self._run,args=(kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path,favorites_path,identity,expected_collector_id),daemon=False,name="catalog-maintenance")
+            self.thread=threading.Thread(target=self._run,args=(kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path,favorites_path,identity,expected_collector_id,create_backup),daemon=False,name="catalog-maintenance")
             self.thread.start()
         return {**self.status(),"requested_id":task_id}
 
@@ -689,9 +731,16 @@ finally:
             finished={**self.state,"message":message,"phase":phase,"result":result,"busy":False,"updated_at":datetime.now(timezone.utc).isoformat()}
             self.history=(self.history+[finished])[-10:]
             save_json(self.history_path,self.history)
+            if finished["kind"] in {"prepare","apply"}:
+                history=self.catalog_history+[finished]
+                last_apply=next((task for task in reversed(history) if task["kind"]=="apply"),None)
+                self.catalog_history=history[-10:]
+                if last_apply and last_apply not in self.catalog_history:
+                    self.catalog_history=[last_apply]+self.catalog_history[-9:]
+                save_json(self.catalog_history_path,self.catalog_history)
             self.publish(message,phase=phase,result=result,busy=False)
 
-    def _run(self,kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path,favorites_path,identity,expected_collector_id):
+    def _run(self,kind,include_catalog,expected_sha256,identifier,allow_older,reason,restore_path,favorites_path,identity,expected_collector_id,create_backup):
         try:
             if kind=="favorites-prepare":
                 result=self.engine.prepare_favorites(favorites_path,self.state["id"],self.publish)
@@ -707,7 +756,7 @@ finally:
                 message="备份完成："+result["path"]
             elif kind=="prepare":
                 result=self.engine.prepare_archive(expected_sha256,self.publish)
-                message=result.get("message","新版目录已准备好，请核对信息后确认备份并应用。")
+                message=result.get("message","新版目录已准备好，请核对信息后选择应用方式。")
             elif kind=="prepare-restore":
                 result=self.engine.prepare_restore(restore_path,include_catalog,self.publish)
                 message="备份已校验，请核对内容后确认导入。"
@@ -719,7 +768,7 @@ finally:
                         result=self.engine.import_collector_identity(identity,expected_collector_id,self.publish)
                         self.on_favorites_merged()
                     elif kind=="restore":result=self.engine.restore(identifier,self.reload_catalog,self.publish)
-                    else:result=self.engine.apply(identifier,allow_older,self.reload_catalog,self.publish)
+                    else:result=self.engine.apply(identifier,allow_older,self.reload_catalog,self.publish,create_backup,lambda backup:self.publish("旧版完整备份已完成："+backup["path"],backup=backup))
                 message=result["message"]
             self.finish(message,"completed",result)
         except Exception as error:

@@ -1,0 +1,84 @@
+const fs=require('fs'),path=require('path'),readline=require('readline');
+const {spawn}=require('child_process');
+const {chromium}=require(require.resolve('playwright',{paths:[path.resolve(path.dirname(process.execPath),'..')]}));
+const assert=(value,message)=>{if(!value)throw new Error(message);};
+const project=path.resolve(__dirname,'..'),output=path.join(project,'logs');
+fs.mkdirSync(output,{recursive:true});
+const fixture=fs.mkdtempSync(path.join(output,'excatalog-maintenance-'));
+let server,browser;
+async function main(){
+  server=spawn('py',['-3.14','-X','utf8','-u',path.join(__dirname,'visual_maintenance_server.py'),fixture],{windowsHide:true});
+  const base=await new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(new Error('Fixture startup timed out')),15000);
+    readline.createInterface({input:server.stdout}).on('line',line=>{if(line.startsWith('http://')){clearTimeout(timer);resolve(line);}});
+    server.once('exit',code=>reject(new Error('Fixture exited: '+code)));
+  });
+  browser=await chromium.launch({headless:true,channel:'chrome'});
+  const page=await browser.newPage({viewport:{width:1440,height:1100}}),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(base+'/maintenance#catalog-section');
+  await page.waitForFunction(()=>!document.querySelector('#maintenance-prepare').disabled);
+  assert((await page.locator('#catalog-backup-path').textContent())===path.join(fixture,'backups'),'Actual backup directory missing');
+  assert((await page.locator('#catalog-backup-count').textContent()).includes('0 份成功备份'),'Initial count missing');
+  await page.locator('#maintenance-prepare').click();
+  await page.locator('#prepared-import').waitFor({state:'visible'});
+  await page.waitForFunction(()=>!document.querySelector('#maintenance-apply').disabled);
+  assert((await page.locator('#catalog-phase').textContent()).includes('等待确认'),'Prepared is incorrectly marked applied');
+  await page.locator('#catalog-section').screenshot({path:path.join(output,'maintenance-prepared.png')});
+  await page.locator('#maintenance-apply').click();
+  await page.waitForFunction(()=>document.querySelector('#catalog-message').textContent.includes('50%'));
+  assert(await page.locator('#catalog-progress').isVisible(),'Running progress missing near buttons');
+  assert(await page.locator('#maintenance-prepare').isDisabled()&&await page.locator('#maintenance-apply-no-backup').isDisabled(),'Running task allows another update');
+  assert((await page.locator('#maintenance-apply').textContent()).includes('正在备份'),'Running button caption missing');
+  await page.locator('#catalog-section').screenshot({path:path.join(output,'maintenance-running.png')});
+  await page.waitForFunction(()=>document.querySelector('#catalog-phase').textContent==='作品目录更新完成',null,{timeout:20000});
+  assert((await page.locator('#catalog-current').textContent()).includes('3 条作品'),'Current catalog summary not refreshed');
+  assert((await page.locator('#catalog-backup-count').textContent()).includes('1 份成功备份'),'New backup count not refreshed');
+  const saved=await page.locator('#catalog-last-backup').textContent();
+  assert(saved.includes(path.join(fixture,'backups'))&&saved.includes('-full-'),'Completed backup path missing');
+  await page.locator('#catalog-section').screenshot({path:path.join(output,'maintenance-completed.png')});
+  await page.locator('#maintenance-prepare').click();
+  await page.waitForFunction(()=>document.querySelector('#catalog-phase').textContent==='当前压缩包已应用');
+  assert(await page.locator('#catalog-last-backup').textContent()===saved,'Rechecking lost backup result');
+  await page.reload();await page.waitForFunction(()=>!document.querySelector('#maintenance-prepare').disabled);
+  assert(await page.locator('#catalog-last-backup').textContent()===saved,'Reload lost application result');
+  fs.copyFileSync(path.join(fixture,'incoming-4.zstd'),path.join(fixture,'e-hentai.db.zstd'));
+  await page.locator('#maintenance-prepare').click();await page.locator('#prepared-import').waitFor({state:'visible'});
+  await page.waitForFunction(()=>!document.querySelector('#maintenance-apply-no-backup').disabled);
+  page.once('dialog',dialog=>dialog.dismiss());await page.locator('#maintenance-apply-no-backup').click();
+  assert(await page.locator('#prepared-import').isVisible(),'Cancelled direct apply changed catalog');
+  fs.writeFileSync(path.join(fixture,'fail-next-switch'),'test');
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#maintenance-apply-no-backup').click();
+  await page.waitForFunction(()=>document.querySelector('#catalog-phase').textContent==='目录操作未完成');
+  assert((await page.locator('#catalog-message').textContent()).includes('模拟目录载入失败'),'Failure invisible near buttons');
+  assert((await page.locator('#catalog-current').textContent()).includes('3 条作品'),'Failed switch did not roll back');
+  assert((await page.locator('#catalog-backup-count').textContent()).includes('1 份成功备份'),'Failed direct apply created a backup');
+  await page.locator('#maintenance-prepare').click();await page.locator('#prepared-import').waitFor({state:'visible'});
+  await page.waitForFunction(()=>!document.querySelector('#maintenance-apply-no-backup').disabled);
+  page.once('dialog',dialog=>dialog.accept());await page.locator('#maintenance-apply-no-backup').click();
+  await page.waitForFunction(()=>document.querySelector('#catalog-phase').textContent==='作品目录更新完成');
+  assert((await page.locator('#catalog-last-backup').textContent()).includes('未创建备份'),'Skipped backup is not explicit');
+  assert((await page.locator('#catalog-current').textContent()).includes('4 条作品'),'Direct update did not apply');
+  assert((await page.locator('#catalog-backup-count').textContent()).includes('1 份成功备份'),'Direct update created backup');
+  const snapshot=await(await page.request.get(base+'/api/maintenance')).json();
+  await page.route('**/api/maintenance',route=>route.fulfill({json:{...snapshot,backup_summary:{total:13,full:7,data:6}}}));
+  await page.reload();await page.waitForFunction(()=>document.querySelector('#catalog-backup-count').textContent.includes('13 份成功备份'));
+  for(const width of [1440,1000,390]){
+    await page.setViewportSize({width,height:1100});
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Maintenance overflow at '+width);
+    await page.locator('#catalog-section').screenshot({path:path.join(output,'maintenance-direct-'+width+'.png')});
+  }
+  await page.unroute('**/api/maintenance');
+  await page.route('**/api/maintenance',route=>route.abort());
+  await page.waitForFunction(()=>!document.querySelector('#catalog-connection-error').hidden);
+  assert((await page.locator('#catalog-connection-error').textContent()).includes('请勿重复应用'),'Polling failure looks like task completion');
+  await page.unroute('**/api/maintenance');
+  await page.waitForFunction(()=>document.querySelector('#catalog-connection-error').hidden);
+  assert(errors.length===0,'Browser errors: '+errors.join('; '));
+  console.log(JSON.stringify({passed:true,nearbyProgress:true,pageProgress:true,completionSummary:true,backupPath:true,totalBeyondTen:true,recheckKeepsResult:true,reloadKeepsResult:true,skipBackup:true,cancel:true,rollback:true,pollRecovery:true,responsiveWidths:[1440,1000,390],scriptErrors:errors}));
+}
+main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
+  if(browser)await browser.close();
+  if(server&&server.exitCode===null){server.kill();await new Promise(resolve=>server.once('exit',resolve));}
+  fs.rmSync(fixture,{recursive:true,force:true});
+});

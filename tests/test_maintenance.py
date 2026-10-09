@@ -119,6 +119,113 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(self.count(),2)
         self.assertEqual(self.engine.list_backups(),[])
 
+    def test_apply_without_backup_preserves_personal_data_and_never_calls_backup(self):
+        self.archive();ready=self.prepare()
+        self.library.favorites.set_reading_state([1],'watched')
+        translations=digest_file(self.data/'tag-translations.json')
+        with patch.object(self.engine,'backup',side_effect=AssertionError('Backup must not run')):
+            result=self.engine.apply(ready['id'],create_backup=False)
+        self.assertIsNone(result['backup'])
+        self.assertIn('未创建备份',result['message'])
+        self.assertEqual(self.count(),3)
+        self.assertEqual(self.engine.list_backups(),[])
+        self.assertEqual(digest_file(self.data/'tag-translations.json'),translations)
+        with self.library.favorites.connection() as db:
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=1').fetchone()[0],37)
+            self.assertEqual(db.execute('SELECT state FROM record_status WHERE gid=1').fetchone()[0],'watched')
+        self.assertIsNone(self.engine.prepared())
+
+    def test_no_backup_reload_failure_rolls_back_and_remains_retryable(self):
+        self.archive();ready=self.prepare()
+        calls=[]
+        def reload():
+            calls.append(self.count())
+            if len(calls)==1:raise RuntimeError('simulated reload failure')
+        with self.assertRaises(RuntimeError):self.engine.apply(ready['id'],reload_catalog=reload,create_backup=False)
+        self.assertEqual(calls,[3,2])
+        self.assertEqual(self.count(),2)
+        self.assertEqual(read_json(self.data/'catalog_info.json')['gallery_count'],2)
+        self.assertFalse((self.data/'catalog-swap.json').exists())
+        self.assertEqual(self.engine.list_backups(),[])
+        # Rollback moved the incoming file aside; checking again prepares a fresh stage.
+        new=self.prepare();self.engine.apply(new['id'],create_backup=False)
+        self.assertEqual(self.count(),3)
+
+    def test_no_backup_still_rejects_older_tampered_and_invalid_options(self):
+        self.archive(count=1,posted=50);ready=self.prepare()
+        with self.assertRaisesRegex(ValueError,'较旧'):self.engine.apply(ready['id'],create_backup=False)
+        with self.assertRaisesRegex(ValueError,'备份选项'):self.engine.apply(ready['id'],create_backup='false')
+        with closing(sqlite3.connect(Path(ready['stage'])/'catalog.sqlite3')) as db:
+            db.execute("UPDATE gallery SET title='changed'")
+            db.commit()
+        with self.assertRaisesRegex(ValueError,'发生变化'):self.engine.apply(ready['id'],allow_older=True,create_backup=False)
+        self.assertEqual(self.count(),2)
+        self.assertEqual(self.engine.list_backups(),[])
+
+    def test_backup_inventory_counts_all_successful_backups_beyond_recent_ten(self):
+        root=self.engine.backups;root.mkdir()
+        for index in range(13):
+            folder=root/f'20261009-{index:02}-test';folder.mkdir()
+            save_json(folder/'manifest.json',{'complete':True,'include_catalog':index%2==0})
+        for name in ('unfinished.partial','incomplete','invalid','no-manifest'):
+            folder=root/name;folder.mkdir()
+            if name=='invalid':(folder/'manifest.json').write_text('invalid',encoding='utf-8')
+            elif name!='no-manifest':save_json(folder/'manifest.json',{'complete':name=='unfinished.partial'})
+        inventory=self.engine.backup_inventory()
+        self.assertEqual(inventory['backup_summary'],{'total':13,'full':7,'data':6})
+        self.assertEqual(len(inventory['backups']),10)
+        self.assertEqual(inventory['backups'][0]['name'],'20261009-12-test')
+        self.assertEqual(len(list(root.iterdir())),17)
+
+    def test_catalog_result_and_backup_survive_recheck_unrelated_tasks_and_restart(self):
+        self.archive();ready=self.prepare()
+        manager=MaintenanceManager(self.engine,nullcontext,lambda:None)
+        try:
+            manager.start('apply',identifier=ready['id']);manager.thread.join(timeout=10)
+            saved=manager.status()['result']['backup']['path']
+            with redirect_stdout(io.StringIO()):
+                manager.start('prepare');manager.thread.join(timeout=10)
+            self.assertTrue(manager.status()['result']['same_archive'])
+            # Repeated catalog checks must also retain the latest application result.
+            manager.state={'kind':'prepare','busy':False}
+            for index in range(11):manager.finish('already applied','completed',{'same_archive':True})
+            # A long stream of unrelated maintenance must not evict catalog results.
+            manager.state={'kind':'translations-check','busy':False}
+            for index in range(11):manager.finish('test dictionary check','completed',{})
+        finally:manager.close()
+        restarted=MaintenanceManager(self.engine,nullcontext,lambda:None)
+        try:
+            state=restarted.status()
+            apply=[task for task in state['catalog_tasks'] if task['kind']=='apply'][-1]
+            self.assertEqual(apply['phase'],'completed')
+            self.assertEqual(apply['result']['backup']['path'],saved)
+            self.assertEqual(state['backup_summary']['total'],1)
+            self.assertEqual(state['catalog_info']['gallery_count'],3)
+        finally:restarted.close()
+
+    def test_failed_switch_reports_successful_protection_backup(self):
+        self.archive();ready=self.prepare()
+        calls=[]
+        def reload():
+            calls.append(self.count())
+            if len(calls)==1:raise RuntimeError('simulated reload failure')
+        manager=MaintenanceManager(self.engine,nullcontext,reload)
+        try:
+            manager.start('apply',identifier=ready['id']);manager.thread.join(timeout=10)
+            state=manager.status()
+            self.assertEqual(state['phase'],'failed')
+            self.assertEqual(self.count(),2)
+            self.assertEqual(self.count(Path(state['backup']['path'])/'data/catalog.sqlite3'),2)
+            self.assertEqual(state['catalog_tasks'][-1]['backup']['path'],state['backup']['path'])
+        finally:manager.close()
+
+    def test_sqlite_backup_reports_page_progress_and_completion(self):
+        messages=[]
+        result=self.engine.backup(True,progress=messages.append)
+        self.assertTrue(any('catalog.sqlite3' in message and '100%' in message for message in messages))
+        self.assertTrue(any('favorites.sqlite3' in message and '100%' in message for message in messages))
+        self.assertTrue(read_json(Path(result['path'])/'manifest.json')['complete'])
+
     def test_reload_failure_rolls_back_catalog_and_metadata(self):
         self.archive();ready=self.prepare()
         calls=[]
@@ -403,6 +510,21 @@ class MaintenanceTests(unittest.TestCase):
             self.assertTrue(server.collector.status()['configured'])
             self.assertTrue(server.collector.status()['verified'])
             self.assertEqual(server.catalog.search({'tag':['language:english']})['favorite_coverage']['known'],1)
+            backups=server.maintenance.status()['backup_summary']['total']
+            self.archive(count=4,posted=300)
+            with redirect_stdout(io.StringIO()):
+                post('prepare',{});server.maintenance.thread.join(timeout=10)
+            ready=server.maintenance.status()['prepared']
+            with self.assertRaises(HTTPError) as failure:
+                post('apply',{'prepared_id':ready['id'],'create_backup':'false'})
+            self.assertEqual(failure.exception.code,400);failure.exception.close()
+            post('apply',{'prepared_id':ready['id'],'create_backup':False});server.maintenance.thread.join(timeout=10)
+            state=server.maintenance.status()
+            self.assertEqual(state['phase'],'completed')
+            self.assertIsNone(state['result']['backup'])
+            self.assertEqual(state['backup_summary']['total'],backups)
+            self.assertEqual(server.catalog.status()['gallery_count'],4)
+            self.assertTrue(server.collector.status()['configured'])
             with self.assertRaises(HTTPError) as failure:
                 urlopen(Request(root+'/api/maintenance/stop',data=b'{}',headers={'Content-Type':'application/json'}))
             self.assertEqual(failure.exception.code,403);failure.exception.close()

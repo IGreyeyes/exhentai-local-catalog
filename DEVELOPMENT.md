@@ -269,7 +269,9 @@ py -3.14 -m unittest discover -s tests -v
 
 遵循 `AGENTS.md` 的持续要求。每次用户功能更新：同步递增 `client_version.py` 的版本并填写中文更新内容，更新用户 README 与 `RELEASE_NOTES.md`，运行单元测试、构建脚本与隔离 exe 验证。
 
-用户在 GitHub Desktop 中检查并提交源码后，在本仓库 Releases 创建对应的正式版本标签（本次为 `v1.1.6`），复制 `dist/RELEASE_NOTES.md` 的内容，上传 `dist/ExCatalog-Windows-x64.zip` 和 `dist/SHA256SUMS.txt`。GitHub 自动记录上传资产的 SHA-256 digest，应用更新器会读取并核对它。只上传上述公开发布文件，不要上传整个项目文件夹、日志、数据、备份或构建中间文件。发布完成后，通过客户端检查更新，核对版本号与资产名称。
+收藏数/评分数排序的分母来自作品页 `rating_count` 元素，采集收藏数时一并读取，保存在个人数据库的 `rating_counts` 表中，并保留独立的采集时间。基础目录与收藏数分享文件均不包含评分人数；导入收藏数不会覆盖本地分母，资料库备份与恢复包含该表。`tests/test_favorite_ratio.py` 验证解析、一次请求读取两个计数、验证与队列保存、小数除法、稳定分页、缺失 / 零值、旧记录和分享兼容、备份恢复；浏览器回归与打包 WebView2 隔离验证覆盖两页的新排序及四种视图。
+
+用户在 GitHub Desktop 中检查并提交源码后，在本仓库 Releases 创建与客户端版本一致的正式版本标签，复制 `dist/RELEASE_NOTES.md` 的内容，上传 `dist/ExCatalog-Windows-x64.zip` 和 `dist/SHA256SUMS.txt`。GitHub 自动记录上传资产的 SHA-256 digest，应用更新器会读取并核对它。只上传上述公开发布文件，不要上传整个项目文件夹、日志、数据、备份或构建中间文件。发布完成后，通过客户端检查更新，核对版本号与资产名称。
 
 客户端更新说明的已读版本保存在 `data/client-update-state.json`，属于本机配置，不写入发布包。安装器只替换允许清单内的程序文件，下载包含个人资料、路径穿越、重复成员、链接或校验不符时拒绝安装。
 

@@ -57,7 +57,7 @@ def verify_desktop(report_path, fixture_root=None):
         before = hashlib.sha256(database.read_bytes()).hexdigest()
         session = DesktopSession(root)
         url = session.start(lambda message: None)
-        session.server.catalog.favorites.save(1, 123, "exhentai.org")
+        session.server.catalog.favorites.save(1, 123, "exhentai.org", 30)
         api = DesktopApi(session)
         startup_requests=[]
         def mock_release(request,timeout):
@@ -129,11 +129,11 @@ def verify_desktop(report_path, fixture_root=None):
                         if actual_view != expected_search_view:
                             raise AssertionError({"expected_search":expected_search_view,"actual":actual_view})
                         report["initial_search_rendered_view"] = actual_view
-                        window.evaluate_js("document.querySelector('#tag-input').value='language:english';document.querySelector('#search-form').requestSubmit()")
+                        window.evaluate_js("document.querySelector('#sort').value='newest';document.querySelector('#tag-input').value='language:english';document.querySelector('#search-form').requestSubmit()")
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#results .saved-card')&&document.querySelector('#results').getAttribute('aria-busy')==='false'){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Search results did not load'));}},50);})")
                         for mode in ("minimal", "thumbnails", "extended", "compact"):
-                            check_view = window.evaluate_js("(()=>{const select=document.querySelector('#search-view');select.value=" + json.dumps(mode) + ";select.dispatchEvent(new Event('change'));return {cards:document.querySelectorAll('#results .saved-card').length,overflow:document.documentElement.scrollWidth>innerWidth+1};})()")
-                            if check_view["cards"] != 1 or check_view["overflow"]:
+                            check_view = window.evaluate_js("(()=>{const select=document.querySelector('#search-view');select.value=" + json.dumps(mode) + ";select.dispatchEvent(new Event('change'));return {cards:document.querySelectorAll('#results .saved-card').length,ratio:document.querySelector('#results .saved-ratio')?.textContent,overflow:document.documentElement.scrollWidth>innerWidth+1};})()")
+                            if check_view["cards"] != 1 or check_view["ratio"] != "收藏/评分 4.1（良好）" or check_view["overflow"]:
                                 raise AssertionError(check_view)
                             promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(!document.querySelector('#search-view').disabled){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Search view did not save'));}},50);})")
                         preference = promise("fetch('/api/preferences').then(r=>r.json())")
@@ -146,11 +146,20 @@ def verify_desktop(report_path, fixture_root=None):
                         if actual_view != expected_view:
                             raise AssertionError({"expected":expected_view,"actual":actual_view})
                         report["initial_rendered_view"] = actual_view
+                        default_rating = window.evaluate_js("document.querySelector('#records-list .saved-ratio')?.textContent")
+                        if default_rating != "收藏/评分 4.1（良好）":
+                            raise AssertionError(default_rating)
+                        window.evaluate_js("document.querySelector('#record-sort').value='favorites_per_rating';document.querySelector('#records-form').requestSubmit()")
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#records-list .saved-ratio')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Record ratios did not load'));}},50);})")
                         for mode in ("minimal", "compact", "extended", "thumbnails"):
-                            check_view = window.evaluate_js("(()=>{const select=document.querySelector('#record-view');select.value=" + json.dumps(mode) + ";select.dispatchEvent(new Event('change'));return {cards:document.querySelectorAll('.saved-card').length,overflow:document.documentElement.scrollWidth>innerWidth+1};})()")
-                            if check_view["cards"] != 1 or check_view["overflow"]:
+                            check_view = window.evaluate_js("(()=>{const select=document.querySelector('#record-view');select.value=" + json.dumps(mode) + ";select.dispatchEvent(new Event('change'));return {cards:document.querySelectorAll('.saved-card').length,ratio:document.querySelector('.saved-ratio')?.textContent,overflow:document.documentElement.scrollWidth>innerWidth+1};})()")
+                            if check_view["cards"] != 1 or check_view["ratio"] != "收藏/评分 4.1（良好）" or check_view["overflow"]:
                                 raise AssertionError(check_view)
                         report["checks"].append("all four record views render in actual packaged WebView2")
+                        guide = window.evaluate_js("(()=>{const guide=document.querySelector('#rating-system-guide');guide.open=true;return {rows:guide.querySelectorAll('tbody tr').length,minimum:guide.textContent.includes('至少 20 人评分'),example:guide.textContent.includes('2.7（一般）')};})()")
+                        if guide != {"rows":5,"minimum":True,"example":True}:
+                            raise AssertionError(guide)
+                        report["checks"].append("alternative ratings render with other sorts and ratio sort in both pages; all four views and expandable standards work in packaged WebView2")
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(!document.querySelector('#record-view').disabled){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('View preference did not save'));}},50);})")
                         preference = promise("fetch('/api/preferences').then(r=>r.json())")
                         if preference["records_view"] != "thumbnails":

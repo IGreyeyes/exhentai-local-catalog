@@ -52,8 +52,9 @@
             <div class="filter-grid">
               <label class="title-field">标题关键词 <span>可选</span><input id="title-input" type="search" placeholder="搜索原标题或日文标题" maxlength="200"></label>
               <label>作品分类<select id="category"><option value="">全部分类</option><option value="Doujinshi">同人志</option><option value="Manga">漫画</option><option value="Artist CG">画师 CG</option><option value="Game CG">游戏 CG</option><option value="Image Set">图片集</option><option value="Non-H">非成人内容</option><option value="Western">欧美作品</option><option value="Cosplay">角色扮演</option><option value="Asian Porn">亚洲写真</option><option value="Misc">其他</option><option value="private">私有记录</option></select></label>
-              <label>排序方式<select id="sort"><option value="newest">发布时间 · 从新到旧</option><option value="oldest">发布时间 · 从旧到新</option><option value="rating">平均评分 · 从高到低</option><option value="favorites">收藏数 · 从高到低（未知置后）</option><option value="pages">作品页数 · 从多到少</option></select></label>
+              <label>排序方式<select id="sort"><option value="newest">发布时间 · 从新到旧</option><option value="oldest">发布时间 · 从旧到新</option><option value="rating">平均评分 · 从高到低</option><option value="favorites">收藏数 · 从高到低（未知置后）</option><option value="favorites_per_rating">收藏/评分 · 从高到低</option><option value="pages">作品页数 · 从多到少</option></select></label>
             </div>
+            <details id="rating-system-guide" class="rating-system-guide"><summary>收藏/评分怎么算？查看评级标准</summary><div class="rating-guide-content"><p>正在读取评级标准…</p></div></details>
             <div class="search-actions"><label class="checkbox"><input id="include-inactive" type="checkbox">包含已移除、已隐藏及旧版本记录</label><div><button type="button" class="button secondary" id="reset-filters">清空条件</button><button class="button primary" id="search-button" type="submit"><span aria-hidden="true">⌕</span> 搜索资料库</button></div></div>
           </form>
         </section>

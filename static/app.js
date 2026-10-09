@@ -252,6 +252,7 @@ function renderResults() {
   if(coverage) {
     $("favorite-coverage").hidden=false;
     $("favorite-coverage").textContent=`收藏数已获取 ${number(coverage.known)} / ${number(coverage.total)} 条 · 最近 ${coverage.fresh_days} 天采集 ${number(coverage.fresh)} 条。`+(coverage.complete?"已覆盖本次搜索的全部匹配记录。":"收藏排名仅覆盖已采集部分，未知值排在最后。");
+    $("favorite-coverage").textContent+=` 收藏/评分可评级 ${number(data.favorite_rating_ratio_coverage.known)} / ${number(data.total)} 条（至少 20 人评分）。`;
   }
   window.collectorUI?.updateControls();
   const excludedCount=new Set([...(data.exclude_tags||[]),...(data.blacklist_tags||[])]).size;
@@ -328,6 +329,7 @@ async function start() {
     const [response,preferencesResponse]=await Promise.all([fetch("/api/status"),fetch("/api/preferences")]);
     if(!response.ok||!preferencesResponse.ok) throw new Error("连接失败");
     const data=await response.json(),preferences=await preferencesResponse.json();
+    window.galleryCards.renderRatingGuide(data.favorite_rating_system);
     catalogActionToken=data.action_token||"";
     if(searchViews.includes(preferences.search_view))searchView=preferences.search_view;
     $("search-view").value=searchView;$("search-view").disabled=false;

@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from collections import deque
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from collector_identity import read_identity, validate_collector
 
 HOSTS = {"exhentai.org", "e-hentai.org"}
 JOIN_FAVORITES = " LEFT JOIN collected.favorites AS f ON f.gid = g.gid "
+JOIN_RATINGS = " LEFT JOIN collected.rating_counts AS rc ON rc.gid = g.gid "
 READING_STATES = {"none", "planned", "reading", "watched", "ignored"}
 
 
@@ -45,9 +47,16 @@ class RetryableFetch(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class GalleryCounts:
+    favorite_count: int
+    rating_count: int | None = None
+
+
 class FavoriteParser(HTMLParser):
-    def __init__(self):
+    def __init__(self, element_id="favcount"):
         super().__init__(convert_charrefs=True)
+        self.element_id = element_id
         self.depth = 0
         self.values = []
         self.current = []
@@ -56,7 +65,7 @@ class FavoriteParser(HTMLParser):
         if self.depth:
             if tag not in {"br", "img", "input", "hr", "meta", "link", "wbr"}:
                 self.depth += 1
-        elif dict(attributes).get("id") == "favcount":
+        elif dict(attributes).get("id") == self.element_id:
             self.depth = 1
             self.current = []
 
@@ -102,6 +111,21 @@ def parse_favorite_count(html, expected_gid=None):
     return int(match[1].replace(",", ""))
 
 
+def parse_gallery_counts(html, expected_gid=None):
+    """Validate favorites first; a missing or malformed rating count stays unknown."""
+    count = parse_favorite_count(html, expected_gid)
+    parser = FavoriteParser("rating_count")
+    parser.feed(html)
+    ratings = None
+    if len(parser.values) == 1 and re.fullmatch(r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)", parser.values[0]):
+        digits = parser.values[0].replace(",", "")
+        if len(digits) <= 19:
+            value = int(digits)
+            if value <= 2**63 - 1:
+                ratings = value
+    return GalleryCounts(count, ratings)
+
+
 class SameGalleryRedirect(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, newurl):
         old, new = urlparse(request.full_url), urlparse(newurl)
@@ -128,7 +152,7 @@ def fetch_favorites(settings, gid, token):
             content = response.read(4 * 1024 * 1024 + 1)
             if len(content) > 4 * 1024 * 1024:
                 raise CollectionPaused("作品页面大小异常，已暂停。")
-        return parse_favorite_count(content.decode("utf-8", errors="replace"), gid)
+        return parse_gallery_counts(content.decode("utf-8", errors="replace"), gid)
     except HTTPError as error:
         code = error.code
         retry_after = error.headers.get("Retry-After", "")
@@ -181,6 +205,10 @@ class FavoriteStore:
                 CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS favorites_checked_gid ON favorites(checked_at DESC,gid DESC);
                 CREATE INDEX IF NOT EXISTS favorites_count_gid ON favorites(favorite_count DESC,gid DESC);
+                CREATE TABLE IF NOT EXISTS rating_counts (
+                    gid INTEGER PRIMARY KEY, rating_count INTEGER NOT NULL CHECK(rating_count >= 0),
+                    checked_at INTEGER NOT NULL, source TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS collection_failures (
                     gid INTEGER PRIMARY KEY,token TEXT NOT NULL,source TEXT NOT NULL,
                     failed_at INTEGER NOT NULL,error TEXT NOT NULL,attempts INTEGER NOT NULL,
@@ -333,14 +361,16 @@ class FavoriteStore:
         finally:
             db.close()
 
-    def save(self, gid, count, host):
+    def save(self, gid, count, host, rating_count=None):
         with self.connection() as db:
-            self._save(db, gid, count, host)
+            self._save(db, gid, count, host, rating_count)
 
     @staticmethod
-    def _save(db, gid, count, host):
+    def _save(db, gid, count, host, rating_count=None):
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise ValueError("Invalid favorite count")
+        if rating_count is not None and (type(rating_count) is not int or not 0 <= rating_count <= 2**63 - 1):
+            raise ValueError("Invalid rating count")
         if not db.in_transaction:
             db.execute("BEGIN IMMEDIATE")
         identity = read_identity(db)
@@ -349,6 +379,11 @@ class FavoriteStore:
             favorite_count=excluded.favorite_count,checked_at=excluded.checked_at,source=excluded.source,
             collector_id=excluded.collector_id,collector_name=excluded.collector_name
         """, (gid,count,int(time.time()),host,identity["collector_id"],identity["collector_name"]))
+        if rating_count is not None:
+            db.execute("""INSERT INTO rating_counts(gid,rating_count,checked_at,source) VALUES(?,?,?,?)
+                ON CONFLICT(gid) DO UPDATE SET rating_count=excluded.rating_count,
+                    checked_at=excluded.checked_at,source=excluded.source
+            """, (gid,rating_count,int(time.time()),host))
         db.execute("DELETE FROM collection_failures WHERE gid=?",(gid,))
 
     @staticmethod
@@ -537,7 +572,7 @@ class Collector:
         started = time.monotonic()
         count = self.fetcher(settings,gid,token)
         self.response_times.append(max(0,time.monotonic()-started))
-        return count
+        return count if isinstance(count, GalleryCounts) else GalleryCounts(count)
 
     def _eligibility(self, cutoff):
         if self.settings.get("skip_existing"):
@@ -650,9 +685,9 @@ class Collector:
                     raise ValueError(str(error)) from None
                 finally:
                     self.last_request=time.monotonic()
-                self.store.save(row["gid"],count,self.settings["host"])
+                self.store.save(row["gid"],count.favorite_count,self.settings["host"],count.rating_count)
                 self.verified=True
-                return {"verified":True,"gid":row["gid"],"favorite_count":count,"unavailable":unavailable}
+                return {"verified":True,"gid":row["gid"],"favorite_count":count.favorite_count,"rating_count":count.rating_count,"unavailable":unavailable}
             last=unavailable[-1]
             raise ValueError(f"本次验证的 {len(unavailable)} 条作品均不可访问，已记录到失败列表；这不表示源站登录失效。请核对具体作品，或再次验证其他待处理作品：{last['url']}")
 
@@ -868,7 +903,7 @@ class Collector:
                 try:
                     count = self._fetch(settings, row["gid"], row["token"])
                     with self.store.connection() as db:
-                        self.store._save(db,row["gid"],count,settings["host"])
+                        self.store._save(db,row["gid"],count.favorite_count,settings["host"],count.rating_count)
                         db.execute("UPDATE tasks SET state='done',attempts=attempts+1,error='' WHERE job_id=? AND gid=?", (job_id,row["gid"]))
                         db.execute("UPDATE jobs SET updated_at=? WHERE id=?", (int(time.time()),job_id))
                 except CollectionPaused as error:

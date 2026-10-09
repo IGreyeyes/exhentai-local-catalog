@@ -48,6 +48,8 @@ def main():
     if len(sys.argv)>2 and sys.argv[2]=='search-views':
         catalog.favorites.set_collector_name('测试采集者')
         for gid in range(1,7):catalog.favorites.save(gid,(gid-1)*1234,'e-hentai.org')
+        with catalog.favorites.connection() as db:
+            db.executemany("INSERT INTO rating_counts VALUES(?,?,1760000000,'e-hentai.org')",((1,20),(2,20),(3,40),(4,0),(5,19),(6,20)))
     if len(sys.argv)>2 and sys.argv[2]=='features':
         with sqlite3.connect(path) as db:
             db.execute("INSERT OR IGNORE INTO tag VALUES(2,'artist:example')")

@@ -19,7 +19,7 @@ import time
 
 from prepare_database import DEFAULT_DATABASE, inspect_database
 from translations import Translations
-from favorites import Collector, FavoriteStore, JOIN_FAVORITES, gallery_url
+from favorites import Collector, FavoriteStore, JOIN_FAVORITES, JOIN_RATINGS, gallery_url
 from maintenance import LibraryMaintenance, MaintenanceManager, recover_import
 from covers import CoverCache, CoverUnavailable
 from credentials import export_credentials, import_credentials
@@ -30,22 +30,45 @@ from runtime_paths import library_lock, library_root, resource_root
 ROOT = library_root()
 STATIC_ROOT = resource_root() / "static"
 APP_ID = "local-tag-catalog-v1"
+FAVORITE_RATING_SYSTEM = {
+    "minimum_ratings": 20,
+    "levels": [{"threshold": threshold, "label": label} for threshold, label in
+               ((10, "杰作"), (7, "优秀"), (4, "良好"), (1, "一般"), (0, "冷门"))],
+    "reference_url": "https://github.com/Mayriad/Mayriads-EH-Master-Script/wiki/Feature-descriptions#alternative-rating-system",
+}
+FAVORITE_RATING_RATIO = f"CASE WHEN rc.rating_count >= {FAVORITE_RATING_SYSTEM['minimum_ratings']} THEN CAST(f.favorite_count AS REAL) / rc.rating_count END"
 SORTS = {
     "newest": "g.posted DESC, g.gid DESC",
     "oldest": "g.posted ASC, g.gid ASC",
     "rating": "CAST(g.rating AS REAL) DESC, g.gid DESC",
     "pages": "g.filecount DESC, g.gid DESC",
     "favorites": "(f.favorite_count IS NULL) ASC, f.favorite_count DESC, g.gid DESC",
+    "favorites_per_rating": "favorite_rating_ratio DESC, g.gid DESC",
 }
 RECORD_SORTS = {
     "recorded_desc":"f.recorded_at DESC, f.gid DESC",
     "recorded_asc":"f.recorded_at ASC, f.gid ASC",
     "favorites_desc":"(f.favorite_count IS NULL) ASC,f.favorite_count DESC, f.gid DESC",
     "favorites_asc":"(f.favorite_count IS NULL) ASC,f.favorite_count ASC, f.gid DESC",
+    "favorites_per_rating":"favorite_rating_ratio DESC, f.gid DESC",
     "rating_desc":"CAST(g.rating AS REAL) DESC, f.gid DESC",
     "state_updated_desc":"(rs.state_updated_at IS NULL) ASC,rs.state_updated_at DESC,f.gid DESC",
 }
 ALIASES = {"l": "language", "lang": "language", "a": "artist", "g": "group", "c": "character", "p": "parody", "o": "other", "f": "female", "m": "male", "x": "mixed"}
+
+
+def describe_favorite_rating(item):
+    count, ratings = item["favorite_count"], item["rating_count"]
+    if count is None or ratings is None:
+        return {"state": "unknown", "value": None, "label": "未知"}
+    if ratings == 0:
+        return {"state": "unrated", "value": None, "label": "未评分"}
+    if ratings < FAVORITE_RATING_SYSTEM["minimum_ratings"]:
+        return {"state": "insufficient", "value": None, "label": "样本不足"}
+    # Integer division avoids floating-point rounding at decimal and level boundaries.
+    tenths = count * 10 // ratings
+    label = next(level["label"] for level in FAVORITE_RATING_SYSTEM["levels"] if tenths >= level["threshold"] * 10)
+    return {"state": "rated", "value": tenths / 10, "label": label}
 
 
 @dataclass(frozen=True)
@@ -106,7 +129,7 @@ class Catalog:
             db.close()
 
     def status(self):
-        return {**self.info, "app_id": APP_ID, "has_favorites": True, "ready": True, "translations": self.translations.status()}
+        return {**self.info, "app_id": APP_ID, "has_favorites": True, "ready": True, "translations": self.translations.status(), "favorite_rating_system": FAVORITE_RATING_SYSTEM}
 
     def cover_source(self, gid):
         if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
@@ -270,7 +293,7 @@ class Catalog:
                     SELECT e.gid,NULL,NULL,NULL,'','',e.source,e.failed_at,'failed',e.failed_at,e.error,e.attempts,e.job_id,e.token
                     FROM collected.collection_failures AS e WHERE NOT EXISTS(SELECT 1 FROM collected.favorites AS f WHERE f.gid=e.gid)
                 ) """
-                joined=" FROM recorded AS f LEFT JOIN collected.record_status AS rs ON rs.gid=f.gid LEFT JOIN gallery AS g ON g.gid=f.gid "
+                joined=" FROM recorded AS f LEFT JOIN collected.record_status AS rs ON rs.gid=f.gid LEFT JOIN gallery AS g ON g.gid=f.gid LEFT JOIN collected.rating_counts AS rc ON rc.gid=f.gid "
                 summary_row=db.execute(records_cte+"""SELECT COUNT(*),SUM(f.checked_at>=?),MAX(f.checked_at),SUM(g.gid IS NULL),
                     SUM(COALESCE(rs.opened_count,0)>0),
                     SUM(COALESCE(rs.state,'none')='none'),SUM(rs.state='planned'),SUM(rs.state='reading'),SUM(rs.state='watched'),SUM(rs.state='ignored'),
@@ -297,10 +320,11 @@ class Catalog:
                 condition=" WHERE "+" AND ".join(clauses)
                 total=db.execute(records_cte+"SELECT COUNT(*)"+joined+condition,params).fetchone()[0]
                 pages=max(1,math.ceil(total/limit));page=min(page,pages)
-                sql=records_cte+"SELECT f.*,COALESCE(rs.state,'none') AS reading_state,COALESCE(rs.opened_count,0) AS opened_count,rs.first_opened_at,rs.last_opened_at,rs.state_updated_at,g.gid AS catalog_gid,g.token,g.title,g.title_jpn,g.category,g.posted,g.filecount,g.rating,g.removed,g.replaced,g.expunged"+joined+condition+" ORDER BY "+RECORD_SORTS[sort]+" LIMIT ? OFFSET ?"
+                sql=records_cte+"SELECT f.*,rc.rating_count,rc.checked_at AS rating_checked_at,"+FAVORITE_RATING_RATIO+" AS favorite_rating_ratio,COALESCE(rs.state,'none') AS reading_state,COALESCE(rs.opened_count,0) AS opened_count,rs.first_opened_at,rs.last_opened_at,rs.state_updated_at,g.gid AS catalog_gid,g.token,g.title,g.title_jpn,g.category,g.posted,g.filecount,g.rating,g.removed,g.replaced,g.expunged"+joined+condition+" ORDER BY "+RECORD_SORTS[sort]+" LIMIT ? OFFSET ?"
                 items=[]
                 for row in db.execute(sql,(*params,limit,(page-1)*limit)).fetchall():
                     item=dict(row)
+                    item["favorite_rating"] = describe_favorite_rating(item)
                     item["metadata_available"]=item.pop("catalog_gid") is not None
                     item["cover_path"] = f"/api/cover/{item['gid']}" if item["metadata_available"] else None
                     failure_token=item.pop("failure_token")
@@ -356,15 +380,16 @@ class Catalog:
                     selection.category, selection.excluded_tags,
                 )
                 total = self.count(where, params)
-                coverage = db.execute("SELECT COUNT(f.favorite_count),SUM(CASE WHEN f.checked_at>=? THEN 1 ELSE 0 END),MIN(f.checked_at),MAX(f.checked_at) FROM gallery AS g" + JOIN_FAVORITES + "WHERE " + where, (int(time.time())-7*86400,*params)).fetchone()
+                coverage = db.execute("SELECT COUNT(f.favorite_count),SUM(CASE WHEN f.checked_at>=? THEN 1 ELSE 0 END),MIN(f.checked_at),MAX(f.checked_at),COUNT(" + FAVORITE_RATING_RATIO + ") FROM gallery AS g" + JOIN_FAVORITES + JOIN_RATINGS + "WHERE " + where, (int(time.time())-7*86400,*params)).fetchone()
                 pages = max(1, math.ceil(total / limit))
                 page = min(page, pages)
-                sql = "SELECT g.gid,g.token,g.title,g.title_jpn,g.category,g.posted,g.filecount,g.rating,g.removed,g.replaced,g.expunged,f.favorite_count,f.checked_at AS favorite_checked_at,f.source AS favorite_source,f.collector_id,f.collector_name FROM gallery AS g" + JOIN_FAVORITES + "WHERE " + where
+                sql = "SELECT g.gid,g.token,g.title,g.title_jpn,g.category,g.posted,g.filecount,g.rating,g.removed,g.replaced,g.expunged,f.favorite_count,f.checked_at AS favorite_checked_at,f.source AS favorite_source,f.collector_id,f.collector_name,rc.rating_count,rc.checked_at AS rating_checked_at," + FAVORITE_RATING_RATIO + " AS favorite_rating_ratio FROM gallery AS g" + JOIN_FAVORITES + JOIN_RATINGS + "WHERE " + where
                 sql += " ORDER BY " + SORTS[sort] + " LIMIT ? OFFSET ?"
                 rows = db.execute(sql, params + (limit, (page - 1) * limit)).fetchall()
                 items = []
                 for row in rows:
                     item = dict(row)
+                    item["favorite_rating"] = describe_favorite_rating(item)
                     item["cover_path"] = f"/api/cover/{row['gid']}"
                     item["tags"] = [t[0] for t in db.execute("SELECT t.name FROM gid_tid AS gt JOIN tag AS t ON t.id=gt.tid WHERE gt.gid=? ORDER BY t.name", (row["gid"],))]
                     token = str(item.pop("token"))
@@ -382,6 +407,7 @@ class Catalog:
             "has_favorites": True, "include_inactive": selection.include_inactive,
             "collector_identity": self.favorites.collector_identity(),
             "favorite_coverage": {"known":coverage[0],"total":total,"fresh":coverage[1] or 0,"fresh_days":7,"oldest_checked_at":coverage[2],"newest_checked_at":coverage[3],"complete":total>0 and coverage[0]==total},
+            "favorite_rating_ratio_coverage": {"known":coverage[4],"total":total},
             "tag_labels": self.translations.labels([*selection.tags, *selection.excluded_tags, *(tag for item in items for tag in item["tags"])]),
         }
 

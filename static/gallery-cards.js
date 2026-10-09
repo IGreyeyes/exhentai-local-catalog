@@ -15,6 +15,25 @@
     if(!value)return null;
     try{const url=new URL(value);return url.protocol==="https:"&&sources[url.hostname]&&!url.username&&!url.password&&!url.port&&/^\/g\/[1-9]\d*\/[0-9a-fA-F]{10}\/$/.test(url.pathname)?url.href:null;}catch(failure){return null;}
   }
+  function renderRatingGuide(rules){
+    const content=document.querySelector("#rating-system-guide .rating-guide-content");
+    if(!content||!rules)return;
+    const minimum=rules.minimum_ratings;
+    const intro=node("p","",`收藏/评分 = 已保存收藏数 ÷ 评分人数。至少 ${minimum} 人评分才参与评级；比值向下保留一位小数，没有 5 分上限。`);
+    const table=node("table"),caption=node("caption","","收藏/评分评级标准"),head=node("thead"),heading=node("tr"),body=node("tbody");
+    heading.append(node("th","","收藏/评分比值"),node("th","","评级"));head.append(heading);
+    rules.levels.forEach((level,index)=>{
+      const row=node("tr"),upper=rules.levels[index-1]?.threshold;
+      row.append(node("td","",upper===undefined?`≥ ${level.threshold}`:`${level.threshold} ≤ 比值 < ${upper}`),node("td","",level.label));body.append(row);
+    });
+    table.append(caption,head,body);
+    const example=node("p","","例如：210 次收藏 ÷ 77 人评分 = 2.727…，显示为「2.7（一般）」。");
+    const sorting=node("p","",`选择「收藏/评分 · 从高到低」后，先按全部匹配作品的未截断比值排序，再分页；比值相同时按作品 ID 从大到小排列。少于 ${minimum} 人评分、未评分或数据未知的作品排在最后。零收藏且评分人数达标时，显示「0.0（冷门）」。`);
+    const data=node("p","",`所有排序和显示方式均展示此指标。样本不足会显示已评分人数 / ${minimum}；缺少收藏数或评分人数显示「未知」。评分人数随收藏数采集一并保存，旧记录需刷新采集补齐，切换排序不会自动采集。收藏数分享文件不包含评分人数，导入后使用本地已有数据计算。`);
+    const caveat=node("p","","它反映收藏与评分的相对关系，作为选作品的辅助参考。数值来自本地保存的快照，分子和分母可能来自不同时间；较少的评分样本也可能抬高比值，不能直接代表客观质量或实时排名。");
+    const reference=node("a","","查看原脚本的评分系统说明 ↗");reference.href=rules.reference_url;reference.target="_blank";reference.rel="noopener noreferrer";
+    content.replaceChildren(intro,table,example,sorting,data,caveat,reference);
+  }
   function render(item,options){
     const view=options.view,labels=options.labels;
     function trackLink(link,item){if(options.onOpen)link.onclick=()=>options.onOpen(item);}
@@ -78,6 +97,7 @@
       if(item.metadata_available){
         if(item.filecount!=null)details.append(node("span","",`${number(item.filecount)} 页`));
         const rating=Number(item.rating);if(item.rating!=null&&Number.isFinite(rating))details.append(node("span","",`☆ ${rating.toFixed(2)} 平均评分`));
+        if(item.rating_count!=null)details.append(node("span","",`评分人数 ${number(item.rating_count)}`));
         if(item.posted)details.append(node("span","",`发布于 ${dateParts(item.posted).date}`));
         content.append(details);
       }else content.append(node("p","saved-missing-note","当前作品目录中未找到对应标题和标签，已保存的采集结果仍保留。"));
@@ -97,6 +117,13 @@
       content.append(renderTagSummary(item));card.append(content);
       const count=node("aside","saved-count");count.append(node("strong","",hasCount?number(item.favorite_count):"—"),node("span","",hasCount?(failed?"上次成功的收藏数":"已记录收藏数"):"收藏数未知"));
       count.title=hasCount?`已记录收藏数：${number(item.favorite_count)}`:"收藏数未知";
+      const ratingInfo=item.favorite_rating;
+      const ratingLabel=ratingInfo?.state==="rated"?`${Number(ratingInfo.value).toLocaleString("zh-CN",{minimumFractionDigits:1,maximumFractionDigits:1})}（${ratingInfo.label}）`:ratingInfo?.label||"未知";
+      const value=node("span",`saved-ratio rating-${ratingInfo?.state||"unknown"}`,`收藏/评分 ${ratingLabel}`);
+      value.title=ratingInfo?.state==="rated"?`收藏/评分：${number(item.favorite_count)} ÷ ${number(item.rating_count)} = ${item.favorite_rating_ratio}\n显示向下保留一位小数；排序使用未截断比值。`:(hasCount?(item.rating_count==null?"评分人数缺失，需刷新采集后补齐":item.rating_count===0?"评分人数为 0，暂不评级":`目前 ${number(item.rating_count)} 人评分，未达到评级所需人数`):"收藏数未知，需先采集");
+      if(item.rating_count!=null)value.title+=`\n评分人数：${number(item.rating_count)}\n采集于 ${dateParts(item.rating_checked_at).date} ${dateParts(item.rating_checked_at).time}`;
+      count.append(value);
+      if(ratingInfo?.state==="insufficient")count.append(node("span","saved-rating-sample",`评分人数 ${number(item.rating_count)} / 20`));
       if(options.recordControls){
         const stateControl=node("label","saved-state-control","阅读状态"),stateSelect=node("select");stateSelect.setAttribute("aria-label",`作品 ID ${item.gid} 的阅读状态`);
         for(const [value,label] of Object.entries(stateNames)){const option=node("option","",label);option.value=value;option.selected=value===item.reading_state;stateSelect.append(option);}
@@ -111,5 +138,5 @@
     }
     return recordCard(item);
   }
-  window.galleryCards={render,dateParts};
+  window.galleryCards={render,dateParts,renderRatingGuide};
 })();

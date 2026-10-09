@@ -205,6 +205,7 @@
       const [response,preferencesResponse]=await Promise.all([fetch("/api/status"),fetch("/api/preferences")]);
       const status=await response.json(),preferences=await preferencesResponse.json();
       if(!response.ok||!preferencesResponse.ok)throw new Error(status.error||preferences.error||"无法读取服务状态");
+      window.galleryCards.renderRatingGuide(status.favorite_rating_system);
       actionToken=status.action_token||"";
       if(views.includes(preferences.records_view))view=preferences.records_view;
       else if(legacyView)await post("view",{view:legacyView});

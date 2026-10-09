@@ -292,8 +292,14 @@ class FavoriteStore:
         return values
 
     def get_record_view(self):
+        return self._get_display_view("records_view")
+
+    def get_search_view(self):
+        return self._get_display_view("search_view")
+
+    def _get_display_view(self, key):
         with self.connection() as db:
-            row = db.execute("SELECT value FROM app_settings WHERE key='records_view'").fetchone()
+            row = db.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
         if row is None:
             return None
         if row[0] == "minimal-tags":
@@ -301,11 +307,17 @@ class FavoriteStore:
         return row[0] if row[0] in ("minimal", "compact", "extended", "thumbnails") else None
 
     def set_record_view(self, view):
+        return self._set_display_view("records_view", view)
+
+    def set_search_view(self, view):
+        return self._set_display_view("search_view", view)
+
+    def _set_display_view(self, key, view):
         if view not in ("minimal", "compact", "extended", "thumbnails"):
-            raise ValueError("请选择有效的记录页显示方式。")
+            raise ValueError("请选择有效的显示方式。")
         with self.connection() as db:
-            db.execute("INSERT INTO app_settings(key,value) VALUES('records_view',?) "
-                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (view,))
+            db.execute("INSERT INTO app_settings(key,value) VALUES(?,?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, view))
         return view
 
     @contextmanager

@@ -100,7 +100,7 @@
       const summary=ready.summary;
       ui("favorites-file-name").textContent=selectedFavoritesFile()?.name||"上次已校验的收藏数文件";
       for(const [id,key] of [["favorites-total","total"],["favorites-added","added"],["favorites-updated","updated"],["favorites-kept","kept"]])ui(id).textContent=number(summary[key]);
-      ui("favorites-preview-detail").textContent=`采集者：我的记录 ${number(summary.own_records)} 条，他人的记录 ${number(summary.other_records)} 条，未知采集者 ${number(summary.unknown_records)} 条。保留现有：${number(summary.kept_older_or_equal_time)} 条自己的或未知采集者记录抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条收藏数未增加。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 条当前作品目录暂缺，收藏数仍会按作品 ID 保存。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
+      ui("favorites-preview-detail").textContent=`采集者：我的记录 ${number(summary.own_records)} 条，他人的记录 ${number(summary.other_records)} 条，未知采集者 ${number(summary.unknown_records)} 条。保留现有：${number(summary.kept_older_or_equal_time)} 条自己的或未知采集者记录抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条收藏数未增加。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 条当前作品目录暂缺，收藏数仍会按作品 ID 保存，可在「已记录」查看；以后通过维护页更新到包含相同作品 ID 的目录，会自动匹配标题和标签，无需再次导入收藏数。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
     }
     const task=state.kind?.startsWith("favorites-")?state:[...(state.recent_tasks||[])].reverse().find(item=>item.kind?.startsWith("favorites-"));
     if(favoritesLocalMessage){ui("favorites-feedback").textContent=favoritesLocalMessage.text;ui("favorites-feedback").classList.toggle("error",favoritesLocalMessage.error);}

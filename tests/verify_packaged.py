@@ -30,9 +30,10 @@ def verify():
         for expected in ("extended","thumbnails"):
             result = subprocess.run([str(exe), "--verify-desktop", str(report_path), directory], env=environment, creationflags=subprocess.CREATE_NO_WINDOW, timeout=45)
             report = json.loads(report_path.read_text(encoding="utf-8"))
-            if result.returncode or not report.get("passed") or not report.get("frozen") or report.get("initial_rendered_view") != expected:
+            expected_search = "extended" if expected == "extended" else "compact"
+            if result.returncode or not report.get("passed") or not report.get("frozen") or report.get("initial_rendered_view") != expected or report.get("initial_search_rendered_view") != expected_search:
                 raise AssertionError(report)
-        report["desktop_restart"] = "separate private WebView2 processes restore the thumbnail view from the database"
+        report["desktop_restart"] = "separate private WebView2 processes restore independent search compact and record thumbnail views from the database"
     opener = build_opener(ProxyHandler({}))
     with tempfile.TemporaryDirectory(prefix="packaged-service-", dir=PROJECT / "logs") as directory:
         root = Path(directory).resolve()

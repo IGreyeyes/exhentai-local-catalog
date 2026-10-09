@@ -1,10 +1,11 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const number = value => Number(value).toLocaleString("zh-CN");
-const categories = {Doujinshi:"同人志",Manga:"漫画","Artist CG":"画师 CG","Game CG":"游戏 CG","Image Set":"图片集","Non-H":"非成人内容",Western:"欧美作品",Cosplay:"角色扮演","Asian Porn":"亚洲写真",Misc:"其他",private:"私有记录"};
 let tags = [], excludeTags = [], blacklistTags = [], suggestions = [], activeSuggestion = -1, suggestionTimer, suggestionRequest, suggestionKind = "include";
 let searchRequest, responseData, submittedFilters;
 let catalogActionToken = "", blacklistBusy = false;
+const searchViews=["minimal","compact","extended","thumbnails"];
+let searchView="extended";
 const initialResult = $("results").cloneNode(true);
 const tagLabels = new Map();
 
@@ -262,46 +263,17 @@ function renderResults() {
     $("pagination").hidden = true;
     return;
   }
-  const list = element("div", "result-list");
-  data.items.forEach((item, index) => {
-    const card = element("article", "result-card");
-    card.append(element("span", "result-number", number((data.page-1)*data.limit+index+1)));
-    const cover=element("div","result-cover"),image=element("img");
-    image.src=item.cover_path||"/cover-placeholder.svg";image.alt="";image.loading="lazy";image.decoding="async";image.width=90;image.height=120;
-    image.onerror=()=>{if(!image.src.endsWith("/cover-placeholder.svg"))image.src="/cover-placeholder.svg";};cover.append(image);card.append(cover);
-    const main = element("div", "result-main");
-    const top = element("div", "result-top");
-    const badges = element("div");
-    badges.append(element("span", "category-badge", categories[item.category] || item.category));
-    if (item.replaced) badges.append(element("span", "record-state", "旧版本"));
-    if (item.removed || item.expunged) badges.append(element("span", "record-state", "已移除 / 隐藏"));
-    top.append(badges, element("span", "result-date", date(item.posted)));
-    main.append(top);
-    const title = element(item.gallery_path ? "a" : "span", "result-title", item.title || item.title_jpn || "无标题");
-    if (item.gallery_path) {
-      title.href = `https://${$("link-target").value}${item.gallery_path}`;
-      title.target = "_blank";
-      title.rel = "noopener noreferrer";
-    }
-    main.append(title);
-    if (item.title_jpn && item.title_jpn !== item.title) main.append(element("p", "result-subtitle", item.title_jpn));
-    const meta = element("div", "result-meta");
-    const rating = Number(item.rating);
-    const favorites=element("span",item.favorite_count==null?"":"favorite-value",item.favorite_count==null?"收藏数未知":`${number(item.favorite_count)} 收藏`);
-    if(item.favorite_checked_at) favorites.title=`采集日期：${date(item.favorite_checked_at)}`;
-    meta.append(element("span", "rating", `☆ ${Number.isFinite(rating) ? rating.toFixed(2) : "—"} 平均评分`), element("span", "", `${number(item.filecount)} 页`), favorites, element("span", "", `ID ${item.gid}`));
-    main.append(meta);
-    const tagList = element("div", "result-tags");
-    const ordered = [...item.tags].sort((a,b) => Number(data.tags.includes(b))-Number(data.tags.includes(a)));
-    ordered.slice(0,10).forEach(tag => {
-      const button = element("button", data.tags.includes(tag) ? "matched" : "", tagName(tag));
-      button.type = "button";
-      button.title = `${tagName(tag)}\n${tag}\n点击添加筛选`;
-      button.onclick = () => { addTag(tag); $("search-title").scrollIntoView({block:"start",behavior:"smooth"}); };
-      tagList.append(button);
+  const list=element("div",`saved-list view-${searchView}`);
+  data.items.forEach(item=>{
+    const card=window.galleryCards.render({
+      ...item,metadata_available:true,checked_at:item.favorite_checked_at,source:item.favorite_source,
+      source_url:item.gallery_path?`https://${$("link-target").value}${item.gallery_path}`:null,
+    },{
+      view:searchView,tags:data.tags,labels:tagLabels,collectorIdentity:data.collector_identity,
+      tagHint:"点击添加搜索标签",
+      onTag:tag=>{addTag(tag);$("search-title").scrollIntoView({block:"start",behavior:"smooth"});},
     });
-    if (ordered.length>10) { const more=element("span","more-tags",`+${ordered.length-10}`); more.title=ordered.slice(10).map(tag => `${tagName(tag)} (${tag})`).join("\n");tagList.append(more); }
-    main.append(tagList);card.append(main);list.append(card);
+    card.classList.add("search-card");list.append(card);
   });
   $("results").replaceChildren(list);
   $("pagination").hidden = false;
@@ -318,6 +290,15 @@ $("next").onclick = () => goPage(responseData.page+1);
 $("jump-page").onclick = () => goPage($("page-input").value);
 $("page-input").onkeydown = event => { if(event.key === "Enter") { event.preventDefault(); goPage(event.target.value); } };
 $("link-target").onchange = () => renderResults();
+$("search-view").onchange=async()=>{
+  searchView=$("search-view").value;renderResults();$("search-view").disabled=true;
+  try{
+    const response=await fetch("/api/search/view",{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":catalogActionToken},body:JSON.stringify({view:searchView})});
+    const result=await response.json();if(!response.ok)throw new Error(result.error||"保存失败");
+    message();
+  }catch(error){message(`显示方式已切换，但尚未保存到本地资料库：${error.message}。请重新选择后再退出。`);}
+  finally{$("search-view").disabled=false;}
+};
 function resetForm() {
   searchRequest?.abort(); suggestionRequest?.abort(); clearTimeout(suggestionTimer);
   searchRequest = null; tags=[];excludeTags=[]; responseData=null; submittedFilters=null;
@@ -348,6 +329,8 @@ async function start() {
     if(!response.ok||!preferencesResponse.ok) throw new Error("连接失败");
     const data=await response.json(),preferences=await preferencesResponse.json();
     catalogActionToken=data.action_token||"";
+    if(searchViews.includes(preferences.search_view))searchView=preferences.search_view;
+    $("search-view").value=searchView;$("search-view").disabled=false;
     rememberLabels(preferences.tag_labels);blacklistTags=[...preferences.tag_blacklist];renderTags();
     $("gallery-count").textContent=number(data.gallery_count);
     $("tag-count").textContent=number(data.tag_count);

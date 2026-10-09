@@ -67,6 +67,7 @@ def verify_desktop(report_path, fixture_root=None):
         notes_pending = api._updates.info()["show_notes"]
         expected_view = session.server.catalog.favorites.get_record_view() or "extended"
         report["initial_saved_view"] = expected_view
+        expected_search_view = session.server.catalog.favorites.get_search_view() or "extended"
         window = webview.create_window("桌面版隔离验证", url=url, js_api=api, width=1360, height=900, hidden=True)
         api._window = window
 
@@ -122,6 +123,23 @@ def verify_desktop(report_path, fixture_root=None):
                         result = promise("window.pywebview.api.client_info()")
                         if result.get("show_notes"):
                             raise AssertionError("Read notes were shown again after navigation")
+                    if page == "/":
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(!document.querySelector('#search-view').disabled){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Search view did not initialize'));}},50);})")
+                        actual_view = window.evaluate_js("document.querySelector('#search-view').value")
+                        if actual_view != expected_search_view:
+                            raise AssertionError({"expected_search":expected_search_view,"actual":actual_view})
+                        report["initial_search_rendered_view"] = actual_view
+                        window.evaluate_js("document.querySelector('#tag-input').value='language:english';document.querySelector('#search-form').requestSubmit()")
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#results .saved-card')&&document.querySelector('#results').getAttribute('aria-busy')==='false'){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Search results did not load'));}},50);})")
+                        for mode in ("minimal", "thumbnails", "extended", "compact"):
+                            check_view = window.evaluate_js("(()=>{const select=document.querySelector('#search-view');select.value=" + json.dumps(mode) + ";select.dispatchEvent(new Event('change'));return {cards:document.querySelectorAll('#results .saved-card').length,overflow:document.documentElement.scrollWidth>innerWidth+1};})()")
+                            if check_view["cards"] != 1 or check_view["overflow"]:
+                                raise AssertionError(check_view)
+                            promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(!document.querySelector('#search-view').disabled){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Search view did not save'));}},50);})")
+                        preference = promise("fetch('/api/preferences').then(r=>r.json())")
+                        if preference["search_view"] != "compact" or (preference["records_view"] or "extended") != expected_view:
+                            raise AssertionError(preference)
+                        report["checks"].append("all four search views render in actual packaged WebView2; search preference saves independently")
                     if page == "/records":
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('.saved-card')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Records did not load'));}},50);})")
                         actual_view = window.evaluate_js("document.querySelector('#record-view').value")

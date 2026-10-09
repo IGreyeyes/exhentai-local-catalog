@@ -213,7 +213,7 @@ class Catalog:
     def preferences(self):
         tags = tuple(tag for tag in self.favorites.get_tag_blacklist() if tag in self.available_tags)
         return {"tag_blacklist": list(tags), "tag_labels": self.translations.labels(tags),
-                "records_view": self.favorites.get_record_view()}
+                "records_view": self.favorites.get_record_view(), "search_view": self.favorites.get_search_view()}
 
     def set_preferences(self, payload):
         values = payload.get("tag_blacklist")
@@ -359,7 +359,7 @@ class Catalog:
                 coverage = db.execute("SELECT COUNT(f.favorite_count),SUM(CASE WHEN f.checked_at>=? THEN 1 ELSE 0 END),MIN(f.checked_at),MAX(f.checked_at) FROM gallery AS g" + JOIN_FAVORITES + "WHERE " + where, (int(time.time())-7*86400,*params)).fetchone()
                 pages = max(1, math.ceil(total / limit))
                 page = min(page, pages)
-                sql = "SELECT g.gid,g.token,g.title,g.title_jpn,g.category,g.posted,g.filecount,g.rating,g.removed,g.replaced,g.expunged,f.favorite_count,f.checked_at AS favorite_checked_at FROM gallery AS g" + JOIN_FAVORITES + "WHERE " + where
+                sql = "SELECT g.gid,g.token,g.title,g.title_jpn,g.category,g.posted,g.filecount,g.rating,g.removed,g.replaced,g.expunged,f.favorite_count,f.checked_at AS favorite_checked_at,f.source AS favorite_source,f.collector_id,f.collector_name FROM gallery AS g" + JOIN_FAVORITES + "WHERE " + where
                 sql += " ORDER BY " + SORTS[sort] + " LIMIT ? OFFSET ?"
                 rows = db.execute(sql, params + (limit, (page - 1) * limit)).fetchall()
                 items = []
@@ -380,6 +380,7 @@ class Catalog:
             "use_blacklist": selection.use_blacklist, "sort": sort,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "has_favorites": True, "include_inactive": selection.include_inactive,
+            "collector_identity": self.favorites.collector_identity(),
             "favorite_coverage": {"known":coverage[0],"total":total,"fresh":coverage[1] or 0,"fresh_days":7,"oldest_checked_at":coverage[2],"newest_checked_at":coverage[3],"complete":total>0 and coverage[0]==total},
             "tag_labels": self.translations.labels([*selection.tags, *selection.excluded_tags, *(tag for item in items for tag in item["tags"])]),
         }
@@ -541,6 +542,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 files = {"/": ("index.html", "text/html"), "/records": ("records.html", "text/html"), "/records/": ("records.html", "text/html"), "/maintenance": ("maintenance.html", "text/html"), "/maintenance/": ("maintenance.html", "text/html"), "/maintenance.css": ("maintenance.css", "text/css"), "/service.js": ("service.js", "text/javascript"), "/records.js": ("records.js", "text/javascript"), "/records.css": ("records.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/collector.js": ("collector.js", "text/javascript"), "/maintenance.js": ("maintenance.js", "text/javascript"), "/style.css": ("style.css", "text/css"), "/favicon.svg": ("favicon.svg", "image/svg+xml"), "/cover-placeholder.svg": ("cover-placeholder.svg", "image/svg+xml")}
                 files["/platform.js"] = ("platform.js", "text/javascript")
+                files["/gallery-cards.js"] = ("gallery-cards.js", "text/javascript")
                 files["/client-updates.css"] = ("client-updates.css", "text/css")
                 if request.path not in files:
                     self.reply({"error": "页面不存在。"}, status=404)
@@ -661,6 +663,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.reply({"error":"接口不存在。"},status=404)
                     return
+            elif self.path == "/api/search/view":
+                with self.server.catalog_gate:
+                    if self.server.maintenance.stopping:raise ValueError("服务正在停止，请重新启动后再操作。")
+                    if set(payload) != {"view"}:
+                        raise ValueError("请只提交搜索结果显示方式。")
+                    result={"search_view":self.server.catalog.favorites.set_search_view(payload["view"])}
             elif self.path.startswith("/api/records/"):
                 with self.server.catalog_gate:
                     if self.server.maintenance.stopping:raise ValueError("服务正在停止，请重新启动后再操作。")

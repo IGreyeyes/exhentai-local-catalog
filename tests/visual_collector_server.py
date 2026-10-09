@@ -1,6 +1,7 @@
 """Isolated catalog and mocked source for the collector browser regression test."""
 from pathlib import Path
 import sqlite3
+import json
 import sys
 import threading
 
@@ -28,9 +29,25 @@ def main():
                 CREATE TABLE gid_tid(gid INTEGER,tid INTEGER,PRIMARY KEY(gid,tid));
                 INSERT INTO tag VALUES(1,'language:english');
             """)
-            db.executemany("INSERT INTO gallery(gid,token,title,title_jpn,category,posted,filecount,rating) VALUES (?,'abcdef0123','示例作品','','Non-H',1760000000,10,'4.0')",((gid,) for gid in range(1,10002)))
-            db.executemany('INSERT INTO gid_tid VALUES(?,1)',((gid,) for gid in range(1,10002)))
+            count=46 if len(sys.argv)>2 and sys.argv[2]=='search-views' else 10001
+            db.executemany("INSERT INTO gallery(gid,token,title,title_jpn,category,posted,filecount,rating) VALUES (?,'abcdef0123','示例作品','','Non-H',1760000000,10,'4.0')",((gid,) for gid in range(1,count+1)))
+            db.executemany('INSERT INTO gid_tid VALUES(?,1)',((gid,) for gid in range(1,count+1)))
+    if len(sys.argv)>2 and sys.argv[2]=='search-views':
+        with sqlite3.connect(path) as db:
+            for gid,category in enumerate(('Doujinshi','Image Set','Artist CG','Manga','Game CG','Misc'),1):
+                db.execute("UPDATE gallery SET category=?,title=?,title_jpn=? WHERE gid=?",(category,'示例作品 · '+category,'测试原标题',gid))
+            for tid,tag in enumerate(['artist:example','parody:example','character:example',*[f'other:tag{index}' for index in range(12)]],2):
+                db.execute("INSERT INTO tag VALUES(?,?)",(tid,tag))
+                db.executemany("INSERT INTO gid_tid VALUES(?,?)",((gid,tid) for gid in range(1,7)))
+        path.with_name('tag-translations.json').write_text(json.dumps({'version':7,'data':[
+            {'namespace':'rows','data':{key:{'name':name} for key,name in [('language','语言'),('artist','画师'),('parody','原作'),('character','角色'),('other','其他')]}},
+            {'namespace':'language','data':{'english':{'name':'英语'}}},
+            {'namespace':'artist','data':{'example':{'name':'示例画师'}}},
+        ]},ensure_ascii=False),encoding='utf-8')
     catalog = Catalog(path)
+    if len(sys.argv)>2 and sys.argv[2]=='search-views':
+        catalog.favorites.set_collector_name('测试采集者')
+        for gid in range(1,7):catalog.favorites.save(gid,(gid-1)*1234,'e-hentai.org')
     if len(sys.argv)>2 and sys.argv[2]=='features':
         with sqlite3.connect(path) as db:
             db.execute("INSERT OR IGNORE INTO tag VALUES(2,'artist:example')")

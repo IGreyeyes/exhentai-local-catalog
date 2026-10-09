@@ -47,11 +47,14 @@ class RecordedWorksTests(unittest.TestCase):
 
     def test_view_choice_survives_reopening_and_preserves_other_personal_data(self):
         self.assertIsNone(self.catalog.preferences()['records_view'])
+        self.assertIsNone(self.catalog.preferences()['search_view'])
         self.catalog.favorites.set_tag_blacklist(['other:anthology'])
         self.catalog.favorites.set_reading_state([1],'watched')
         self.catalog.favorites.set_record_view('thumbnails')
+        self.catalog.favorites.set_search_view('compact')
         reopened=Catalog(self.path)
         self.assertEqual(reopened.preferences()['records_view'],'thumbnails')
+        self.assertEqual(reopened.preferences()['search_view'],'compact')
         self.assertEqual(reopened.preferences()['tag_blacklist'],['other:anthology'])
         saved=next(item for item in reopened.recorded({})['items'] if item['gid']==1)
         self.assertEqual(saved['reading_state'],'watched')
@@ -59,7 +62,10 @@ class RecordedWorksTests(unittest.TestCase):
         for invalid in ('minimal-tags','invalid','',None,True,[],{}):
             with self.subTest(view=invalid),self.assertRaises(ValueError):
                 reopened.favorites.set_record_view(invalid)
+            with self.subTest(search_view=invalid),self.assertRaises(ValueError):
+                reopened.favorites.set_search_view(invalid)
         self.assertEqual(reopened.favorites.get_record_view(),'thumbnails')
+        self.assertEqual(reopened.favorites.get_search_view(),'compact')
         reopened.set_preferences({'tag_blacklist':[]})
         self.assertEqual(Catalog(self.path).preferences()['records_view'],'thumbnails')
 
@@ -295,9 +301,16 @@ class RecordedWorksTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as failure:post('/api/records/view',{'view':'thumbnails'},token=False)
             self.assertEqual(failure.exception.code,403);failure.exception.close()
             self.assertEqual(post('/api/records/view',{'view':'thumbnails'})['records_view'],'thumbnails')
+            with self.assertRaises(HTTPError) as failure:post('/api/search/view',{'view':'compact'},token=False)
+            self.assertEqual(failure.exception.code,403);failure.exception.close()
+            self.assertEqual(post('/api/search/view',{'view':'compact'})['search_view'],'compact')
             with urlopen(root+'/api/preferences') as response:
                 self.assertEqual(json.load(response)['records_view'],'thumbnails')
+            with urlopen(root+'/api/preferences') as response:
+                self.assertEqual(json.load(response)['search_view'],'compact')
             for payload in ({'view':'bad'},{'view':'thumbnails','cookies':'test'}):
+                with self.assertRaises(HTTPError) as failure:post('/api/search/view',payload)
+                self.assertEqual(failure.exception.code,400);failure.exception.close()
                 with self.assertRaises(HTTPError) as failure:post('/api/records/view',payload)
                 self.assertEqual(failure.exception.code,400);failure.exception.close()
             opened=post('/api/records/opened',{'gid':1})

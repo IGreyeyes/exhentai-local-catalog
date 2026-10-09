@@ -1,4 +1,5 @@
 from contextlib import closing
+from compression import zstd
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -218,6 +219,48 @@ class FavoriteTransferTests(unittest.TestCase):
         self.assertFalse(missing["metadata_available"])
         self.assertEqual((missing["favorite_count"], missing["checked_at"]), (0, 90))
         self.assertIsNone(self.engine.prepared_favorites())
+
+    def test_shared_count_automatically_matches_after_catalog_update_and_restart(self):
+        collector_id = str(uuid4())
+        incoming = self.item(999, 0, 90, collector_id=collector_id, collector_name="测试采集者")
+        ready = self.prepare(self.raw([incoming]))
+        self.assertEqual(ready["summary"]["missing_catalog"], 1)
+        self.engine.import_favorites(ready["id"])
+        before = self.rows()
+        self.store.set_reading_state([999], "planned")
+        server = Server(("127.0.0.1", 0), Catalog(self.catalog))
+        try:
+            missing = server.catalog.recorded({"q": ["999"]})["items"][0]
+            self.assertFalse(missing["metadata_available"])
+            self.assertEqual(missing["tags"], [])
+            self.assertIsNone(missing["source_url"])
+            self.assertEqual(server.catalog.search({"tag": ["language:english"]})["total"], 9)
+            self.assertIn(incoming, parse_snapshot(export_snapshot(self.store.path)[0])["records"])
+
+            # Compress a separate fixture, then exercise the real prepare/apply/reload path.
+            newer = self.root / "newer.sqlite3"
+            with closing(sqlite3.connect(self.catalog)) as old, closing(sqlite3.connect(newer)) as candidate:
+                old.backup(candidate)
+                candidate.execute("INSERT INTO gallery VALUES(999,'abcdef0123','New shared work','','Manga',200,42,'4.5',0,0,0)")
+                candidate.execute("INSERT INTO gid_tid VALUES(999,1)")
+                candidate.commit()
+            (self.root / "e-hentai.db.zstd").write_bytes(zstd.compress(newer.read_bytes()))
+            ready = self.engine.prepare_archive()
+            # Replacing the archive alone does not change the active catalog.
+            self.assertFalse(server.catalog.recorded({"q": ["999"]})["items"][0]["metadata_available"])
+            self.engine.apply(ready["id"], reload_catalog=server.reload_catalog)
+            self.assertEqual(self.rows(), before)
+            self.assertEqual(server.catalog.search({"tag": ["language:english"]})["total"], 10)
+            for catalog in (server.catalog, Catalog(self.catalog)):
+                item = catalog.recorded({"q": ["999"]})["items"][0]
+                self.assertTrue(item["metadata_available"])
+                self.assertEqual((item["title"], item["tags"], item["reading_state"]), ("New shared work", ["language:english"], "planned"))
+                self.assertEqual((item["favorite_count"], item["checked_at"], item["collector_id"], item["collector_name"]), (0, 90, collector_id, "测试采集者"))
+                self.assertEqual(item["source_url"], "https://e-hentai.org/g/999/abcdef0123/")
+                result = catalog.search({"tag": ["language:english"], "title": ["New shared work"], "sort": ["favorites"]})["items"][0]
+                self.assertEqual((result["gid"], result["favorite_count"], result["favorite_checked_at"], result["collector_id"]), (999, 0, 90, collector_id))
+        finally:
+            server.server_close()
 
     def test_backup_failure_prevents_any_merge(self):
         ready = self.prepare(self.raw([self.item(1, 20, 200)]))

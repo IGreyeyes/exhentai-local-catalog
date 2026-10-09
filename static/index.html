@@ -7,7 +7,9 @@
   <title>EX资料库 · 本地 Tag 搜索</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/records.css">
   <link rel="stylesheet" href="/client-updates.css">
+  <script src="/gallery-cards.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/collector.js" defer></script>
   <script src="/service.js" defer></script>
@@ -111,7 +113,7 @@
           </div>
         </details>
         <section class="results-section" aria-labelledby="results-heading">
-          <div class="results-heading"><div><h2 id="results-heading">搜索结果</h2><p id="results-summary" aria-live="polite">准备好后，开始你的第一次搜索。</p></div><label class="link-target">打开作品时使用<select id="link-target"><option value="exhentai.org">ExHentai</option><option value="e-hentai.org">E-Hentai</option></select></label></div>
+          <div class="results-heading"><div><h2 id="results-heading">搜索结果</h2><p id="results-summary" aria-live="polite">准备好后，开始你的第一次搜索。</p></div><div class="record-display-controls"><label for="search-view">显示方式<select id="search-view" disabled><option value="minimal">最小化</option><option value="compact">紧凑 + 标签</option><option value="extended" selected>扩展</option><option value="thumbnails">缩略图</option></select></label><label class="link-target">打开作品时使用<select id="link-target"><option value="exhentai.org">ExHentai</option><option value="e-hentai.org">E-Hentai</option></select></label></div></div>
           <p id="favorite-coverage" class="coverage-note" hidden></p>
           <div id="results" aria-busy="false"><div class="empty-state"><div class="empty-icon" aria-hidden="true">⌕</div><h3>每一次发现，从一个标签开始</h3><p>添加 Tag 或输入标题关键词。搜索将覆盖整个本地库，<br>匹配结果按页展示，不设置候选数量上限。</p><span class="empty-footnote">搜索后可采集收藏数，建立你的本地收藏榜。</span></div></div>
           <nav class="pagination" id="pagination" aria-label="搜索结果翻页" hidden><span id="page-range"></span><div><button class="button secondary" id="previous">上一页</button><label><input id="page-input" type="number" min="1" value="1" aria-label="页码"><span id="page-total"></span></label><button class="button secondary" id="jump-page">跳转</button><button class="button secondary" id="next">下一页</button></div></nav>

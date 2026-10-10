@@ -289,6 +289,48 @@ async function adminApi(request,url,env,now) {
       ORDER BY p.received_at,p.id LIMIT 100`).all()).results;
     return json({pending:rows.map(r=>({...r,snapshot:JSON.parse(r.payload),payload:undefined}))});
   }
+  if(path==='/v3/admin/pending/trusted-preview' && request.method==='GET') {
+    const scope=await env.DB.prepare(`SELECT COUNT(*) AS count,COALESCE(MAX(p.id),0) AS max_id
+      FROM cloud_pending p JOIN upload_sources s ON s.id=p.source_id WHERE s.status='trusted'`).first();
+    return json(scope);
+  }
+  if(path==='/v3/admin/pending/approve-trusted' && request.method==='POST') {
+    const value=await body(request);
+    if(!exactKeys(value,['after','max_id']) || !integer(value.max_id,1,Number.MAX_SAFE_INTEGER)
+        || !integer(value.after,0,value.max_id))throw new ApiError(400,'批量审批范围或进度不正确。');
+    const found=(await env.DB.prepare(`SELECT p.id,p.gid,p.payload,p.checked_at FROM cloud_pending p
+      JOIN upload_sources s ON s.id=p.source_id WHERE s.status='trusted' AND p.id>? AND p.id<=?
+      ORDER BY p.id LIMIT ?`).bind(value.after,value.max_id,MAX_BATCH+1).all()).results;
+    const rows=found.slice(0,MAX_BATCH),statements=[];
+    for(const row of rows){
+      statements.push(env.DB.prepare(`INSERT INTO cloud_public(gid,payload,checked_at,source_id,action,received_at)
+        SELECT p.gid,p.payload,p.checked_at,p.source_id,'snapshot',? FROM cloud_pending p
+        JOIN upload_sources s ON s.id=p.source_id WHERE p.id=? AND p.payload=? AND p.checked_at=?
+        AND s.status='trusted' AND NOT EXISTS(SELECT 1 FROM cloud_public c WHERE c.gid=p.gid AND c.checked_at>=p.checked_at)
+        ${UPSERT} RETURNING gid`).bind(now,row.id,row.payload,row.checked_at));
+      statements.push(env.DB.prepare(`DELETE FROM cloud_pending WHERE id=? AND payload=? AND checked_at=?
+        AND EXISTS(SELECT 1 FROM upload_sources s WHERE s.id=cloud_pending.source_id AND s.status='trusted')
+        AND EXISTS(SELECT 1 FROM cloud_public c WHERE c.gid=cloud_pending.gid AND c.checked_at>=cloud_pending.checked_at)
+        RETURNING id`).bind(row.id,row.payload,row.checked_at));
+    }
+    let approved=0,processed=0;
+    if(rows.length){
+      statements.push(env.DB.prepare('INSERT INTO cloud_audit(action,target,created_at) VALUES(?,?,?)')
+        .bind('pending_approve_trusted_batch',rows.map(row=>row.id).join(','),now));
+      const results=await env.DB.batch(statements);
+      for(let index=0;index<rows.length;index++){
+        const published=results[index*2].results,removed=results[index*2+1].results,row=rows[index];
+        if(!Array.isArray(published) || !Array.isArray(removed) || published.length>1 || removed.length>1
+            || published.length>removed.length || published.some(item=>item.gid!==row.gid)
+            || removed.some(item=>item.id!==row.id))throw new ApiError(503,'批量审批确认暂不可用，请重新读取后继续。');
+        approved+=published.length;processed+=removed.length;
+      }
+    }
+    const remaining=(await env.DB.prepare(`SELECT COUNT(*) AS count FROM cloud_pending p
+      JOIN upload_sources s ON s.id=p.source_id WHERE s.status='trusted' AND p.id<=?`).bind(value.max_id).first()).count;
+    return json({approved,kept:processed-approved,skipped:rows.length-processed,processed,
+      next:rows.length?rows.at(-1).id:value.max_id,has_more:found.length>MAX_BATCH,remaining});
+  }
   const review=/^\/v3\/admin\/pending\/([1-9]\d*)\/(approve|reject)$/.exec(path);
   if(review && Number.isSafeInteger(Number(review[1])) && request.method==='POST') {
     const id=Number(review[1]);
@@ -346,19 +388,42 @@ const ADMIN_HTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><met
 <section><label for="secret">管理员密钥 ADMIN_SECRET</label><br><input id="secret" type="password" autocomplete="off" size="45"><button id="load">读取管理信息</button><button id="make-secret">本地生成新管理员密钥</button><button id="copy-secret">复制密钥</button><p id="status" role="status"></p></section>
 <section><h2>上传开关与用量</h2><p id="metrics"></p><button id="enable">开放上传</button><button id="pause">暂停上传</button><button id="cleanup">清理过期限流计数</button><p>升级后默认暂停。暂停只阻止新上传，公开下载继续可用。备份请使用 Cloudflare D1 导出；历史记录随数据库一起备份。</p><div id="audit"></div></section>
 <section><h2>上传来源</h2><p>来源标识显示「已可信」「待审核」或「已封禁」；对应的当前状态按钮不可重复点击。新来源可提交到服务器待审核区，批准后才进入公共库；设为可信后，后续正常数据自动入库，已有候选仍需批准。请核对来源编号再设为可信；封禁不撤回已发布数据。</p><div id="sources"></div><button id="source-next">下一页来源</button><button id="source-first">返回首批来源</button></section>
-<section><h2>待审核数据</h2><p>核对源站后批准。设为可信不自动批准已有候选；每次显示最早 100 条，处理后继续读取。</p><div id="pending"></div></section>
+<section><h2>待审核数据</h2><p>核对源站后批准。设为可信不自动批准已有候选；每次显示最早 100 条，处理后继续读取。</p><button id="pending-approve-trusted">一键审批可信来源的待审核数据</button><button id="pending-bulk-stop" disabled>停止后续批次</button><p>批量审批覆盖已可信来源的全部现有候选，包括异常候选；执行前请核对范围。未可信及封禁来源保持待审，公共库中较新的数据保留。处理期间新增的候选留到下一次。</p><p id="pending-bulk-progress" role="status" aria-live="polite"></p><div id="pending"></div></section>
 <section><h2>按来源和时间范围撤回</h2><input id="rollback-source" placeholder="上传来源编号"><label>起始时间<input id="rollback-from" type="datetime-local"></label><label>结束时间<input id="rollback-until" type="datetime-local"></label><button id="rollback-preview">预览受影响作品</button><button id="rollback-next">预览下一批</button><button id="rollback-apply">撤回本批</button><p>时间采用本机时区，留空表示不限。每批最多 5 部作品，恢复为此前其他未封禁来源的最后一份历史快照；没有历史时撤回。更新的其他来源记录不会被批量撤回。请先封禁错误来源，再预览并核对。</p><div id="rollback"></div></section>
 <section><h2>历史恢复与撤回</h2><input id="gid" type="number" min="1" placeholder="作品 ID"><button id="history-load">读取历史</button><button id="history-next">更早的历史</button><button id="retract">撤回当前公共快照</button><p>恢复会发布纠正记录，已升级客户端可撤回错误云端值并保留更新的自采数据。升级前仅能保留迁移时的最新快照。</p><div id="history"></div></section>
 <script nonce="NONCE">
 const el=id=>document.getElementById(id);let busy=false,sourceAfter='',sourceNext='',historyBefore='',current=0,rollbackRows=[],rollbackNext=0,rollbackAfter=0,rollbackMore=false,rollbackFilter='';
+let bulkRunning=false,bulkStop=false;
 async function call(path,method='GET',data){const secret=el('secret').value;if(!secret)throw Error('请填写管理员密钥。');const r=await fetch(path,{method,headers:{Authorization:'Bearer '+secret,...(data?{'Content-Type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{})});const v=await r.json();if(!r.ok)throw Error(v.error||'操作失败');return v;}
-function controls(){document.querySelectorAll('button').forEach(b=>b.disabled=busy||b.dataset.stateDisabled==='true');}
+function controls(){document.querySelectorAll('button').forEach(b=>b.disabled=busy||b.dataset.stateDisabled==='true');el('pending-bulk-stop').disabled=!bulkRunning||bulkStop;}
 async function task(fn){if(busy)return;busy=true;controls();el('status').textContent='处理中…';try{await fn();el('status').textContent='完成。';}catch(e){el('status').textContent=e.message;}finally{busy=false;controls();}}
 function text(parent,value){const p=document.createElement('p');p.textContent=value;parent.append(p);}
 function button(parent,label,fn,disabled=false){const b=document.createElement('button');b.textContent=label;b.dataset.stateDisabled=String(disabled);b.disabled=busy||disabled;b.onclick=()=>task(fn);parent.append(b);return b;}
 const sourceLabels={trusted:'已可信',review:'待审核',blocked:'已封禁'};
 const sourceHints={trusted:'后续正常快照自动进入公共库；异常变化仍待审核。',review:'数据可提交到服务器待审核区，管理员批准后才公开共享。',blocked:'已停止该来源后续上传；已发布数据可另行恢复或撤回。'};
-const actionLabels={enable_upload:'开放上传',pause_upload:'暂停上传',source_trusted:'来源设为可信',source_review:'来源改为待审核',source_blocked:'来源封禁',pending_approve:'批准待审数据',pending_reject:'拒绝待审数据',restore:'恢复或撤回公共快照',cleanup_limits:'清理过期限流计数'};
+const actionLabels={enable_upload:'开放上传',pause_upload:'暂停上传',source_trusted:'来源设为可信',source_review:'来源改为待审核',source_blocked:'来源封禁',pending_approve:'批准待审数据',pending_reject:'拒绝待审数据',pending_approve_trusted_batch:'批量审批可信来源候选',restore:'恢复或撤回公共快照',cleanup_limits:'清理过期限流计数'};
+async function approveTrusted(){
+  const progress=el('pending-bulk-progress');progress.textContent='正在读取可信来源的待审数量…';
+  const scope=await call('/v3/admin/pending/trusted-preview');
+  if(!scope.count){progress.textContent='当前没有已可信来源的待审核数据。';return;}
+  if(!confirm('确认批量审批已可信来源的 '+scope.count+' 条现有待审候选？包括异常候选；未可信及封禁来源保持待审，较新的公共数据保留。')){progress.textContent='已取消批量审批。';return;}
+  let after=0,approved=0,kept=0,skipped=0,remaining=scope.count,more=true;
+  bulkRunning=true;bulkStop=false;controls();
+  const describe=()=> '已批准 '+approved+' 条，保留已有公共版本并清理 '+kept+' 条，因状态或记录变化保留 '+skipped+' 条。';
+  try{
+    while(more&&!bulkStop){
+      const result=await call('/v3/admin/pending/approve-trusted','POST',{after,max_id:scope.max_id});
+      approved+=result.approved;kept+=result.kept;skipped+=result.skipped;remaining=result.remaining;
+      after=result.next;more=result.has_more;progress.textContent='分批审批中：'+describe();
+    }
+    progress.textContent=(bulkStop&&more?'已停止后续批次：':'本次批量审批完成：')+describe()
+      +(remaining?' 本次范围内还有 '+remaining+' 条可信候选，可重新读取后继续。':'');
+    await refresh();
+  }catch(error){progress.textContent='批量审批中断：'+describe()+' 已完成批次保留，请重新读取管理信息后继续。';throw error;}
+  finally{bulkRunning=false;controls();}
+}
+el('pending-approve-trusted').onclick=()=>task(approveTrusted);
+el('pending-bulk-stop').onclick=()=>{bulkStop=true;controls();el('pending-bulk-progress').textContent='已请求停止；当前批次完成后停止，已完成的审批保留。';};
 async function refresh(){const [m,s,p]=await Promise.all([call('/v3/admin/status'),call('/v3/admin/sources?after='+encodeURIComponent(sourceAfter)),call('/v3/admin/pending')]);el('enable').dataset.stateDisabled=String(Boolean(m.upload_enabled));el('pause').dataset.stateDisabled=String(!m.upload_enabled);el('metrics').textContent=(m.upload_enabled?'上传开放':'上传暂停')+'；公共作品 '+m.public_count+'；候选 '+m.pending_count+'/'+m.caps.pending+'；历史 '+m.history_count+'；来源 '+m.source_count+'；封禁 '+m.blocked_count+'。';for(const q of m.limits)text(el('metrics'),q.key+'：'+q.used+'（窗口起点 '+new Date(q.window_start*1000).toLocaleString()+'）');el('audit').replaceChildren();for(const a of m.actions)text(el('audit'),(actionLabels[a.action]||a.action)+' · '+a.target+' · '+new Date(a.created_at*1000).toLocaleString());el('sources').replaceChildren();sourceNext=s.has_more?s.next:'';for(const v of s.sources){const row=document.createElement('div');row.className='row';const heading=document.createElement('div');heading.className='source-heading';const name=document.createElement('span');name.className='source-name';name.textContent=v.name||'无昵称';const badge=document.createElement('span');badge.className='status-badge status-'+v.status;badge.textContent=sourceLabels[v.status]||'未知状态';heading.append(name,badge);row.append(heading);text(row,'来源编号 '+v.id+' · 采集者 '+v.collector_id);text(row,sourceHints[v.status]||'请重新读取来源状态。');for(const [status,label,currentLabel] of [['trusted','设为可信','已设为可信'],['review','恢复待审核','当前待审核'],['blocked','封禁上传','已封禁上传']])button(row,status===v.status?currentLabel:label,async()=>{if(!confirm('将此来源改为 '+label+'？'))return;await call('/v3/admin/sources/'+v.id,'POST',{status});await refresh();},status===v.status);button(row,'预览该来源的撤回',async()=>{el('rollback-source').value=v.id;rollbackAfter=0;await rollbackPreview();});el('sources').append(row);}if(!s.sources.length)text(el('sources'),'暂无来源。');el('pending').replaceChildren();for(const v of p.pending){const row=document.createElement('div');row.className='row';const r=v.snapshot;text(row,'作品 '+v.gid+' · '+v.reason+' · '+(sourceLabels[v.status]||'未知状态')+' · 来源编号 '+v.source_id);text(row,'收藏 '+r.favorite_count+'；评分人数 '+(r.rating_count??'未知')+'；'+new Date(r.checked_at*1000).toLocaleString());if(v.status!=='blocked')button(row,'核对后批准',async()=>{if(!confirm('已核对源站，批准此快照？'))return;await call('/v3/admin/pending/'+v.id+'/approve','POST');await refresh();});button(row,'拒绝',async()=>{if(!confirm('拒绝此候选？'))return;await call('/v3/admin/pending/'+v.id+'/reject','POST');await refresh();});el('pending').append(row);}if(!p.pending.length)text(el('pending'),'没有待审数据。');controls();}
 async function history(){const gid=Number(el('gid').value);const v=await call('/v3/admin/history?gid='+gid+(historyBefore?'&before='+historyBefore:''));current=v.current_revision;historyBefore=v.has_more?v.history.at(-1).revision:'';el('history').replaceChildren();for(const h of v.history){const row=document.createElement('div');row.className='row';text(row,'修订 '+h.revision+' · '+h.action+' · '+(h.snapshot?'收藏 '+h.snapshot.favorite_count+'；评分 '+(h.snapshot.rating_count??'未知'):'已撤回')+' · 来源 '+h.source_id);button(row,'恢复此版本',async()=>{if(!confirm('恢复作品 '+gid+' 到修订 '+h.revision+'？'))return;await call('/v3/admin/restore','POST',{gid,revision:h.revision,expected_revision:current});historyBefore='';await history();await refresh();});el('history').append(row);}}
 async function rollbackPreview(){const params=new URLSearchParams({source_id:el('rollback-source').value.trim(),after:String(rollbackAfter)});for(const [id,key] of [['rollback-from','from'],['rollback-until','until']]){if(el(id).value)params.set(key,String(Math.floor(new Date(el(id).value).getTime()/1000)));}const v=await call('/v3/admin/rollback-preview?'+params);rollbackRows=v.records;rollbackNext=v.next;rollbackMore=v.has_more;rollbackFilter=[el('rollback-source').value,el('rollback-from').value,el('rollback-until').value].join('|');el('rollback').replaceChildren();for(const r of rollbackRows)text(el('rollback'),'作品 '+r.gid+' · 当前收藏 '+r.current_snapshot.favorite_count+' · 恢复修订 '+r.revision+(r.revision?'':'（撤回公共值）'));if(!rollbackRows.length)text(el('rollback'),'没有匹配作品。');}
@@ -376,6 +441,7 @@ export default {async fetch(request,env){try{
   if(['/','/health'].includes(url.pathname) && request.method==='GET')return json({service:FORMAT,version:VERSION,ready:true,
     dataset_id:info.dataset_id,read_public:true,upload_scope:'library',preserves_original_collector:true,
     upload_confirmation:'returning_rows',
+    trusted_pending_bulk_approval:true,
     upload_requires_contribution_code:false,new_source_requires_review:true,
     upload_enabled:Boolean((await controls(env)).upload_enabled),admin_configured:typeof env.ADMIN_SECRET==='string' && /^[A-Za-z0-9_-]{32,256}$/.test(env.ADMIN_SECRET)});
   if(url.pathname==='/v3/changes' && request.method==='GET')return await changes(url,env,info);

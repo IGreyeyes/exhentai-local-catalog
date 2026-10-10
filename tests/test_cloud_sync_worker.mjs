@@ -4,41 +4,8 @@ import {DatabaseSync} from "node:sqlite";
 import {readFileSync} from "node:fs";
 import worker from "../cloudflare/worker.js";
 
-// 真实的临时内存 SQLite 执行生产 SQL，适配 D1 接口；不访问 Cloudflare 或真实资料库。
-class D1 {
-  constructor() {
-    this.sqlite = new DatabaseSync(":memory:");
-    this.sqlite.exec(readFileSync(new URL("../cloudflare/schema.sql", import.meta.url), "utf8"));
-  }
-  prepare(sql) {
-    const db = this;
-    return new class {
-      values = [];
-      bind(...values) { this.values = values; return this; }
-      async first() { return db.sqlite.prepare(sql).get(...this.values) ?? null; }
-      async all() { return {results: db.sqlite.prepare(sql).all(...this.values)}; }
-      async run() {
-        let stmt;try{stmt=db.sqlite.prepare(sql);}catch(e){throw new Error(e.message+" SQL "+sql);}
-        // D1 metadata may include trigger writes; RETURNING rows describe only the target statement.
-        const before = db.sqlite.prepare('SELECT total_changes() AS n').get().n;
-        const results = stmt.columns().length ? stmt.all(...this.values) : (stmt.run(...this.values), []);
-        const after = db.sqlite.prepare('SELECT total_changes() AS n').get().n;
-        return {success: true, results, meta: {changes: Number(after-before)}};
-      }
-    }();
-  }
-  async batch(statements) {
-    this.sqlite.exec("BEGIN IMMEDIATE");
-    try {
-      const results = [];
-      for (const statement of statements) results.push(await statement.run());
-      if (this.failBatch) throw Error("test-only simulated failure");
-      this.sqlite.exec("COMMIT");
-      return results;
-    } catch (error) { this.lastError=error.message; this.sqlite.exec("ROLLBACK"); throw error; }
-  }
-  close() { this.sqlite.close(); }
-}
+import {D1} from "./cloud_sync_fixture.mjs";
+
 const ADMIN='test-only-admin-secret-not-a-real-credential';
 const OWNER='00000000-0000-4000-8000-000000000001',OTHER='00000000-0000-4000-8000-000000000002';
 const TOKEN='src_'+'A'.repeat(43),TOKEN2='src_'+'B'.repeat(43);
@@ -63,6 +30,7 @@ function fixture(t){
 test('默认暂停；公开读取、管理认证、旧客户端提示升级',async t=>{
   const {env,call,manage}=fixture(t);const h=await call('/health');assert.equal(h.result.version,3);assert.equal(h.result.upload_scope,'library');assert.equal(h.result.preserves_original_collector,true);assert.equal(h.result.upload_requires_contribution_code,false);assert.equal(h.result.upload_enabled,false);
   assert.equal(h.result.upload_confirmation,'returning_rows');
+  assert.equal(h.result.trusted_pending_bulk_approval,true);
   assert.equal((await call('/v3/register',{method:'POST',token:TOKEN,data:{collector_id:OWNER,collector_name:''}})).status,503);
   assert.equal((await call('/v3/changes')).status,200);assert.equal((await call('/v3/admin/status')).status,401);
   assert.equal((await call('/v1/changes')).status,426);assert.equal((await call('/v1/contribute',{method:'POST'})).status,426);
@@ -95,6 +63,101 @@ test('新来源全量待审；批准后才公开，设可信不自动批准已�
   await manage('sources/'+s.source_id,{status:'trusted'});assert.equal((await changes()).result.records.length,0);
   for(const p of (await manage('pending')).result.pending)assert.equal((await manage('pending/'+p.id+'/approve',{})).status,200);
   assert.deepEqual((await changes()).result.records.map(e=>e.snapshot.favorite_count),[100,0]);
+});
+test('一键审批只处理可信来源，覆盖异常候选并保留未可信及封禁候选',async t=>{
+  const f=fixture(t);const a=await f.register();
+  await f.upload([item(1),{...item(2),collector_id:'',collector_name:''},item(3,2000000)]);
+  await f.manage('sources/'+a.source_id,{status:'trusted'});
+  const b=await f.register(TOKEN2,OTHER);await f.upload([item(4),item(5)],TOKEN2);
+  const third='src_'+'C'.repeat(43),c=await f.register(third,OTHER);await f.upload([item(6)],third);
+  await f.manage('sources/'+c.source_id,{status:'blocked'});
+  const preview=(await f.manage('pending/trusted-preview')).result;assert.equal(preview.count,3);
+  const r=await f.manage('pending/approve-trusted',{after:0,max_id:preview.max_id});assert.equal(r.status,200);
+  assert.deepEqual({approved:r.result.approved,kept:r.result.kept,skipped:r.result.skipped,processed:r.result.processed},
+    {approved:3,kept:0,skipped:0,processed:3});
+  assert.equal(r.result.has_more,false);assert.equal(r.result.remaining,0);
+  const pending=(await f.manage('pending')).result.pending;assert.equal(pending.length,3);
+  assert.ok(pending.every(row=>[b.source_id,c.source_id].includes(row.source_id)));
+  const events=(await f.changes()).result.records;assert.deepEqual(events.map(row=>row.gid),[1,2,3]);
+  assert.equal(events[1].snapshot.collector_id,'');
+  assert.ok((await f.manage('status')).result.actions.some(row=>row.action==='pending_approve_trusted_batch'));
+});
+test('一键审批跨多批覆盖全部范围，后续新增候选留到下次且重复操作不新增历史',async t=>{
+  const f=fixture(t),source=await f.register();
+  for(let start=1;start<=12;start+=5)await f.upload(Array.from({length:Math.min(5,13-start)},(_,index)=>item(start+index)));
+  await f.manage('sources/'+source.source_id,{status:'trusted'});
+  const preview=(await f.manage('pending/trusted-preview')).result;assert.equal(preview.count,12);
+  await f.upload([item(13,2000000)]);
+  let after=0,approved=0,batches=0,more=true;
+  while(more){
+    const response=await f.manage('pending/approve-trusted',{after,max_id:preview.max_id});assert.equal(response.status,200);
+    const r=response.result;assert.ok(r.processed<=5);assert.ok(r.next>after);
+    after=r.next;approved+=r.approved;more=r.has_more;batches++;
+  }
+  assert.equal(approved,12);assert.equal(batches,3);
+  assert.deepEqual((await f.manage('pending')).result.pending.map(row=>row.gid),[13]);
+  const repeated=await f.manage('pending/approve-trusted',{after:0,max_id:preview.max_id});
+  assert.equal(repeated.result.processed,0);assert.equal(repeated.result.remaining,0);
+  assert.equal((await f.changes()).result.records.length,12);
+});
+test('批量审批保留更新的公共记录并清理同等或过时的可信候选',async t=>{
+  const f=fixture(t),source=await f.register();await f.upload([item(1)]);
+  await f.trusted(TOKEN2,OTHER);await f.upload([{...item(1,120,now-50),collector_id:OTHER}],TOKEN2);
+  await f.manage('sources/'+source.source_id,{status:'trusted'});
+  const scope=(await f.manage('pending/trusted-preview')).result;
+  const r=(await f.manage('pending/approve-trusted',{after:0,max_id:scope.max_id})).result;
+  assert.equal(r.approved,0);assert.equal(r.kept,1);assert.equal(r.processed,1);
+  assert.equal((await f.manage('pending')).result.pending.length,0);
+  const records=(await f.changes()).result.records;assert.equal(records.length,1);
+  assert.equal(records[0].snapshot.favorite_count,120);
+});
+test('批量审批事务执行前来源失去信任时不发布或删除候选',async t=>{
+  const f=fixture(t),source=await f.register();await f.upload([item()]);
+  await f.manage('sources/'+source.source_id,{status:'trusted'});
+  const preview=(await f.manage('pending/trusted-preview')).result;
+  const original=f.env.DB.batch.bind(f.env.DB);
+  f.env.DB.batch=async statements=>{f.env.DB.sqlite.prepare("UPDATE upload_sources SET status='blocked' WHERE id=?").run(source.source_id);return original(statements);};
+  const r=(await f.manage('pending/approve-trusted',{after:0,max_id:preview.max_id})).result;
+  assert.equal(r.approved,0);assert.equal(r.processed,0);assert.equal(r.skipped,1);
+  assert.equal((await f.changes()).result.records.length,0);
+  assert.equal((await f.manage('pending')).result.pending.length,1);
+});
+test('批量审批读取后候选变化时跳过并保留，重新读取可审批新值',async t=>{
+  const f=fixture(t),source=await f.register();await f.upload([item()]);
+  await f.manage('sources/'+source.source_id,{status:'trusted'});
+  const preview=(await f.manage('pending/trusted-preview')).result,original=f.env.DB.batch.bind(f.env.DB);
+  const newer=item(1,120,now-50);
+  f.env.DB.batch=async statements=>{f.env.DB.sqlite.prepare('UPDATE cloud_pending SET payload=?,checked_at=?').run(JSON.stringify(newer),newer.checked_at);return original(statements);};
+  const r=(await f.manage('pending/approve-trusted',{after:0,max_id:preview.max_id})).result;
+  assert.equal(r.skipped,1);assert.equal(r.remaining,1);assert.equal(r.approved,0);
+  assert.equal((await f.changes()).result.records.length,0);
+  f.env.DB.batch=original;
+  assert.equal((await f.manage('pending/approve-trusted',{after:0,max_id:preview.max_id})).result.approved,1);
+  assert.equal((await f.changes()).result.records[0].snapshot.favorite_count,120);
+});
+test('批量审批失败整批回滚，暂停上传时仍可管理审批',async t=>{
+  const f=fixture(t),source=await f.register();await f.upload([item()]);
+  await f.manage('sources/'+source.source_id,{status:'trusted'});await f.manage('controls',{upload_enabled:false});
+  const scope=(await f.manage('pending/trusted-preview')).result;
+  const before=(await f.manage('status')).result.actions.length;
+  f.env.DB.failBatch=true;
+  assert.equal((await f.manage('pending/approve-trusted',{after:0,max_id:scope.max_id})).status,503);
+  assert.equal((await f.changes()).result.records.length,0);
+  assert.equal((await f.manage('pending')).result.pending.length,1);
+  assert.equal((await f.manage('status')).result.actions.length,before);
+  f.env.DB.failBatch=false;
+  assert.equal((await f.manage('pending/approve-trusted',{after:0,max_id:scope.max_id})).result.approved,1);
+});
+test('批量审批预览及执行验证管理员身份、字段和进度，空范围可正常返回',async t=>{
+  const f=fixture(t);
+  assert.equal((await f.call('/v3/admin/pending/trusted-preview')).status,401);
+  assert.equal((await f.call('/v3/admin/pending/approve-trusted',{method:'POST',data:{after:0,max_id:1}})).status,401);
+  assert.deepEqual((await f.manage('pending/trusted-preview')).result,{count:0,max_id:0});
+  for(const value of [{after:-1,max_id:1},{after:0,max_id:0},{after:2,max_id:1},{after:0,max_id:1,cookie:'test-only-placeholder'},{after:true,max_id:1}]){
+    assert.equal((await f.manage('pending/approve-trusted',value)).status,400);
+  }
+  const empty=(await f.manage('pending/approve-trusted',{after:0,max_id:1})).result;
+  assert.equal(empty.processed,0);assert.equal(empty.has_more,false);assert.equal(empty.next,1);
 });
 test('上传确认数量不计入 D1 触发器写入，混合待审和已有记录可重试',async t=>{
   const {trusted,register,upload,manage}=fixture(t);await trusted();

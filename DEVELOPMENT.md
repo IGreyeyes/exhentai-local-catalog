@@ -95,6 +95,8 @@ v1.1.19 使用 v3 同步接口。上传从当前 favorites 全表生成 cloud_up
 
 v1.1.20 的上传确认按候选及公共快照 INSERT / UPSERT 的 `RETURNING gid` 行数计算，不能使用 D1 的 `meta.changes`，因为它可能包含历史和计数触发器的写入。服务端回归适配器以 SQLite `total_changes()` 差值模拟这种元数据，同时返回实际查询行；验证每批公开接受、待审核与保留之和等于提交记录数，以及持久写入后重试不重复入库。客户端继续严格校验数量，错误回执不保存确认，原队列可继续。
 
+v1.1.21 的可信候选批量审批由管理页一次确认后连续请求 `/v3/admin/pending/approve-trusted`。预览固定 max_id，按候选 id 推进 after，每批最多 5 条；每个 INSERT / DELETE 同时检查来源仍可信、候选 payload 和 checked_at 与本批读取值一致，并按公共采集时间保留较新记录。删除的过时候选与新公开数分别以 RETURNING 行计数，审计和写入同批事务完成。页面可停止后续请求，错误后保留已完成批次；新增候选不进入原范围，跳过的改变记录可重新读取后处理。`tests/cloud_sync_fixture.mjs` 提供临时内存 D1 适配器，`tests/visual_trusted_pending.cjs` 验证真实管理 HTML、确认取消、正常完成、停止与失败后继续及小窗口，不访问生产服务。
+
 构建机需 Windows x64、Python 3.14 和 Windows Python 启动器。普通用户不需要这些开发工具。
 
 ```powershell

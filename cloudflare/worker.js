@@ -1,5 +1,5 @@
-/* ExCatalog 公共同步 v2。绑定 D1 为 DB；管理员密钥只存于 ADMIN_SECRET Secret。 */
-const VERSION = 2;
+/* ExCatalog 公共同步 v3。绑定 D1 为 DB；管理员密钥只存于 ADMIN_SECRET Secret。 */
+const VERSION = 3;
 const FORMAT = "excatalog-cloud-sync";
 // 每批最多 5 条，预留 D1 查询及历史写入额度，兼容免费 Worker 的每请求查询额度。
 const MAX_BATCH = 5;
@@ -89,7 +89,8 @@ function record(value, now) {
       || value.rating_count !== null && !integer(value.rating_count, 0, MAX_COUNT)
       || !integer(value.checked_at, 1, now + 300)
       || !["e-hentai.org", "exhentai.org"].includes(value.source)
-      || typeof value.collector_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.collector_id)
+      || typeof value.collector_id !== "string" || !(value.collector_id === "" && value.collector_name === ""
+        || /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.collector_id))
       || !boundedName(value.collector_name)) {
     throw new ApiError(400, "快照字段、数值、采集者信息或抓取时间不正确；不要上传 Cookie、标题或个人资料。");
   }
@@ -136,6 +137,7 @@ async function register(request, env, now) {
   const value = await body(request);
   if (!exactKeys(value,['collector_id','collector_name'])) throw new ApiError(400,'登记字段不正确。');
   record({gid:1,favorite_count:0,rating_count:null,checked_at:now,source:'e-hentai.org',...value},now);
+  if (!value.collector_id) throw new ApiError(400,'上传来源须登记有效的采集者 ID；记录中的未知采集者可保留为空。');
   const hash = await digest(token);
   await env.DB.prepare(`INSERT INTO upload_sources(id,token_hash,collector_id,name,created_at)
     SELECT ?,?,?,?,? WHERE (SELECT source_count FROM upload_controls WHERE id=1)<${CAPS.sources}
@@ -177,10 +179,10 @@ async function contribute(request, env, now) {
   if (source.status==='blocked') throw new ApiError(403,'该上传来源已封禁。');
   const payload = await body(request);
   if (!exactKeys(payload,['version','records']) || payload.version!==VERSION || !Array.isArray(payload.records)
-      || !payload.records.length || payload.records.length>MAX_BATCH) throw new ApiError(400,'每批须包含 1～5 条 version 2 快照。');
+      || !payload.records.length || payload.records.length>MAX_BATCH) throw new ApiError(400,'每批须包含 1～5 条 version 3 快照。');
   const records = payload.records.map(r=>record(r,now));
-  if (new Set(records.map(r=>r.gid)).size!==records.length || records.some(r=>r.collector_id!==source.collector_id)) {
-    throw new ApiError(400,'一次上传须为同一凭证绑定的采集者，作品 ID 不能重复。');
+  if (new Set(records.map(r=>r.gid)).size!==records.length) {
+    throw new ApiError(400,'同批作品 ID 不能重复。');
   }
   await quota(env,'upload:source:minute:'+source.id,now,60,1,CAPS.source_minute);
   await quota(env,'upload:global:day',now,86400,records.length,CAPS.global_daily_records);
@@ -243,10 +245,10 @@ async function cleanup(env,now) {
 async function adminApi(request,url,env,now) {
   await admin(request,env);
   const path=url.pathname;
-  if(path==='/v2/admin/cleanup' && request.method==='POST') {
+  if(path==='/v3/admin/cleanup' && request.method==='POST') {
     const r=await cleanup(env,now);await audit(env,'cleanup_limits','expired',now);return json({removed:r.meta.changes});
   }
-  if(path==='/v2/admin/status' && request.method==='GET') {
+  if(path==='/v3/admin/status' && request.method==='GET') {
     const c=await controls(env);
     const counts=await env.DB.prepare(`SELECT (SELECT count(*) FROM cloud_public WHERE payload IS NOT NULL) AS public_count,
       (SELECT count(*) FROM cloud_history) AS history_count,(SELECT count(*) FROM upload_sources WHERE status='blocked') AS blocked_count`).first();
@@ -254,17 +256,17 @@ async function adminApi(request,url,env,now) {
     const actions=(await env.DB.prepare('SELECT action,target,created_at FROM cloud_audit ORDER BY id DESC LIMIT 30').all()).results;
     return json({...c,...counts,limits,caps:CAPS,actions});
   }
-  if(path==='/v2/admin/controls' && request.method==='POST') {
+  if(path==='/v3/admin/controls' && request.method==='POST') {
     const v=await body(request);if(!exactKeys(v,['upload_enabled']) || typeof v.upload_enabled!=='boolean')throw new ApiError(400,'上传开关不正确。');
     await env.DB.prepare('UPDATE upload_controls SET upload_enabled=? WHERE id=1').bind(v.upload_enabled?1:0).run();
     await audit(env,v.upload_enabled?'enable_upload':'pause_upload','all',now);return json({upload_enabled:v.upload_enabled});
   }
-  if(path==='/v2/admin/sources' && request.method==='GET') {
+  if(path==='/v3/admin/sources' && request.method==='GET') {
     const after=url.searchParams.get('after')||'';
     const rows=(await env.DB.prepare('SELECT id,collector_id,name,status,created_at FROM upload_sources WHERE id>? ORDER BY id LIMIT 101').bind(after).all()).results;
     return json({sources:rows.slice(0,100),has_more:rows.length>100,next:rows.length?rows[Math.min(rows.length,100)-1].id:''});
   }
-  const source=/^\/v2\/admin\/sources\/([0-9a-f-]{36})$/.exec(path);
+  const source=/^\/v3\/admin\/sources\/([0-9a-f-]{36})$/.exec(path);
   if(source && UUID.test(source[1]) && request.method==='POST') {
     const v=await body(request);if(!exactKeys(v,['status']) || !['review','trusted','blocked'].includes(v.status))throw new ApiError(400,'来源状态不正确。');
     const current=await env.DB.prepare('SELECT status FROM upload_sources WHERE id=?').bind(source[1]).first();
@@ -273,12 +275,12 @@ async function adminApi(request,url,env,now) {
     if(r.meta.changes)await audit(env,'source_'+v.status,source[1],now);
     return json({updated:Boolean(r.meta.changes),status:v.status});
   }
-  if(path==='/v2/admin/pending' && request.method==='GET') {
+  if(path==='/v3/admin/pending' && request.method==='GET') {
     const rows=(await env.DB.prepare(`SELECT p.*,s.name,s.status FROM cloud_pending p JOIN upload_sources s ON s.id=p.source_id
       ORDER BY p.received_at,p.id LIMIT 100`).all()).results;
     return json({pending:rows.map(r=>({...r,snapshot:JSON.parse(r.payload),payload:undefined}))});
   }
-  const review=/^\/v2\/admin\/pending\/([1-9]\d*)\/(approve|reject)$/.exec(path);
+  const review=/^\/v3\/admin\/pending\/([1-9]\d*)\/(approve|reject)$/.exec(path);
   if(review && Number.isSafeInteger(Number(review[1])) && request.method==='POST') {
     const id=Number(review[1]);
     if(review[2]==='reject') {
@@ -295,14 +297,14 @@ async function adminApi(request,url,env,now) {
     }
     await audit(env,'pending_'+review[2],id,now);return json({processed:true});
   }
-  if(path==='/v2/admin/history' && request.method==='GET') {
+  if(path==='/v3/admin/history' && request.method==='GET') {
     const gid=numberParam(url,'gid',null,1);if(gid===null)throw new ApiError(400,'请填写作品 ID。');
     const before=numberParam(url,'before',Number.MAX_SAFE_INTEGER,1);
     const rows=(await env.DB.prepare('SELECT * FROM cloud_history WHERE gid=? AND revision<? ORDER BY revision DESC LIMIT 101').bind(gid,before).all()).results;
     const current=await env.DB.prepare('SELECT revision FROM cloud_public WHERE gid=?').bind(gid).first();
     return json({current_revision:current?.revision||0,history:rows.slice(0,100).map(r=>({...event(r),source_id:r.source_id,received_at:r.received_at})),has_more:rows.length>100});
   }
-  if(path==='/v2/admin/rollback-preview' && request.method==='GET') {
+  if(path==='/v3/admin/rollback-preview' && request.method==='GET') {
     const source=url.searchParams.get('source_id');if(!source || !UUID.test(source))throw new ApiError(400,'来源编号不正确。');
     const after=numberParam(url,'after',0),from=numberParam(url,'from',0),until=numberParam(url,'until',now,from);
     const rows=(await env.DB.prepare(`SELECT c.gid,c.revision AS expected_revision,c.payload,
@@ -314,7 +316,7 @@ async function adminApi(request,url,env,now) {
     return json({records:rows.slice(0,5).map(r=>({gid:r.gid,expected_revision:r.expected_revision,
       revision:r.restore_revision,current_snapshot:JSON.parse(r.payload)})),has_more:rows.length>5,next:rows.length?rows[Math.min(rows.length,5)-1].gid:after});
   }
-  if(path==='/v2/admin/restore' && request.method==='POST') {
+  if(path==='/v3/admin/restore' && request.method==='POST') {
     const v=await body(request);
     if(!exactKeys(v,['gid','revision','expected_revision']) || !integer(v.gid,1,Number.MAX_SAFE_INTEGER)
       || !integer(v.revision,0,Number.MAX_SAFE_INTEGER) || !integer(v.expected_revision,1,Number.MAX_SAFE_INTEGER))throw new ApiError(400,'恢复参数不正确。');
@@ -348,11 +350,11 @@ function button(parent,label,fn,disabled=false){const b=document.createElement('
 const sourceLabels={trusted:'已可信',review:'待审核',blocked:'已封禁'};
 const sourceHints={trusted:'后续正常快照自动进入公共库；异常变化仍待审核。',review:'数据可提交到服务器待审核区，管理员批准后才公开共享。',blocked:'已停止该来源后续上传；已发布数据可另行恢复或撤回。'};
 const actionLabels={enable_upload:'开放上传',pause_upload:'暂停上传',source_trusted:'来源设为可信',source_review:'来源改为待审核',source_blocked:'来源封禁',pending_approve:'批准待审数据',pending_reject:'拒绝待审数据',restore:'恢复或撤回公共快照',cleanup_limits:'清理过期限流计数'};
-async function refresh(){const [m,s,p]=await Promise.all([call('/v2/admin/status'),call('/v2/admin/sources?after='+encodeURIComponent(sourceAfter)),call('/v2/admin/pending')]);el('enable').dataset.stateDisabled=String(Boolean(m.upload_enabled));el('pause').dataset.stateDisabled=String(!m.upload_enabled);el('metrics').textContent=(m.upload_enabled?'上传开放':'上传暂停')+'；公共作品 '+m.public_count+'；候选 '+m.pending_count+'/'+m.caps.pending+'；历史 '+m.history_count+'；来源 '+m.source_count+'；封禁 '+m.blocked_count+'。';for(const q of m.limits)text(el('metrics'),q.key+'：'+q.used+'（窗口起点 '+new Date(q.window_start*1000).toLocaleString()+'）');el('audit').replaceChildren();for(const a of m.actions)text(el('audit'),(actionLabels[a.action]||a.action)+' · '+a.target+' · '+new Date(a.created_at*1000).toLocaleString());el('sources').replaceChildren();sourceNext=s.has_more?s.next:'';for(const v of s.sources){const row=document.createElement('div');row.className='row';const heading=document.createElement('div');heading.className='source-heading';const name=document.createElement('span');name.className='source-name';name.textContent=v.name||'无昵称';const badge=document.createElement('span');badge.className='status-badge status-'+v.status;badge.textContent=sourceLabels[v.status]||'未知状态';heading.append(name,badge);row.append(heading);text(row,'来源编号 '+v.id+' · 采集者 '+v.collector_id);text(row,sourceHints[v.status]||'请重新读取来源状态。');for(const [status,label,currentLabel] of [['trusted','设为可信','已设为可信'],['review','恢复待审核','当前待审核'],['blocked','封禁上传','已封禁上传']])button(row,status===v.status?currentLabel:label,async()=>{if(!confirm('将此来源改为 '+label+'？'))return;await call('/v2/admin/sources/'+v.id,'POST',{status});await refresh();},status===v.status);button(row,'预览该来源的撤回',async()=>{el('rollback-source').value=v.id;rollbackAfter=0;await rollbackPreview();});el('sources').append(row);}if(!s.sources.length)text(el('sources'),'暂无来源。');el('pending').replaceChildren();for(const v of p.pending){const row=document.createElement('div');row.className='row';const r=v.snapshot;text(row,'作品 '+v.gid+' · '+v.reason+' · '+(sourceLabels[v.status]||'未知状态')+' · 来源编号 '+v.source_id);text(row,'收藏 '+r.favorite_count+'；评分人数 '+(r.rating_count??'未知')+'；'+new Date(r.checked_at*1000).toLocaleString());if(v.status!=='blocked')button(row,'核对后批准',async()=>{if(!confirm('已核对源站，批准此快照？'))return;await call('/v2/admin/pending/'+v.id+'/approve','POST');await refresh();});button(row,'拒绝',async()=>{if(!confirm('拒绝此候选？'))return;await call('/v2/admin/pending/'+v.id+'/reject','POST');await refresh();});el('pending').append(row);}if(!p.pending.length)text(el('pending'),'没有待审数据。');controls();}
-async function history(){const gid=Number(el('gid').value);const v=await call('/v2/admin/history?gid='+gid+(historyBefore?'&before='+historyBefore:''));current=v.current_revision;historyBefore=v.has_more?v.history.at(-1).revision:'';el('history').replaceChildren();for(const h of v.history){const row=document.createElement('div');row.className='row';text(row,'修订 '+h.revision+' · '+h.action+' · '+(h.snapshot?'收藏 '+h.snapshot.favorite_count+'；评分 '+(h.snapshot.rating_count??'未知'):'已撤回')+' · 来源 '+h.source_id);button(row,'恢复此版本',async()=>{if(!confirm('恢复作品 '+gid+' 到修订 '+h.revision+'？'))return;await call('/v2/admin/restore','POST',{gid,revision:h.revision,expected_revision:current});historyBefore='';await history();await refresh();});el('history').append(row);}}
-async function rollbackPreview(){const params=new URLSearchParams({source_id:el('rollback-source').value.trim(),after:String(rollbackAfter)});for(const [id,key] of [['rollback-from','from'],['rollback-until','until']]){if(el(id).value)params.set(key,String(Math.floor(new Date(el(id).value).getTime()/1000)));}const v=await call('/v2/admin/rollback-preview?'+params);rollbackRows=v.records;rollbackNext=v.next;rollbackMore=v.has_more;rollbackFilter=[el('rollback-source').value,el('rollback-from').value,el('rollback-until').value].join('|');el('rollback').replaceChildren();for(const r of rollbackRows)text(el('rollback'),'作品 '+r.gid+' · 当前收藏 '+r.current_snapshot.favorite_count+' · 恢复修订 '+r.revision+(r.revision?'':'（撤回公共值）'));if(!rollbackRows.length)text(el('rollback'),'没有匹配作品。');}
-el('rollback-preview').onclick=()=>task(async()=>{rollbackAfter=0;await rollbackPreview();});el('rollback-next').onclick=()=>task(async()=>{if(!rollbackMore)throw Error('没有后续作品。');rollbackAfter=rollbackNext;await rollbackPreview();});el('rollback-apply').onclick=()=>task(async()=>{if(!rollbackRows.length)throw Error('请先预览。');if(rollbackFilter!==[el('rollback-source').value,el('rollback-from').value,el('rollback-until').value].join('|'))throw Error('筛选条件已变化，请重新预览。');if(!confirm('已核对，撤回本批 '+rollbackRows.length+' 部作品？'))return;const rows=rollbackRows;rollbackRows=[];let ok=0,failed=0;for(const r of rows){try{await call('/v2/admin/restore','POST',{gid:r.gid,revision:r.revision,expected_revision:r.expected_revision});ok++;}catch{failed++;}}await rollbackPreview();await refresh();text(el('rollback'),'本次成功 '+ok+' 部，未成功 '+failed+' 部；未成功的作品需重新预览核对。');});
-el('cleanup').onclick=()=>task(async()=>{await call('/v2/admin/cleanup','POST',{});await refresh();});el('load').onclick=()=>task(refresh);el('source-next').onclick=()=>task(async()=>{if(!sourceNext)throw Error('已到最后一页。');sourceAfter=sourceNext;await refresh();});el('source-first').onclick=()=>task(async()=>{sourceAfter='';await refresh();});for(const [id,value] of [['enable',true],['pause',false]])el(id).onclick=()=>task(async()=>{if(!confirm(value?'开放所有人的提交？新来源仍待审核。':'暂停所有上传？'))return;await call('/v2/admin/controls','POST',{upload_enabled:value});await refresh();});el('history-load').onclick=()=>task(async()=>{historyBefore='';await history();});el('history-next').onclick=()=>task(async()=>{if(!historyBefore)throw Error('没有更早历史。');await history();});el('retract').onclick=()=>task(async()=>{if(!confirm('撤回当前公共快照？'))return;await call('/v2/admin/restore','POST',{gid:Number(el('gid').value),revision:0,expected_revision:current});historyBefore='';await history();await refresh();});
+async function refresh(){const [m,s,p]=await Promise.all([call('/v3/admin/status'),call('/v3/admin/sources?after='+encodeURIComponent(sourceAfter)),call('/v3/admin/pending')]);el('enable').dataset.stateDisabled=String(Boolean(m.upload_enabled));el('pause').dataset.stateDisabled=String(!m.upload_enabled);el('metrics').textContent=(m.upload_enabled?'上传开放':'上传暂停')+'；公共作品 '+m.public_count+'；候选 '+m.pending_count+'/'+m.caps.pending+'；历史 '+m.history_count+'；来源 '+m.source_count+'；封禁 '+m.blocked_count+'。';for(const q of m.limits)text(el('metrics'),q.key+'：'+q.used+'（窗口起点 '+new Date(q.window_start*1000).toLocaleString()+'）');el('audit').replaceChildren();for(const a of m.actions)text(el('audit'),(actionLabels[a.action]||a.action)+' · '+a.target+' · '+new Date(a.created_at*1000).toLocaleString());el('sources').replaceChildren();sourceNext=s.has_more?s.next:'';for(const v of s.sources){const row=document.createElement('div');row.className='row';const heading=document.createElement('div');heading.className='source-heading';const name=document.createElement('span');name.className='source-name';name.textContent=v.name||'无昵称';const badge=document.createElement('span');badge.className='status-badge status-'+v.status;badge.textContent=sourceLabels[v.status]||'未知状态';heading.append(name,badge);row.append(heading);text(row,'来源编号 '+v.id+' · 采集者 '+v.collector_id);text(row,sourceHints[v.status]||'请重新读取来源状态。');for(const [status,label,currentLabel] of [['trusted','设为可信','已设为可信'],['review','恢复待审核','当前待审核'],['blocked','封禁上传','已封禁上传']])button(row,status===v.status?currentLabel:label,async()=>{if(!confirm('将此来源改为 '+label+'？'))return;await call('/v3/admin/sources/'+v.id,'POST',{status});await refresh();},status===v.status);button(row,'预览该来源的撤回',async()=>{el('rollback-source').value=v.id;rollbackAfter=0;await rollbackPreview();});el('sources').append(row);}if(!s.sources.length)text(el('sources'),'暂无来源。');el('pending').replaceChildren();for(const v of p.pending){const row=document.createElement('div');row.className='row';const r=v.snapshot;text(row,'作品 '+v.gid+' · '+v.reason+' · '+(sourceLabels[v.status]||'未知状态')+' · 来源编号 '+v.source_id);text(row,'收藏 '+r.favorite_count+'；评分人数 '+(r.rating_count??'未知')+'；'+new Date(r.checked_at*1000).toLocaleString());if(v.status!=='blocked')button(row,'核对后批准',async()=>{if(!confirm('已核对源站，批准此快照？'))return;await call('/v3/admin/pending/'+v.id+'/approve','POST');await refresh();});button(row,'拒绝',async()=>{if(!confirm('拒绝此候选？'))return;await call('/v3/admin/pending/'+v.id+'/reject','POST');await refresh();});el('pending').append(row);}if(!p.pending.length)text(el('pending'),'没有待审数据。');controls();}
+async function history(){const gid=Number(el('gid').value);const v=await call('/v3/admin/history?gid='+gid+(historyBefore?'&before='+historyBefore:''));current=v.current_revision;historyBefore=v.has_more?v.history.at(-1).revision:'';el('history').replaceChildren();for(const h of v.history){const row=document.createElement('div');row.className='row';text(row,'修订 '+h.revision+' · '+h.action+' · '+(h.snapshot?'收藏 '+h.snapshot.favorite_count+'；评分 '+(h.snapshot.rating_count??'未知'):'已撤回')+' · 来源 '+h.source_id);button(row,'恢复此版本',async()=>{if(!confirm('恢复作品 '+gid+' 到修订 '+h.revision+'？'))return;await call('/v3/admin/restore','POST',{gid,revision:h.revision,expected_revision:current});historyBefore='';await history();await refresh();});el('history').append(row);}}
+async function rollbackPreview(){const params=new URLSearchParams({source_id:el('rollback-source').value.trim(),after:String(rollbackAfter)});for(const [id,key] of [['rollback-from','from'],['rollback-until','until']]){if(el(id).value)params.set(key,String(Math.floor(new Date(el(id).value).getTime()/1000)));}const v=await call('/v3/admin/rollback-preview?'+params);rollbackRows=v.records;rollbackNext=v.next;rollbackMore=v.has_more;rollbackFilter=[el('rollback-source').value,el('rollback-from').value,el('rollback-until').value].join('|');el('rollback').replaceChildren();for(const r of rollbackRows)text(el('rollback'),'作品 '+r.gid+' · 当前收藏 '+r.current_snapshot.favorite_count+' · 恢复修订 '+r.revision+(r.revision?'':'（撤回公共值）'));if(!rollbackRows.length)text(el('rollback'),'没有匹配作品。');}
+el('rollback-preview').onclick=()=>task(async()=>{rollbackAfter=0;await rollbackPreview();});el('rollback-next').onclick=()=>task(async()=>{if(!rollbackMore)throw Error('没有后续作品。');rollbackAfter=rollbackNext;await rollbackPreview();});el('rollback-apply').onclick=()=>task(async()=>{if(!rollbackRows.length)throw Error('请先预览。');if(rollbackFilter!==[el('rollback-source').value,el('rollback-from').value,el('rollback-until').value].join('|'))throw Error('筛选条件已变化，请重新预览。');if(!confirm('已核对，撤回本批 '+rollbackRows.length+' 部作品？'))return;const rows=rollbackRows;rollbackRows=[];let ok=0,failed=0;for(const r of rows){try{await call('/v3/admin/restore','POST',{gid:r.gid,revision:r.revision,expected_revision:r.expected_revision});ok++;}catch{failed++;}}await rollbackPreview();await refresh();text(el('rollback'),'本次成功 '+ok+' 部，未成功 '+failed+' 部；未成功的作品需重新预览核对。');});
+el('cleanup').onclick=()=>task(async()=>{await call('/v3/admin/cleanup','POST',{});await refresh();});el('load').onclick=()=>task(refresh);el('source-next').onclick=()=>task(async()=>{if(!sourceNext)throw Error('已到最后一页。');sourceAfter=sourceNext;await refresh();});el('source-first').onclick=()=>task(async()=>{sourceAfter='';await refresh();});for(const [id,value] of [['enable',true],['pause',false]])el(id).onclick=()=>task(async()=>{if(!confirm(value?'开放所有人的提交？新来源仍待审核。':'暂停所有上传？'))return;await call('/v3/admin/controls','POST',{upload_enabled:value});await refresh();});el('history-load').onclick=()=>task(async()=>{historyBefore='';await history();});el('history-next').onclick=()=>task(async()=>{if(!historyBefore)throw Error('没有更早历史。');await history();});el('retract').onclick=()=>task(async()=>{if(!confirm('撤回当前公共快照？'))return;await call('/v3/admin/restore','POST',{gid:Number(el('gid').value),revision:0,expected_revision:current});historyBefore='';await history();await refresh();});
 el('make-secret').onclick=()=>{if(el('secret').value&&!confirm('生成新密钥？不会修改 Cloudflare 已保存的密钥。'))return;const bytes=crypto.getRandomValues(new Uint8Array(48));el('secret').value=btoa(String.fromCharCode(...bytes)).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');el('status').textContent='请复制到 Cloudflare 的 ADMIN_SECRET 加密 Secret，并自行保管。刷新页面会清空。';};el('copy-secret').onclick=()=>task(async()=>{if(!el('secret').value)throw Error('请先输入或生成密钥。');await navigator.clipboard.writeText(el('secret').value);});
 </script></html>`;
 export default {async fetch(request,env){try{
@@ -363,13 +365,14 @@ export default {async fetch(request,env){try{
   }
   const info=await meta(env),now=Math.floor(Date.now()/1000);
   if(['/','/health'].includes(url.pathname) && request.method==='GET')return json({service:FORMAT,version:VERSION,ready:true,
-    dataset_id:info.dataset_id,read_public:true,upload_requires_contribution_code:false,new_source_requires_review:true,
+    dataset_id:info.dataset_id,read_public:true,upload_scope:'library',preserves_original_collector:true,
+    upload_requires_contribution_code:false,new_source_requires_review:true,
     upload_enabled:Boolean((await controls(env)).upload_enabled),admin_configured:typeof env.ADMIN_SECRET==='string' && /^[A-Za-z0-9_-]{32,256}$/.test(env.ADMIN_SECRET)});
-  if(url.pathname==='/v2/changes' && request.method==='GET')return await changes(url,env,info);
-  if(url.pathname==='/v2/register' && request.method==='POST')return await register(request,env,now);
-  if(url.pathname==='/v2/contribute' && request.method==='POST')return await contribute(request,env,now);
-  if(url.pathname.startsWith('/v2/admin/'))return await adminApi(request,url,env,now);
-  if(url.pathname.startsWith('/v1/'))throw new ApiError(426,'同步协议已升级，请安装 v1.1.14 或更新的客户端。');
+  if(url.pathname==='/v3/changes' && request.method==='GET')return await changes(url,env,info);
+  if(url.pathname==='/v3/register' && request.method==='POST')return await register(request,env,now);
+  if(url.pathname==='/v3/contribute' && request.method==='POST')return await contribute(request,env,now);
+  if(url.pathname.startsWith('/v3/admin/'))return await adminApi(request,url,env,now);
+  if(url.pathname.startsWith('/v1/') || url.pathname.startsWith('/v2/'))throw new ApiError(426,'同步协议已升级，请安装 v1.1.19 或更新的客户端。');
   throw new ApiError(404,'接口不存在或方法不正确。');
 }catch(e){return json({error:e instanceof ApiError?e.message:'同步暂时不可用、候选容量已满或上传状态变化，请稍后重试。'},e instanceof ApiError?e.status:503);}},
 async scheduled(controller,env){await cleanup(env,Math.floor(Date.now()/1000));}};

@@ -1,21 +1,23 @@
-# 公共同步服务 v2：部署与维护
+# 公共同步服务 v3：部署与维护
 
 普通用户无需 Cloudflare 账号、Node.js 或 Wrangler。客户端免贡献码提交；上传身份由客户端自动生成并登记，初始状态为待审核。
 
-## v2 服务更新管理界面
+## 已有 v2 / v3 服务升级
 
-已部署 v2 的服务直接替换并部署本目录最新 `worker.js`，重新打开 `/admin` 并读取管理信息即可。沿用当前数据库结构、来源状态和上传开关。来源显示「已可信」「待审核」「已封禁」中文标识，当前状态按钮显示已完成文字并禁用；重新读取后仍保持。重复设置同一来源状态不重复记录审计。
+先备份 D1，再直接替换并部署本目录最新 `worker.js`，重新打开 `/admin` 并读取管理信息。无需重新执行 SQL 或重建数据库，沿用公共数据、来源状态、历史和上传开关。核对 `/health` 的 `version: 3`、`upload_scope: library` 和 `preserves_original_collector: true`。客户端均需升级至 v1.1.19 或更新版本；旧 `/v1/` 和 `/v2/` 返回 426，提示升级。
+
+v3 接收资料库中的全部成功收藏数，允许同批记录包含自己、其他或未知的原采集者。上传来源继续绑定自动凭证，决定审核、封禁和额度；记录里的原采集者 ID 与昵称单独保留，未知 ID 和昵称均为空。v2 升级保留分页进度及原上传确认，新范围的本地记录自动进入队列。来源显示「已可信」「待审核」「已封禁」中文标识；重复设置同一来源状态不重复记录审计。
 
 ## 旧 v1 服务升级
 
 1. 先在 Cloudflare 导出备份 D1 数据库 `excatalog-sync`，自行保存导出文件，不加入源码仓库。
 2. 在该 D1 控制台粘贴 **`schema-console.sql` 全部内容**并执行。这是 `schema.sql` 的等价一行版，不删除旧表。迁移保留 dataset_id、已有最新公共快照和待审记录，上传默认暂停；重复执行不会复活旧候选或重复写入历史。
 3. 保持 D1 绑定名称 **`DB`** 和已有 **`ADMIN_SECRET` 加密 Secret**。在 Worker 编辑代码页全选旧 `worker.js`，替换为本目录新版全部代码，再部署。
-4. 打开 Worker 地址加 `/health`，核对 `ready: true`、`version: 2`、`upload_requires_contribution_code: false`、`new_source_requires_review: true`、`admin_configured: true`、`upload_enabled: false`。
+4. 打开 Worker 地址加 `/health`，核对 `ready: true`、`version: 3`、`upload_scope: library`、`upload_requires_contribution_code: false`、`new_source_requires_review: true`、`admin_configured: true`、`upload_enabled: false`。
 5. 进入 `/admin`，输入自己保管的原管理员密钥，读取并核对公共作品数和待审记录，点击「开放上传」。刷新页面后需重新输入密钥。
 6. 普通用户更新至最新版客户端。在「资料库维护」最上方的上传区，可独立选择上传和下载；首次上传和下载均默认关闭，用户选择并保存后启用，上传需确认分享范围，无需贡献码。原贡献码停止使用；旧客户端不能继续在线同步，可能显示 HTTP 426，需要升级。
 
-升级前只存最新快照，旧版完整历史无法补回。迁移后新增、批准、恢复和撤回均保留历史。首次 v2 同步重读历史并重新确认自采队列。
+升级前只存最新快照，旧版完整历史无法补回。迁移后新增、批准、恢复和撤回均保留历史。首次从 v1 同步重读历史，并确认当前资料库的成功收藏数队列。
 
 ## 首次部署
 
@@ -23,11 +25,11 @@
 
 ## 审核和来源
 
-- 上传来源绑定随机自动凭证的哈希和采集者 UUID；只复制 UUID 或昵称不会继承信任。客户端「来源编号」对应管理页编号，核对后可设为可信、待审核或封禁。这是匿名身份，无法阻止所有换身份、换网络的滥用，也不能证明数字来自源站。
+- 上传来源绑定随机自动凭证的哈希和上传者 UUID；只复制 UUID 或昵称不会继承信任。每条记录可保留不同的原采集者 ID 或未知 ID，其审核、额度与封禁仍按实际上传来源执行。客户端「来源编号」对应管理页编号，核对后可设为可信、待审核或封禁。这是匿名身份，无法阻止所有换身份、换网络的滥用，也不能证明数字来自源站。
 - 新来源可直接提交到服务器，数据保存到待审核区，管理员批准后才进入公共库供客户端下载。设为可信不会自动批准已有候选。可信来源正常快照自动发布；较旧或同时间快照保留现有公共值，不累加收藏数。
 - 任一计数超过 100 万、相对现值超过 `max(原值×5+1000, 原值+10000)`、跌幅超过一半且差值至少 100、非零突然归零、已知评分人数变未知，均待审。较小的正常下降可自动通过。
 - 管理员核对源站后批准或拒绝。封禁来源的候选不能批准。暂停上传不影响管理审核和公共下载。
-- 每批最多 **5 条**，正文最多 128 KiB，字段、非负整数、UUID v4、来源和时间严格验证；未来超过 5 分钟拒绝。同批重复 GID 或混用采集者整批拒绝。事务和客户端持久确认保证重复重试不重复发布。
+- 每批最多 **5 条**，正文最多 128 KiB，字段、非负整数、UUID v4、来源和时间严格验证；未知采集者仅允许 ID 和昵称都为空，未来超过 5 分钟拒绝。同批重复 GID 整批拒绝，混合原采集者可提交。来源登记仍须有效 UUID v4。事务和客户端持久确认保证重复重试不重复发布。
 - 只接收 GID、收藏数、同次评分人数（可为 null）、采集时间、源站名称、采集者 ID 和昵称；不接收 Cookie、作品访问令牌、标题、阅读状态、黑名单、日志、身份文件或整个资料库。
 
 ## 默认额度和监控
@@ -73,14 +75,14 @@ UPDATE upload_controls SET upload_enabled=0 WHERE id=1;
 | 接口 | 用途 | 认证 |
 | --- | --- | --- |
 | `GET /health` | 结构、协议、开关 | 无 |
-| `GET /v2/changes` | 历史初次 / 增量下载 | 无 |
-| `POST /v2/register` | 自动登记、重复登记 | 自动凭证 |
-| `POST /v2/contribute` | 最多 5 条自采快照 | 自动凭证 |
-| `/v2/admin/status`、`/controls` | 用量、审计、开关 | ADMIN_SECRET |
-| `/v2/admin/sources`、`/sources/{id}` | 来源分页和状态 | 同上 |
-| `/v2/admin/pending`、`/pending/{id}/approve`、`/reject` | 审核 | 同上 |
-| `/v2/admin/history`、`/restore`、`/rollback-preview` | 历史和撤回 | 同上 |
+| `GET /v3/changes` | 历史初次 / 增量下载 | 无 |
+| `POST /v3/register` | 自动登记、重复登记 | 自动凭证 |
+| `POST /v3/contribute` | 最多 5 条资料库快照，保留原采集者 | 自动凭证 |
+| `/v3/admin/status`、`/controls` | 用量、审计、开关 | ADMIN_SECRET |
+| `/v3/admin/sources`、`/sources/{id}` | 来源分页和状态 | 同上 |
+| `/v3/admin/pending`、`/pending/{id}/approve`、`/reject` | 审核 | 同上 |
+| `/v3/admin/history`、`/restore`、`/rollback-preview` | 历史和撤回 | 同上 |
 
-历史事件含 revision、gid、action（snapshot / correction）和 snapshot；撤回为 null。同页允许同一 GID 的多个事件，客户端先完整验证，再事务应用并推进游标。分页保留 dataset_id、cursor、until、head、has_more；旧 `/v1/` 返回 426。
+历史事件含 revision、gid、action（snapshot / correction）和 snapshot；撤回为 null。同页允许同一 GID 的多个事件，客户端先完整验证，再事务应用并推进游标。分页保留 dataset_id、cursor、until、head、has_more；旧 `/v1/` 和 `/v2/` 返回 426。
 
 本地验证使用临时 SQLite 和模拟服务，禁止在真实资料库或生产 D1 上传测试数据：`node --test tests/test_cloud_sync_worker.mjs`；`py -3.14 -X utf8 -m unittest discover -s tests -p test_cloud_sync.py`，无需第三方 Node 包。

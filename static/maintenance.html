@@ -35,19 +35,20 @@
           <label class="maintenance-field" for="cloud-sync-endpoint">同步服务地址</label>
           <div class="maintenance-path-row"><input id="cloud-sync-endpoint" type="url" autocomplete="off" spellcheck="false" placeholder="HTTPS 同步服务根地址"></div>
           <div id="cloud-upload-guide" class="cloud-upload-guide" hidden role="region" aria-labelledby="cloud-upload-guide-title">
-            <strong id="cloud-upload-guide-title">新增：上传并分享你的自采收藏数</strong>
+            <strong id="cloud-upload-guide-title">上传并分享资料库中的收藏数</strong>
             <p>以后从「资料库维护」最上方就能找到这里。上传和下载首次默认关闭，可按需要单独勾选。上传需确认下方公开分享范围并保存；已保存的选择会在下次打开时保留。新来源先待审核，通过后供大家同步使用。</p>
             <button id="cloud-upload-guide-done" class="button secondary" type="button">我知道了</button>
           </div>
-          <label class="checkbox"><input id="cloud-sync-upload" type="checkbox" disabled>自动上传我的自采收藏数和评分人数</label>
+          <label class="checkbox"><input id="cloud-sync-upload" type="checkbox" disabled>自动上传资料库中的全部成功收藏数记录和评分人数</label>
           <label class="checkbox"><input id="cloud-sync-enabled" type="checkbox" disabled>自动下载公共数据（可单独开启，完成后每 15 分钟检查）</label>
           <p class="field-hint">上传和下载首次默认不勾选；修改后点击保存，重启会保留已保存的选择。上传需确认公开分享范围后启用，无需贡献码。客户端自动登记来源，新来源提交后先由维护者审核；可信来源的异常变化也需审核。</p>
           <p class="field-hint" id="cloud-sync-source-state">首次上传时自动登记来源。</p>
-          <label class="checkbox"><input id="cloud-sync-consent" type="checkbox">我同意公开分享标记为自己采集的快照，包括作品 ID、收藏数、同次采集的评分人数、原抓取时间、来源、采集者 ID 和昵称。</label>
-          <p class="field-hint">上传不包含阅读状态、黑名单、搜索记录、Cookie、作品标题、作品访问令牌、日志或整个资料库。未知采集者及他人记录不代传。上传身份自动保存在本地个人资料中，关闭上传仍可下载。</p>
+          <label class="checkbox"><input id="cloud-sync-consent" type="checkbox">我同意公开分享资料库中的全部成功收藏数记录，包括自己、他人及采集者未知的记录；公开字段为作品 ID、收藏数、同次采集的评分人数、原抓取时间、来源、原采集者 ID 和昵称。</label>
+          <p class="field-hint">上传保留原采集者信息，未知采集者仍显示未知；只提交有成功收藏数的记录。上传不包含阅读状态、黑名单、搜索记录、Cookie、作品标题、作品访问令牌、日志或整个资料库。上传身份自动保存在本地个人资料中，关闭上传仍可下载。</p>
           <div class="maintenance-actions"><button class="button primary" id="cloud-sync-save" disabled>保存同步设置</button><button class="button secondary" id="cloud-sync-now" disabled>立即同步</button></div>
           <p class="maintenance-feedback" id="cloud-sync-message" role="status">正在读取同步设置…</p>
           <p class="field-hint" id="cloud-sync-progress"></p>
+          <p class="field-hint">「服务器已确认」包含公开接受、待审核和保留已有数据，不等于公共作品总数；新来源与异常数据通过审核后才可供其他用户下载。大量记录受分批处理与每日额度限制，未完成的队列会保留并继续。</p>
           <p class="field-hint" id="cloud-sync-last"></p>
           <details class="favorites-merge-guide"><summary>在线同步如何合并</summary><p>公共库采用已接受的最新抓取快照，收藏数可能正常减少；同一抓取时间保留先接受的公共快照。下载时按抓取时间合并，本地更晚的快照保留，同时间采用公共快照。收藏数和评分人数作为同一份快照更新；公共快照缺少评分人数时显示未知，避免与旧评分人数混算。较新的本地失败记录及个人阅读状态保留。</p><p>首次同步分批下载全量，之后只下载变更；大量上传或下载会自动分批续传。新来源、异常上涨、下跌或归零进入云端待审核，通过后才能共享。管理员恢复历史或撤回错误快照时，客户端会纠正仍在使用的云端值，并保留更新的自采记录。此功能与手动 JSON 导入的原合并规则分别工作，原文件格式和 Discussion 分享继续可用。开启前可先使用下方备份功能保存资料。</p></details>
         </section>

@@ -12,7 +12,7 @@ from collector_identity import read_identity, validate_collector
 
 DEFAULT_ENDPOINT = "https://excatalog-sync-api.greyeyes.workers.dev"
 FORMAT = "excatalog-cloud-sync"
-VERSION = 2
+VERSION = 3
 FIELDS = {"gid", "favorite_count", "rating_count", "checked_at", "source", "collector_id", "collector_name"}
 MAX_COUNT = 1_000_000_000
 
@@ -39,7 +39,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def request_json(endpoint, path, payload=None, token=""):
-    headers = {"Accept": "application/json", "User-Agent": "ExCatalog-CloudSync/2"}
+    headers = {"Accept": "application/json", "User-Agent": "ExCatalog-CloudSync/3"}
     data = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -57,14 +57,15 @@ def request_json(endpoint, path, payload=None, token=""):
     except HTTPError as error:
         status = error.code
         error.close()
-        if status == 409 and path.startswith("/v2/changes"):
+        if status == 409 and path.startswith("/v3/changes"):
             raise SyncReset("公共库已更换或恢复，正在重新下载。") from None
-        if status == 401 and path == "/v2/contribute":
+        if status == 401 and path == "/v3/contribute":
             raise UploadIdentityMissing("上传身份需重新登记，稍后重试。") from None
-        if status == 403 and path in {"/v2/register", "/v2/contribute"}:
+        if status == 403 and path in {"/v3/register", "/v3/contribute"}:
             raise UploadBlocked("该上传来源已被管理员封禁；公共下载继续可用。") from None
         messages = {401: "上传身份未登记或不匹配，请检查同步身份设置。", 403: "该上传来源已被管理员封禁；公共下载继续可用。", 426: "同步服务需要新版客户端，请更新后重试。", 429: "同步服务限流，稍后自动重试。",
                     400: "同步数据或采集身份不符合服务要求。",
+                    404: "同步服务尚未支持资料库全量上传，请维护者部署 v1.1.19 的 worker.js（v3）后重试。",
                     503: "上传可能已暂停、候选容量已满或服务尚未就绪，请检查云端管理页。"}
         raise ValueError(messages.get(status, f"同步服务返回 HTTP {status}，稍后重试。")) from None
     except (URLError, OSError, TimeoutError):
@@ -98,15 +99,16 @@ class CloudSync:
         self.downloaded = self.uploaded = self.pending = 0
         self.received = 0
         self.upload_remaining = None
+        self.upload_total = self.upload_confirmed = None
         self.session_upload_processed = self.session_download_received = 0
         self.next_due = 0
         self._seed_self()
         with self.gate, self.store_provider().connection() as db:
-            if self._get(db, "cloud_protocol") != "2":
+            if self._get(db, "cloud_protocol") not in {"2", str(VERSION)}:
                 self._put(db, "cloud_cursor", 0)
                 self._put(db, "cloud_dataset", "")
                 db.execute("DELETE FROM cloud_upload_ack")
-                self._put(db, "cloud_protocol", "2")
+            self._put(db, "cloud_protocol", VERSION)
         self.thread = None
         if start:
             self.thread = threading.Thread(target=self._loop, daemon=True, name="cloud-sync")
@@ -149,6 +151,7 @@ class CloudSync:
                     "last_success": self.last_success, "downloaded": self.downloaded, "uploaded": self.uploaded,
                     "pending": self.pending, "interval_minutes": 15, "phase": self.phase,
                     "upload_remaining": self.upload_remaining, "session_upload_processed": self.session_upload_processed,
+                    "upload_total": self.upload_total, "upload_confirmed": self.upload_confirmed,
                     "session_download_received": self.session_download_received,
                     "next_sync_at": int(time.time()+max(0,self.next_due-time.monotonic()))
                         if config["enabled"] and not self.busy and self.next_due else None}
@@ -164,7 +167,7 @@ class CloudSync:
         if any(type(value[key]) is not bool for key in ("download_enabled", "upload_enabled", "consent")):
             raise ValueError("同步选项须为开关值。")
         if value["upload_enabled"] and not value["consent"]:
-            raise ValueError("启用上传前，请确认公开分享自采快照及采集者信息。")
+            raise ValueError("启用上传前，请确认公开分享资料库中的全部成功收藏数记录及原采集者信息。")
         enabled = value["download_enabled"] or value["upload_enabled"]
         with self.gate, self.lock:
             if self.busy or self.maintenance_busy():
@@ -184,6 +187,7 @@ class CloudSync:
             self.message = "设置已保存；上传与下载独立运行，新来源的提交先待审核。" if enabled else "在线同步已关闭。"
             self.phase = "queued" if enabled else "idle"
             self.upload_remaining = None
+            self.upload_total = self.upload_confirmed = None
             self.next_due = 0
             self.wake.set()
         return self.status()
@@ -223,7 +227,7 @@ class CloudSync:
                 self._put(db, "cloud_upload_token", token)
                 self._put(db, "cloud_upload_owner", identity["collector_id"])
                 self._put(db, "cloud_upload_endpoint", config["endpoint"])
-        result = self.transport(config["endpoint"], "/v2/register", identity, token)
+        result = self.transport(config["endpoint"], "/v3/register", identity, token)
         if (not isinstance(result, dict) or set(result) != {"version", "source_id", "status"}
                 or result["version"] != VERSION or result["status"] not in {"review", "trusted"}):
             raise ValueError("上传身份登记结果不正确。")
@@ -237,23 +241,39 @@ class CloudSync:
         if self.stopped.is_set() or self.maintenance_busy():
             raise ValueError("正在停止服务或维护资料库，同步已暂停。")
 
+    def _refresh_upload_snapshots(self):
+        """Build the outbox from current library records without changing attribution."""
+        with self.gate:
+            self._available()
+            with self.store_provider().connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                rows = db.execute("""SELECT f.gid,f.favorite_count,f.checked_at,f.source,f.collector_id,f.collector_name,
+                    CASE WHEN r.checked_at=f.checked_at AND r.source=f.source THEN r.rating_count END AS rating_count
+                    FROM favorites f LEFT JOIN rating_counts r ON r.gid=f.gid""").fetchall()
+                db.executemany("""INSERT INTO cloud_upload_snapshots VALUES(?,?) ON CONFLICT(gid) DO UPDATE SET
+                    payload=excluded.payload WHERE cloud_upload_snapshots.payload IS NOT excluded.payload""",
+                    ((row["gid"], encode_snapshot(dict(row))) for row in rows))
+                db.execute("DELETE FROM cloud_upload_snapshots WHERE gid NOT IN (SELECT gid FROM favorites)")
+        with self.lock:
+            self.upload_total = len(rows)
+
     def _count_upload_queue(self):
         with self.gate:
             self._available()
             with self.store_provider().connection() as db:
-                own = read_identity(db)["collector_id"]
-                remaining = db.execute("""SELECT COUNT(*) FROM cloud_self_snapshots o
+                remaining = db.execute("""SELECT COUNT(*) FROM cloud_upload_snapshots o
                     LEFT JOIN cloud_upload_ack a ON a.gid=o.gid
-                    WHERE o.collector_id=? AND o.payload IS NOT a.payload""", (own,)).fetchone()[0]
+                    WHERE o.payload IS NOT a.payload""").fetchone()[0]
         with self.lock:
             self.upload_remaining = remaining
+            self.upload_confirmed = self.upload_total - remaining if self.upload_total is not None else None
         return remaining
 
     def _upload_progress(self):
         with self.lock:
             self.phase = "uploading"
             remaining = f"待上传 {self.upload_remaining:,} 条" if self.upload_remaining is not None else "正在检查待上传数量"
-            self.message = f"正在上传自采快照：本次运行累计已提交 {self.session_upload_processed:,} 条，{remaining}。"
+            self.message = f"正在上传资料库收藏数：本次运行累计已提交 {self.session_upload_processed:,} 条，{remaining}。"
 
     def _download_progress(self):
         with self.lock:
@@ -264,25 +284,28 @@ class CloudSync:
         if not config["upload_enabled"]:
             with self.lock:
                 self.upload_remaining = None
+                self.upload_total = self.upload_confirmed = None
             return False
-        if not self._count_upload_queue():
+        self._refresh_upload_snapshots()
+        if not self.upload_total:
+            self._count_upload_queue()
             return False
         token = self._upload_identity(config)
+        if not self._count_upload_queue():
+            return False
         for _ in range(20):
             self._available()
             self._upload_progress()
             with self.gate, self.store_provider().connection() as db:
-                own = read_identity(db)["collector_id"]
-                rows = db.execute("""SELECT o.gid,o.payload FROM cloud_self_snapshots o
+                rows = db.execute("""SELECT o.gid,o.payload FROM cloud_upload_snapshots o
                     LEFT JOIN cloud_upload_ack a ON a.gid=o.gid
-                    WHERE o.collector_id=? AND o.payload IS NOT a.payload ORDER BY o.gid LIMIT 5""", (own,)).fetchall()
+                    WHERE o.payload IS NOT a.payload ORDER BY o.gid LIMIT 5""").fetchall()
             if not rows:
-                with self.lock:
-                    self.upload_remaining = 0
-                return False
+                self._refresh_upload_snapshots()
+                return self._count_upload_queue() > 0
             items = [json.loads(row["payload"]) for row in rows]
             try:
-                result = self.transport(config["endpoint"], "/v2/contribute", {"version": VERSION, "records": items}, token)
+                result = self.transport(config["endpoint"], "/v3/contribute", {"version": VERSION, "records": items}, token)
             except UploadIdentityMissing:
                 with self.gate, self.store_provider().connection() as db:
                     db.execute("DELETE FROM app_settings WHERE key='cloud_source_id'")
@@ -304,9 +327,11 @@ class CloudSync:
                 self.session_upload_processed += len(items)
                 if self.upload_remaining is not None:
                     self.upload_remaining = max(0,self.upload_remaining-len(items))
+                    self.upload_confirmed = self.upload_total - self.upload_remaining
             self._upload_progress()
             if self.stopped.wait(2.1):
                 return False
+        self._refresh_upload_snapshots()
         return self._count_upload_queue() > 0
 
     @staticmethod
@@ -400,7 +425,7 @@ class CloudSync:
                         or type(value["checked_at"]) is not int or not 1 <= value["checked_at"] <= int(time.time())+300
                         or value["source"] not in {"e-hentai.org", "exhentai.org"}):
                     raise ValueError("公共快照字段、时间或数值不正确。")
-                validate_collector(value["collector_id"], value["collector_name"])
+                validate_collector(value["collector_id"], value["collector_name"], allow_unknown=True)
             revision = item["revision"]
         if page["has_more"] and revision != page["cursor"]:
             raise ValueError("公共分页游标不正确，未写入本地资料。")
@@ -434,7 +459,7 @@ class CloudSync:
             if until is not None:
                 params["until"] = until
             try:
-                page = self.transport(config["endpoint"], "/v2/changes?" + urlencode(params))
+                page = self.transport(config["endpoint"], "/v3/changes?" + urlencode(params))
             except SyncReset:
                 if resets:
                     raise ValueError("公共库连续发生变化，请稍后重新同步。") from None

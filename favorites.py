@@ -218,6 +218,9 @@ class FavoriteStore:
                 CREATE TABLE IF NOT EXISTS cloud_upload_ack (
                     gid INTEGER PRIMARY KEY, payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS cloud_upload_snapshots (
+                    gid INTEGER PRIMARY KEY, payload TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS collection_failures (
                     gid INTEGER PRIMARY KEY,token TEXT NOT NULL,source TEXT NOT NULL,
                     failed_at INTEGER NOT NULL,error TEXT NOT NULL,attempts INTEGER NOT NULL,

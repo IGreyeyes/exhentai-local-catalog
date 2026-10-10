@@ -50,29 +50,30 @@ function fixture(t){
       ...(data!==undefined?{'Content-Type':'application/json'}:{}),...headers},...(data!==undefined?{body:JSON.stringify(data)}:{})}),env);
     const result=r.headers.get('Content-Type').includes('json')?await r.json():await r.text();if(r.status===503 && env.DB.lastError) result.test_error=env.DB.lastError;return {status:r.status,result,headers:r.headers};
   }
-  const manage=(path,data)=>call('/v2/admin/'+path,{method:data===undefined?'GET':'POST',token:ADMIN,data});
-  async function register(token=TOKEN,owner=OWNER){await manage('controls',{upload_enabled:true});const r=await call('/v2/register',{method:'POST',token,data:{collector_id:owner,collector_name:'测试来源'}});assert.equal(r.status,200,JSON.stringify(r.result));return r.result;}
+  const manage=(path,data)=>call('/v3/admin/'+path,{method:data===undefined?'GET':'POST',token:ADMIN,data});
+  async function register(token=TOKEN,owner=OWNER){await manage('controls',{upload_enabled:true});const r=await call('/v3/register',{method:'POST',token,data:{collector_id:owner,collector_name:'测试来源'}});assert.equal(r.status,200,JSON.stringify(r.result));return r.result;}
   async function trusted(token=TOKEN,owner=OWNER){const s=await register(token,owner);await manage('sources/'+s.source_id,{status:'trusted'});return s;}
-  const upload=(records,token=TOKEN)=>call('/v2/contribute',{method:'POST',token,data:{version:2,records}});
-  const changes=()=>call('/v2/changes');
+  const upload=(records,token=TOKEN)=>call('/v3/contribute',{method:'POST',token,data:{version:3,records}});
+  const changes=()=>call('/v3/changes');
   return {env,call,manage,register,trusted,upload,changes};
 }
 test('默认暂停；公开读取、管理认证、旧客户端提示升级',async t=>{
-  const {env,call,manage}=fixture(t);const h=await call('/health');assert.equal(h.result.version,2);assert.equal(h.result.upload_requires_contribution_code,false);assert.equal(h.result.upload_enabled,false);
-  assert.equal((await call('/v2/register',{method:'POST',token:TOKEN,data:{collector_id:OWNER,collector_name:''}})).status,503);
-  assert.equal((await call('/v2/changes')).status,200);assert.equal((await call('/v2/admin/status')).status,401);
+  const {env,call,manage}=fixture(t);const h=await call('/health');assert.equal(h.result.version,3);assert.equal(h.result.upload_scope,'library');assert.equal(h.result.preserves_original_collector,true);assert.equal(h.result.upload_requires_contribution_code,false);assert.equal(h.result.upload_enabled,false);
+  assert.equal((await call('/v3/register',{method:'POST',token:TOKEN,data:{collector_id:OWNER,collector_name:''}})).status,503);
+  assert.equal((await call('/v3/changes')).status,200);assert.equal((await call('/v3/admin/status')).status,401);
   assert.equal((await call('/v1/changes')).status,426);assert.equal((await call('/v1/contribute',{method:'POST'})).status,426);
+  assert.equal((await call('/v2/changes')).status,426);assert.equal((await call('/v2/contribute',{method:'POST'})).status,426);
   assert.equal((await manage('status')).result.pending_count,0);delete env.ADMIN_SECRET;
-  assert.equal((await manage('controls',{upload_enabled:true})).status,503);assert.equal((await call('/v2/changes')).status,200);
+  assert.equal((await manage('controls',{upload_enabled:true})).status,503);assert.equal((await call('/v3/changes')).status,200);
 });
 test('自动身份绑定凭证；相同 UUID 的新凭证不会继承信任',async t=>{
   const {env,register,trusted,call}=fixture(t);const first=await trusted();const second=await register(TOKEN2);
   assert.notEqual(first.source_id,second.source_id);assert.equal(second.status,'review');
   assert.equal((await register()).source_id,first.source_id);
-  const wrong=await call('/v2/register',{method:'POST',token:TOKEN,data:{collector_id:OTHER,collector_name:''}});assert.equal(wrong.status,401);
+  const wrong=await call('/v3/register',{method:'POST',token:TOKEN,data:{collector_id:OTHER,collector_name:''}});assert.equal(wrong.status,401);
   const stored=env.DB.sqlite.prepare('SELECT token_hash FROM upload_sources WHERE id=?').get(first.source_id);
   assert.equal(stored.token_hash.length,64);assert.notEqual(stored.token_hash,TOKEN);
-  assert.ok(!JSON.stringify((await call('/v2/admin/sources',{token:ADMIN})).result).includes(stored.token_hash));
+  assert.ok(!JSON.stringify((await call('/v3/admin/sources',{token:ADMIN})).result).includes(stored.token_hash));
 });
 test('重复设置同一来源状态不重复更新或记录审计，状态仍可正常切换',async t=>{
   const {register,manage}=fixture(t);const s=await register();
@@ -98,6 +99,37 @@ test('可信正常变更自动发布；旧数据及重复上传不新增历史',
   assert.equal((await upload([item(1,90,now-99)])).result.accepted,1);
   const e=(await changes()).result.records;assert.equal(e.length,2);assert.equal(e.at(-1).snapshot.favorite_count,90);
 });
+test('资料库混合采集者和未知记录保留归属，上传来源独立认证',async t=>{
+  const {env,trusted,upload,changes,call}=fixture(t);const source=await trusted();
+  const records=[item(1),{...item(2),collector_id:OTHER,collector_name:'原采集者'},
+    {...item(3),collector_id:'',collector_name:''}];
+  const submitted=await upload(records);assert.equal(submitted.status,200);assert.equal(submitted.result.accepted,3);
+  assert.deepEqual((await changes()).result.records.map(e=>e.snapshot),records);
+  const rows=env.DB.sqlite.prepare('SELECT source_id FROM cloud_public ORDER BY gid').all();
+  assert.ok(rows.every(row=>row.source_id===source.source_id));
+  assert.equal((await upload(records)).result.kept,3);
+  const before=env.DB.sqlite.prepare('SELECT COUNT(*) AS n FROM cloud_history').get().n;
+  assert.equal(before,3);
+  const unknownIdentity=await call('/v3/register',{method:'POST',token:TOKEN2,data:{collector_id:'',collector_name:''}});
+  assert.equal(unknownIdentity.status,400);
+});
+test('转存的未知记录按上传来源待审，通过审核后其他用户可下载',async t=>{
+  const {register,upload,changes,manage}=fixture(t);const source=await register();
+  const snapshot={...item(),collector_id:'',collector_name:''};
+  const submitted=await upload([snapshot]);assert.equal(submitted.result.pending,1);
+  assert.equal((await changes()).result.records.length,0);
+  const candidate=(await manage('pending')).result.pending[0];assert.equal(candidate.source_id,source.source_id);
+  assert.deepEqual(candidate.snapshot,snapshot);
+  assert.equal((await manage('pending/'+candidate.id+'/approve',{})).status,200);
+  assert.deepEqual((await changes()).result.records[0].snapshot,snapshot);
+});
+test('转存记录不能继承原采集者来源的信任或绕过封禁',async t=>{
+  const {trusted,register,upload,manage}=fixture(t);await trusted(TOKEN,OTHER);
+  const submitter=await register(TOKEN2,OWNER);
+  assert.equal((await upload([{...item(),collector_id:OTHER}],TOKEN2)).result.pending,1);
+  await manage('sources/'+submitter.source_id,{status:'blocked'});
+  assert.equal((await upload([{...item(2),collector_id:OTHER}],TOKEN2)).status,403);
+});
 test('双向异常、归零及已知评分变未知进入待审',async t=>{
   const {trusted,upload,manage,changes}=fixture(t);await trusted();
   for(let gid=1;gid<=5;gid++)await upload([item(gid,1000,now-100,500)]);
@@ -111,10 +143,10 @@ test('新记录的极端评分人数也待审',async t=>{
 test('字段白名单、数字、时间、同批重复和身份严格检查',async t=>{
   const {trusted,upload,call,changes}=fixture(t);await trusted();
   for(const r of [{...item(),cookie:'test-only-placeholder'},{...item(),favorite_count:true},{...item(),rating_count:-1},
-    {...item(),checked_at:now+1000},{...item(),collector_id:OTHER},{...item(),collector_name:'\n'}, {...item(),source:'example.invalid'}])assert.equal((await upload([r])).status,400);
+    {...item(),checked_at:now+1000},{...item(),collector_id:'invalid'}, {...item(),collector_id:'',collector_name:'无 ID 的昵称'}, {...item(),collector_name:'\n'}, {...item(),source:'example.invalid'}])assert.equal((await upload([r])).status,400);
   assert.equal((await upload([item(),item()])).status,400);assert.equal((await upload(Array.from({length:6},(_,i)=>item(i+1)))).status,400);
   assert.equal((await upload([item()],TOKEN2)).status,401);assert.equal((await changes()).result.records.length,0);
-  const r=await call('/v2/contribute',{method:'POST',token:TOKEN,data:{version:2,records:[item()]},headers:{'Content-Length':'200000'}});assert.equal(r.status,413);
+  const r=await call('/v3/contribute',{method:'POST',token:TOKEN,data:{version:3,records:[item()]},headers:{'Content-Length':'200000'}});assert.equal(r.status,413);
 });
 test('封禁立即拒绝后续提交和待审批准；下载保留已发布历史',async t=>{
   const {trusted,upload,manage,changes}=fixture(t);const s=await trusted();await upload([item()]);await upload([item(2,2000000)]);
@@ -143,8 +175,8 @@ test('匿名登记配额和待审每日额度生效',async t=>{
   const {env,register,upload,call}=fixture(t);const s=await register();
   env.DB.sqlite.prepare('INSERT INTO upload_limits VALUES(?,?,?)').run('upload:source:day:'+s.source_id,Math.floor(now/86400)*86400,500);
   assert.equal((await upload([item()])).status,429);
-  for(let i=0;i<5;i++)await call('/v2/register',{method:'POST',token:'src_'+String(i).repeat(43),data:{collector_id:OWNER,collector_name:''}});
-  assert.equal((await call('/v2/register',{method:'POST',token:TOKEN2,data:{collector_id:OWNER,collector_name:''}})).status,429);
+  for(let i=0;i<5;i++)await call('/v3/register',{method:'POST',token:'src_'+String(i).repeat(43),data:{collector_id:OWNER,collector_name:''}});
+  assert.equal((await call('/v3/register',{method:'POST',token:TOKEN2,data:{collector_id:OWNER,collector_name:''}})).status,429);
 });
 test('事务失败与候选容量满不会部分写入或确认上传',async t=>{
   const {env,register,upload,changes}=fixture(t);await register();env.DB.failBatch=true;
@@ -163,12 +195,12 @@ test('历史恢复和撤回生成新修订，保留较旧时间并防止并发�
 });
 test('历史增量分页允许相同作品重复，固定边界不会丢变更',async t=>{
   const {trusted,upload,call}=fixture(t);await trusted();await upload([item(),item(2)]);await upload([item(1,110,now-90)]);
-  const first=(await call('/v2/changes?limit=1')).result;await upload([item(3)]);
-  const second=(await call('/v2/changes?after='+first.cursor+'&until='+first.until)).result;
+  const first=(await call('/v3/changes?limit=1')).result;await upload([item(3)]);
+  const second=(await call('/v3/changes?after='+first.cursor+'&until='+first.until)).result;
   assert.deepEqual(second.records.map(e=>e.gid),[2,1]);assert.equal(second.cursor,first.until);
-  assert.deepEqual((await call('/v2/changes?after='+second.cursor)).result.records.map(e=>e.gid),[3]);
-  assert.equal((await call('/v2/changes?dataset_id=test-only-old')).status,409);
-  for(const q of ['after=-1','limit=501','until=9999','after=0&after=0','cookie=test-only-placeholder'])assert.equal((await call('/v2/changes?'+q)).status,400);
+  assert.deepEqual((await call('/v3/changes?after='+second.cursor)).result.records.map(e=>e.gid),[3]);
+  assert.equal((await call('/v3/changes?dataset_id=test-only-old')).status,409);
+  for(const q of ['after=-1','limit=501','until=9999','after=0&after=0','cookie=test-only-placeholder'])assert.equal((await call('/v3/changes?'+q)).status,400);
 });
 test('已有 v1 库迁移保留最新数据、待审和 dataset；重复执行不复活旧候选',async t=>{
   const {env,call,manage}=fixture(t);env.DB.close();
@@ -178,9 +210,9 @@ test('已有 v1 库迁移保留最新数据、待审和 dataset；重复执行�
   sqlite.prepare('INSERT INTO pending_snapshots(gid,favorite_count,rating_count,checked_at,source,collector_id,collector_name,contributor_id,received_at) VALUES(?,?,?,?,?,?,?,?,?)').run(2,2000000,null,now-100,'e-hentai.org',OWNER,'',OWNER,now);
   const dataset=sqlite.prepare('SELECT dataset_id FROM sync_meta').get().dataset_id;sqlite.exec(schema);
   assert.equal((await call('/health')).result.dataset_id,dataset);assert.equal((await call('/health')).result.upload_enabled,false);
-  assert.equal((await call('/v2/changes')).result.records[0].snapshot.favorite_count,100);
+  assert.equal((await call('/v3/changes')).result.records[0].snapshot.favorite_count,100);
   const p=(await manage('pending')).result.pending[0];await manage('pending/'+p.id+'/reject',{});sqlite.exec(schema);
-  assert.equal((await manage('pending')).result.pending.length,0);assert.equal((await call('/v2/changes')).result.records.length,1);
+  assert.equal((await manage('pending')).result.pending.length,0);assert.equal((await call('/v3/changes')).result.records.length,1);
 });
 test('管理页无持久存储或注入；控制台 SQL 与标准 SQL 等价',async t=>{
   const {call,env}=fixture(t);const page=await call('/admin');assert.match(page.headers.get('Content-Security-Policy'),/frame-ancestors 'none'/);

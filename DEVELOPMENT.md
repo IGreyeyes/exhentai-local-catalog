@@ -87,7 +87,9 @@ flowchart TD
 
 ## 构建桌面发布包
 
-在线同步的服务端部署资料位于 `cloudflare/`，仅需 Cloudflare 浏览器后台；普通用户直接使用客户端设置。客户端自动上传凭证绑定具体上传来源，存于本地个人资料库的 app_settings；凭证不得进入状态接口、身份导出、源码或发布包。v2 按历史事件重放，cloud_applied 保存被云端覆盖前的本地快照。开发使用临时资料库和模拟同步服务，禁止在真实资料库或生产 D1 中上传测试数据。
+在线同步的服务端部署资料位于 `cloudflare/`，仅需 Cloudflare 浏览器后台；普通用户直接使用客户端设置。客户端自动上传凭证绑定具体上传来源，存于本地个人资料库的 app_settings；凭证不得进入状态接口、身份导出、源码或发布包。v2 起按历史事件重放，cloud_applied 保存被云端覆盖前的本地快照。开发使用临时资料库和模拟同步服务，禁止在真实资料库或生产 D1 中上传测试数据。
+
+v1.1.19 使用 v3 同步接口。上传从当前 favorites 全表生成 cloud_upload_snapshots，按与 cloud_upload_ack 的完整快照差异提交，不筛选原采集者 ID。每轮刷新队列，删除已从资料库移除的快照，保留新导入、他人和未知采集者的信息；rating_count 只配对相同 checked_at 和 source。cloud_self_snapshots 继续仅保留真正自采的数据，服务于纠正事件的恢复，不作为全库上传过滤条件。服务器按上传凭证的来源进行限额、审核、封禁及历史归属，原采集者作为记录内容独立验证；未知采集者须为空 ID 和空昵称。v2 到 v3 保留旧游标和确认，同一 D1 结构无需迁移；旧客户端返回 HTTP 426，旧 Worker 的 v3 路径返回 404 时客户端提示部署最新版。
 
 客户端同步测试：`py -3.14 -X utf8 -m unittest discover -s tests -p test_cloud_sync.py`。服务端使用 Node.js 自带的临时内存 SQLite 执行生产 SQL：`node --test tests/test_cloud_sync_worker.mjs`，无第三方依赖。`tests/visual_cloud_sync_server.py` 可启动隔离 UI 资料库，所有上传 / 下载由模拟服务处理。
 

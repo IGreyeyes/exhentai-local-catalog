@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import faulthandler
 import traceback
 
@@ -59,10 +60,12 @@ def verify_desktop(report_path, fixture_root=None):
         (data / "tag-translations.json").write_text(json.dumps({"data":[{"namespace":"language","data":{"english":{"name":"英语"}}}]}), encoding="utf-8")
         before = hashlib.sha256(database.read_bytes()).hexdigest()
         session = DesktopSession(root)
+        cloud_submissions=[]
         def mock_cloud(endpoint,path,payload=None,token=""):
-            if path=="/v2/register":
+            if path=="/v3/register":
                 return {"version":VERSION,"source_id":"00000000-0000-4000-8000-000000000002","status":"review"}
             if payload is not None:
+                cloud_submissions.extend(dict(item) for item in payload["records"])
                 return {"version":VERSION,"accepted":0,"pending":len(payload["records"]),"kept":0}
             after=int(parse_qs(urlsplit(path).query).get("after",["0"])[0])
             return {"format":FORMAT,"version":VERSION,"dataset_id":"0"*32,
@@ -267,6 +270,22 @@ def verify_desktop(report_path, fixture_root=None):
                     raise AssertionError({"share_info": result.get("share_info"), "ui": sharing})
                 report["checks"].append("native bridge exports favorites to chosen file")
                 report["checks"].append("share guide expands and generates title/body in actual packaged WebView2")
+                stage("mixed collector library upload")
+                other="00000000-0000-4000-8000-000000000002"
+                with session.server.catalog.favorites.connection() as db:
+                    db.execute("INSERT INTO favorites VALUES(2,100,?,'e-hentai.org',?,'测试原采集者')",(int(time.time()),other))
+                    db.execute("INSERT INTO favorites VALUES(3,100,?,'e-hentai.org','','')",(int(time.time()),))
+                session.server.cloud_sync.trigger()
+                mixed=promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(async()=>{const state=await fetch('/api/cloud-sync').then(r=>r.json());if(state.phase==='waiting'&&state.upload_total===3&&state.upload_confirmed===3&&state.upload_remaining===0&&document.querySelector('#cloud-sync-progress').textContent.includes('服务器已确认 3 条')){clearInterval(timer);resolve(state);return;}if(++tries>200){clearInterval(timer);reject(new Error('Mixed collector upload did not finish'));}},50);})")
+                foreign=next((item for item in reversed(cloud_submissions) if item['gid']==2),None)
+                unknown=next((item for item in reversed(cloud_submissions) if item['gid']==3),None)
+                if not foreign or foreign['collector_id']!=other or foreign['collector_name']!='测试原采集者' or not unknown or unknown['collector_id'] or unknown['collector_name']:
+                    raise AssertionError("Packaged upload did not preserve foreign and unknown attribution")
+                scope=window.evaluate_js("document.querySelector('label:has(#cloud-sync-upload)').textContent")
+                if '全部成功收藏数' not in scope:raise AssertionError("Packaged sharing scope is stale")
+                report["checks"].append("actual packaged GUI uploads own, foreign and unknown collector records with original attribution and reports all three confirmed")
+                with session.server.catalog.favorites.connection() as db:
+                    db.execute("DELETE FROM favorites WHERE gid IN (2,3)")
                 # Capture only this application-owned test page, never the user's desktop.
                 stage("screenshot")
                 capture_page(report_path.with_suffix(".png"))

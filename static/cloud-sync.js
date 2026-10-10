@@ -35,8 +35,10 @@
     ui("cloud-sync-source-state").textContent=(labels[state.source_status]||"待登记")+(state.source_id?" · 来源编号："+state.source_id:"");
     display(localError||state.message);
     const progress=[];
+    if(typeof state.upload_total==="number")progress.push(`资料库可提交 ${state.upload_total.toLocaleString("zh-CN")} 条`);
+    if(typeof state.upload_confirmed==="number")progress.push(`服务器已确认 ${state.upload_confirmed.toLocaleString("zh-CN")} 条`);
     if(typeof state.session_upload_processed==="number")progress.push(`本次运行累计提交 ${state.session_upload_processed.toLocaleString("zh-CN")} 条快照`);
-    if(typeof state.session_download_received==="number")progress.push(`累计接收 ${state.session_download_received.toLocaleString("zh-CN")} 条公共快照`);
+    if(typeof state.session_download_received==="number")progress.push(`本次运行累计接收 ${state.session_download_received.toLocaleString("zh-CN")} 条公共快照`);
     if(typeof state.upload_remaining==="number")progress.push(`待上传 ${state.upload_remaining.toLocaleString("zh-CN")} 条`);
     if(state.next_sync_at)progress.push(`${state.phase==="continuing"?"下一批":state.phase==="retrying"?"下次重试":"下次检查"}：${new Date(state.next_sync_at*1000).toLocaleTimeString("zh-CN",{timeZone:"Asia/Hong_Kong"})}（UTC+8）`);
     ui("cloud-sync-progress").textContent=progress.join(" · ");

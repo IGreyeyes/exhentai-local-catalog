@@ -32,10 +32,10 @@ class CloudSyncTests(unittest.TestCase):
 
     def transport(self, endpoint, path, payload=None, token=""):
         self.requests.append((endpoint,path,payload,token))
-        if path == "/v2/register":
-            return {"version":2,"source_id":OTHER,"status":"review"}
+        if path == "/v3/register":
+            return {"version":3,"source_id":OTHER,"status":"review"}
         if payload is not None:
-            return {"version":2,"accepted":len(payload["records"]),"pending":0,"kept":0}
+            return {"version":3,"accepted":len(payload["records"]),"pending":0,"kept":0}
         result = self.responses.pop(0) if self.responses else self.page([])
         if isinstance(result,Exception):
             raise result
@@ -51,7 +51,7 @@ class CloudSyncTests(unittest.TestCase):
     def page(self, records, **changes):
         last = records[-1]["revision"] if records else 0
         records = [{"gid":r["gid"],"revision":r["revision"],"action":"snapshot","snapshot":{k:v for k,v in r.items() if k!="revision"}} for r in records]
-        return {"format":"excatalog-cloud-sync","version":2,"dataset_id":DATASET,"cursor":last,"until":last,
+        return {"format":"excatalog-cloud-sync","version":3,"dataset_id":DATASET,"cursor":last,"until":last,
                 "head":last,"has_more":False,"records":records,**changes}
 
     def read(self, sql, values=()):
@@ -79,8 +79,8 @@ class CloudSyncTests(unittest.TestCase):
         self.store.save(1,100,"e-hentai.org",20)
         self.sync.configure(self.config(download_enabled=False,upload_enabled=True,consent=True))
         with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
-        self.assertTrue(any(r[1]=="/v2/contribute" for r in self.requests))
-        self.assertFalse(any(r[1].startswith("/v2/changes") for r in self.requests))
+        self.assertTrue(any(r[1]=="/v3/contribute" for r in self.requests))
+        self.assertFalse(any(r[1].startswith("/v3/changes") for r in self.requests))
         restarted=CloudSync(lambda:self.store,self.gate,transport=self.transport,start=False)
         try:
             self.assertTrue(restarted.status()["enabled"])
@@ -175,23 +175,127 @@ class CloudSyncTests(unittest.TestCase):
         self.sync.run_once()
         self.assertIsNone(self.read("SELECT * FROM favorites"))
 
-    def test_own_outbox_survives_cloud_merge_never_reuploads_other_users(self):
+    def test_library_upload_preserves_attribution_and_confirmed_records_are_not_resent(self):
         self.store.save(1,100,"e-hentai.org",20)
         self.store.save(2,200,"e-hentai.org",None)
         with self.store.connection() as db:
-            db.execute("UPDATE cloud_self_snapshots SET collector_id=? WHERE gid=2",(OTHER,))
+            db.execute("UPDATE favorites SET collector_id=?,collector_name='测试原采集者' WHERE gid=2",(OTHER,))
+            db.execute("INSERT INTO favorites VALUES(3,30,?,'e-hentai.org','','')",(self.now,))
         self.sync.configure(self.config(upload_enabled=True,consent=True))
         self.responses=[self.page([self.item(1,110,22,checked=int(time.time())+1)])]
         with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
-        uploads=[request for request in self.requests if request[1] == "/v2/contribute"]
+        uploads=[request for request in self.requests if request[1] == "/v3/contribute"]
         self.assertEqual(len(uploads),1)
-        self.assertEqual([item["gid"] for item in uploads[0][2]["records"]],[1])
+        self.assertEqual([item["gid"] for item in uploads[0][2]["records"]],[1,2,3])
+        self.assertEqual(uploads[0][2]["records"][1]["collector_id"],OTHER)
+        self.assertEqual(uploads[0][2]["records"][1]["collector_name"],"测试原采集者")
+        self.assertEqual(uploads[0][2]["records"][2]["collector_id"],"")
         self.assertEqual(set(uploads[0][2]["records"][0]),{"gid","favorite_count","rating_count","checked_at","source","collector_id","collector_name"})
         self.assertTrue(uploads[0][3].startswith("src_"))
         self.requests=[]
+        # The newer public value can be offered once; the original self snapshot stays available for corrections.
         self.responses=[self.page([],cursor=1,until=1,head=1)]
         with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
-        self.assertFalse(any(request[1] == "/v2/contribute" for request in self.requests))
+        forwarded=[request for request in self.requests if request[1] == "/v3/contribute"]
+        self.assertEqual([item["gid"] for item in forwarded[0][2]["records"]],[1])
+        self.assertEqual(forwarded[0][2]["records"][0]["collector_id"],OTHER)
+        self.requests=[]
+        self.responses=[self.page([],cursor=1,until=1,head=1)]
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertFalse(any(request[1] == "/v3/contribute" for request in self.requests))
+
+    def test_imported_records_after_startup_upload_without_own_id_or_outbox(self):
+        from favorite_transfer import merge_snapshot
+        records=[{k:v for k,v in self.item(gid, revision=gid).items() if k not in {"rating_count","revision"}} for gid in (1,2)]
+        records[1].update(collector_id="",collector_name="")
+        merge_snapshot(self.store.path,records)
+        self.sync.configure(self.config(download_enabled=False,upload_enabled=True,consent=True))
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        uploads=[request for request in self.requests if request[1]=="/v3/contribute"]
+        self.assertEqual([item["gid"] for item in uploads[0][2]["records"]],[1,2])
+        self.assertEqual([item["collector_id"] for item in uploads[0][2]["records"]],[OTHER,""])
+        self.assertTrue(all(item["rating_count"] is None for item in uploads[0][2]["records"]))
+        self.assertIsNone(self.read("SELECT * FROM cloud_self_snapshots"))
+        self.assertEqual(self.sync.status()["upload_total"],2)
+        self.assertEqual(self.sync.status()["upload_confirmed"],2)
+        self.assertEqual(self.sync.status()["upload_remaining"],0)
+        self.assertEqual(self.read("SELECT collector_id FROM favorites WHERE gid=1")["collector_id"],OTHER)
+
+    def test_paired_ratings_only_and_failure_without_count_is_excluded(self):
+        self.store.save(1,100,"e-hentai.org",20)
+        with self.store.connection() as db:
+            db.execute("UPDATE rating_counts SET checked_at=1 WHERE gid=1")
+            db.execute("INSERT INTO collection_failures VALUES(2,'test-only-placeholder','e-hentai.org',?,'模拟失败',1,1)",(self.now,))
+        self.sync.configure(self.config(download_enabled=False,upload_enabled=True,consent=True))
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        items=next(request[2]["records"] for request in self.requests if request[1]=="/v3/contribute")
+        self.assertEqual([item["gid"] for item in items],[1])
+        self.assertIsNone(items[0]["rating_count"])
+        self.assertEqual(self.sync.status()["upload_total"],1)
+        self.assertIsNotNone(self.read("SELECT * FROM collection_failures WHERE gid=2"))
+
+    def test_unknown_collector_download_and_forwarding_remain_unknown(self):
+        unknown=self.item()
+        unknown.update(collector_id="",collector_name="")
+        self.apply_events([self.event(unknown,1)])
+        self.sync.configure(self.config(download_enabled=False,upload_enabled=True,consent=True))
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        item=next(request[2]["records"][0] for request in self.requests if request[1]=="/v3/contribute")
+        self.assertEqual(item["collector_id"],"")
+        self.assertEqual(item["collector_name"],"")
+
+    def test_changed_library_record_resubmits_once_and_deleted_record_leaves_queue(self):
+        with self.store.connection() as db:
+            db.execute("INSERT INTO favorites VALUES(1,100,?,'e-hentai.org',?,'测试原采集者')",(self.now,OTHER))
+        self.sync.configure(self.config(download_enabled=False,upload_enabled=True,consent=True))
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        with self.store.connection() as db:
+            db.execute("UPDATE favorites SET favorite_count=120,checked_at=checked_at+1 WHERE gid=1")
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual([request[2]["records"][0]["favorite_count"] for request in self.requests if request[1]=="/v3/contribute"],[100,120])
+        with self.store.connection() as db:db.execute("DELETE FROM favorites WHERE gid=1")
+        self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_total"],0)
+        self.assertEqual(self.sync.status()["upload_remaining"],0)
+        self.assertIsNone(self.read("SELECT * FROM cloud_upload_snapshots"))
+
+    def test_v2_upgrade_keeps_cursor_and_acknowledged_payloads(self):
+        self.store.save(1,100,"e-hentai.org",20)
+        self.sync.configure(self.config(download_enabled=False,upload_enabled=True,consent=True))
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        with self.store.connection() as db:
+            self.sync._put(db,"cloud_protocol",2)
+            self.sync._put(db,"cloud_cursor",17)
+            self.sync._put(db,"cloud_dataset",DATASET)
+        self.requests=[]
+        restarted=CloudSync(lambda:self.store,self.gate,transport=self.transport,start=False)
+        try:
+            restarted.run_once()
+            self.assertFalse(any(request[1]=="/v3/contribute" for request in self.requests))
+            self.assertEqual(self.read("SELECT value FROM app_settings WHERE key='cloud_cursor'")["value"],"17")
+            self.assertEqual(restarted.status()["upload_confirmed"],1)
+        finally:restarted.close()
+
+    def test_record_changed_during_upload_continues_instead_of_reporting_complete(self):
+        self.store.save(1,100,"e-hentai.org",20)
+        self.sync.configure(self.config(download_enabled=False,upload_enabled=True,consent=True))
+        original=self.sync.transport
+        changed=False
+        def update_during_request(endpoint,path,payload=None,token=""):
+            nonlocal changed
+            if path=="/v3/contribute" and not changed:
+                changed=True
+                with self.store.connection() as db:
+                    db.execute("UPDATE favorites SET favorite_count=120,checked_at=checked_at+1 WHERE gid=1")
+            return original(endpoint,path,payload,token)
+        self.sync.transport=update_during_request
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"],"continuing")
+        self.assertEqual(self.sync.status()["upload_remaining"],1)
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"],"waiting")
+        self.assertEqual(self.sync.status()["upload_confirmed"],1)
+        self.assertEqual(self.sync.status()["session_upload_processed"],2)
 
     def test_pairing_null_in_own_outbox_and_seeding_legacy_own_records(self):
         self.store.save(1,100,"e-hentai.org",20)
@@ -212,7 +316,7 @@ class CloudSyncTests(unittest.TestCase):
         self.sync.configure(self.config(upload_enabled=True,consent=True))
         original=self.sync.transport
         def fail(endpoint,path,payload=None,token=""):
-            if path == "/v2/contribute":raise ValueError("test-only upload failure")
+            if path == "/v3/contribute":raise ValueError("test-only upload failure")
             return original(endpoint,path,payload,token)
         self.sync.transport=fail
         self.responses=[self.page([self.item(99)])]
@@ -252,11 +356,11 @@ class CloudSyncTests(unittest.TestCase):
 
     def test_http_error_never_echoes_remote_body_or_secret(self):
         from io import BytesIO
-        for code in (401,429,503,409):
+        for code in (401,429,503,409,404,426):
             failure=HTTPError("https://sync.example.invalid",code,"test",{},BytesIO(CODE.encode()))
             with patch("cloud_sync.build_opener") as opener:
                 opener.return_value.open.side_effect=failure
-                with self.assertRaises(ValueError) as raised:request_json("https://sync.example.invalid","/v2/contribute",{},CODE)
+                with self.assertRaises(ValueError) as raised:request_json("https://sync.example.invalid","/v3/contribute",{},CODE)
             self.assertNotIn(CODE,str(raised.exception))
 
     def seed_upload_queue(self, count):
@@ -269,7 +373,7 @@ class CloudSyncTests(unittest.TestCase):
         self.seed_upload_queue(100)
         with patch.object(self.sync.stopped,"wait",return_value=False):
             self.sync.run_once()
-        self.assertEqual(len([request for request in self.requests if request[1] == "/v2/contribute"]),20)
+        self.assertEqual(len([request for request in self.requests if request[1] == "/v3/contribute"]),20)
         self.assertGreater(self.sync.next_due-time.monotonic(),890)
         self.assertEqual(self.sync.status()["phase"],"waiting")
         self.assertEqual(self.sync.status()["upload_remaining"],0)
@@ -279,7 +383,7 @@ class CloudSyncTests(unittest.TestCase):
         observed=[]
         original=self.sync.transport
         def observe(endpoint,path,payload=None,token=""):
-            if path == "/v2/contribute":
+            if path == "/v3/contribute":
                 observed.append(self.sync.status())
             return original(endpoint,path,payload,token)
         self.sync.transport=observe
@@ -299,7 +403,7 @@ class CloudSyncTests(unittest.TestCase):
             self.assertIn("同步完成",final["message"])
             self.assertGreater(self.sync.next_due-time.monotonic(),890)
             self.sync.run_once()
-        submitted=[item["gid"] for request in self.requests if request[1] == "/v2/contribute" for item in request[2]["records"]]
+        submitted=[item["gid"] for request in self.requests if request[1] == "/v3/contribute" for item in request[2]["records"]]
         self.assertEqual(submitted,list(range(1,231)))
         self.assertEqual([state["session_upload_processed"] for state in observed],list(range(0,230,5)))
         self.assertTrue(all(state["phase"]=="uploading" for state in observed))
@@ -318,7 +422,7 @@ class CloudSyncTests(unittest.TestCase):
                 restarted.run_once()
             self.assertEqual(restarted.status()["phase"],"waiting")
             self.assertEqual(restarted.status()["upload_remaining"],0)
-            submitted=[item["gid"] for request in self.requests if request[1] == "/v2/contribute" for item in request[2]["records"]]
+            submitted=[item["gid"] for request in self.requests if request[1] == "/v3/contribute" for item in request[2]["records"]]
             self.assertEqual(submitted,list(range(1,151)))
         finally:
             restarted.close()
@@ -330,7 +434,7 @@ class CloudSyncTests(unittest.TestCase):
 
     def apply_events(self, events, previous=0):
         last=events[-1]["revision"]
-        page={"format":"excatalog-cloud-sync","version":2,"dataset_id":DATASET,"cursor":last,"until":last,
+        page={"format":"excatalog-cloud-sync","version":3,"dataset_id":DATASET,"cursor":last,"until":last,
               "head":last,"has_more":False,"records":events}
         self.sync._apply_page(page,previous,None,DATASET)
 
@@ -380,7 +484,7 @@ class CloudSyncTests(unittest.TestCase):
         self.sync.configure(self.config(upload_enabled=True,consent=True))
         original=self.sync.transport
         def blocked(endpoint,path,payload=None,token=""):
-            if path=="/v2/contribute":raise UploadBlocked("测试来源已封禁")
+            if path=="/v3/contribute":raise UploadBlocked("测试来源已封禁")
             return original(endpoint,path,payload,token)
         self.sync.transport=blocked
         self.responses=[self.page([self.item(99)])]
@@ -394,7 +498,7 @@ class CloudSyncTests(unittest.TestCase):
         self.sync.configure(self.config(upload_enabled=True,consent=True))
         original=self.sync.transport
         def missing(endpoint,path,payload=None,token=""):
-            if path=="/v2/contribute":raise UploadIdentityMissing("测试身份缺失")
+            if path=="/v3/contribute":raise UploadIdentityMissing("测试身份缺失")
             return original(endpoint,path,payload,token)
         self.sync.transport=missing
         self.sync.run_once()

@@ -4,6 +4,7 @@ from contextlib import closing
 from compression import zstd
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
+import argparse
 import hashlib
 import json
 import os
@@ -19,8 +20,8 @@ sys.path.insert(0, str(PROJECT))
 from test_desktop import make_library
 
 
-def verify():
-    exe = PROJECT / "dist" / "ExCatalog" / "ExCatalog.exe"
+def verify(program_directory=None):
+    exe = (Path(program_directory) if program_directory else PROJECT / "dist" / "ExCatalog") / "ExCatalog.exe"
     environment = os.environ.copy()
     windows = environment.get("SYSTEMROOT", environment.get("SystemRoot", r"C:\Windows"))
     environment["PATH"] = str(Path(windows) / "System32")
@@ -88,6 +89,29 @@ def verify():
                 raise TimeoutError("Packaged service did not start")
             base = f"http://127.0.0.1:{runtime['port']}"
             token = get("/api/status")["action_token"]
+            cloud = get("/api/cloud-sync")
+            if cloud["enabled"] or cloud["upload_enabled"] or cloud["source_id"]:
+                raise AssertionError("Packaged cloud sync must start disabled without credentials")
+            if cloud["download_enabled"] or cloud["configured"]:
+                raise AssertionError("Fresh client should wait for explicit sync settings")
+            if cloud.get("session_upload_processed") != 0 or cloud.get("next_sync_at") is not None:
+                raise AssertionError("Packaged sync progress or scheduling status is missing")
+            with opener.open(base+"/cloud-sync.js",timeout=10) as response:
+                if response.status != 200 or b"/api/cloud-sync/" not in response.read():
+                    raise AssertionError("Packaged cloud sync UI script is missing")
+            with opener.open(base+"/maintenance",timeout=10) as response:
+                maintenance=response.read()
+                if b'id="cloud-sync-source-state"' not in maintenance:
+                    raise AssertionError("Packaged sync progress display is missing")
+                if maintenance.index(b'id="cloud-sync-section"')>maintenance.index(b'id="backup-section"'):
+                    raise AssertionError("Upload section must appear above backups")
+            with opener.open(base+"/contact",timeout=10) as response:
+                contact=response.read()
+                if b'id="contact-qq-qr"' not in contact or b'1127148424' not in contact:
+                    raise AssertionError("Packaged contact page is missing")
+            with opener.open(base+"/qq-group-qr.png",timeout=10) as response:
+                if response.headers.get_content_type()!='image/png' or response.read()!=(PROJECT/'static'/'qq-group-qr.png').read_bytes():
+                    raise AssertionError("Packaged QQ QR image differs from the supplied asset")
             if get("/api/search?tag=language%3Aenglish")["total"] != 1:
                 raise AssertionError("Packaged search failed")
             task = post("/api/maintenance/backup", {"include_catalog":False}, token)
@@ -149,4 +173,6 @@ def verify():
 
 
 if __name__ == "__main__":
-    verify()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--program-directory", type=Path)
+    verify(parser.parse_args().program_directory)

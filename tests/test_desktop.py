@@ -166,6 +166,7 @@ class DesktopTests(unittest.TestCase):
         api._window = SimpleNamespace(get_current_url=lambda: "https://example.com")
         self.assertIn("error",api.client_info())
         self.assertIn("error",api.acknowledge_client_notes())
+        self.assertIn("error",api.acknowledge_cloud_upload_guide())
         self.assertIn("error",api.start_client_update_check())
         self.assertEqual(api._updates.startup_status()["phase"],"idle")
         with patch.object(api._updates,"check") as check:
@@ -175,6 +176,10 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(api.client_info()["show_notes"])
         self.assertTrue(api.acknowledge_client_notes()["acknowledged"])
         self.assertFalse(api.client_info()["show_notes"])
+        self.assertIn("error",api.acknowledge_cloud_upload_guide())
+        api._window = SimpleNamespace(get_current_url=lambda: self.session.base_url + "/maintenance?upload-guide=1#cloud-sync-section")
+        self.assertTrue(api.acknowledge_cloud_upload_guide()["acknowledged"])
+        self.assertFalse(api.client_info()["upload_guide_url"])
 
     def test_packaged_backups_include_exe_and_runtime_without_changing_database(self):
         exe = self.root / "ExCatalog.exe"

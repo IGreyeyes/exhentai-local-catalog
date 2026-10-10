@@ -18,6 +18,8 @@ import zipfile
 
 from client_version import APP_VERSION, PACKAGE_NAME, RELEASE_NOTES, REPOSITORY
 
+UPLOAD_GUIDE_URL = "/maintenance?upload-guide=1#cloud-sync-section"
+
 PROGRAM_FILES = ("ExCatalog.exe", "_internal", "README.md", "DESKTOP.md", "DEVELOPMENT.md", "THIRD_PARTY_NOTICES.md", "RELEASE_NOTES.md")
 MAX_PACKAGE_BYTES = 256 * 1024**2
 MAX_UNPACKED_BYTES = 1024**3
@@ -146,6 +148,7 @@ class ClientUpdater:
         self.workspace = None
         self.state = {"phase": "idle", "message": "", "percent": 0}
         self.lock = threading.Lock()
+        self._notes_lock = threading.RLock()
         self._startup_lock = threading.Lock()
         self._startup_phase = "idle"
         self._startup_release = None
@@ -184,21 +187,47 @@ class ClientUpdater:
                 return {"prompt": True, "release": self._startup_release}
             return {"prompt": False}
 
-    def info(self):
+    def _notes_state(self):
         try:
-            acknowledged = json.loads((self.root / "data" / "client-update-state.json").read_text(encoding="utf-8")).get("acknowledged_version")
+            state = json.loads((self.root / "data" / "client-update-state.json").read_text(encoding="utf-8"))
+            return state if isinstance(state, dict) else {}
         except (OSError, ValueError, AttributeError):
-            acknowledged = None
-        return {"version": APP_VERSION, "notes": RELEASE_NOTES, "show_notes": acknowledged != APP_VERSION,
-                "can_install": bool(getattr(sys, "frozen", False))}
+            return {}
 
-    def acknowledge(self):
+    def _save_notes_state(self, state):
         path = self.root / "data" / "client-update-state.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".partial")
-        temporary.write_text(json.dumps({"acknowledged_version": APP_VERSION}), encoding="utf-8")
+        temporary.write_text(json.dumps(state), encoding="utf-8")
         os.replace(temporary, path)
-        return {"acknowledged": True}
+
+    @staticmethod
+    def _guide_url(state):
+        return UPLOAD_GUIDE_URL if version_tuple(APP_VERSION) >= (1,1,16) and state.get("cloud_upload_guide_seen") is not True else ""
+
+    def info(self):
+        with self._notes_lock:
+            state = self._notes_state()
+            return {"version": APP_VERSION, "notes": RELEASE_NOTES,
+                    "show_notes": state.get("acknowledged_version") != APP_VERSION,
+                    "upload_guide_url": self._guide_url(state),
+                    "can_install": bool(getattr(sys, "frozen", False))}
+
+    def acknowledge(self):
+        with self._notes_lock:
+            state = self._notes_state()
+            state["acknowledged_version"] = APP_VERSION
+            self._save_notes_state(state)
+            return {"acknowledged": True, "upload_guide_url": self._guide_url(state)}
+
+    def acknowledge_upload_guide(self):
+        with self._notes_lock:
+            state = self._notes_state()
+            if state.get("acknowledged_version") != APP_VERSION:
+                raise ValueError("请先阅读本次更新公告。")
+            state["cloud_upload_guide_seen"] = True
+            self._save_notes_state(state)
+            return {"acknowledged": True}
 
     def check(self):
         if not self.lock.acquire(blocking=False):

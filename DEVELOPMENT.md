@@ -87,11 +87,24 @@ flowchart TD
 
 ## 构建桌面发布包
 
+在线同步的服务端部署资料位于 `cloudflare/`，仅需 Cloudflare 浏览器后台；普通用户直接使用客户端设置。客户端自动上传凭证绑定具体上传来源，存于本地个人资料库的 app_settings；凭证不得进入状态接口、身份导出、源码或发布包。v2 按历史事件重放，cloud_applied 保存被云端覆盖前的本地快照。开发使用临时资料库和模拟同步服务，禁止在真实资料库或生产 D1 中上传测试数据。
+
+客户端同步测试：`py -3.14 -X utf8 -m unittest discover -s tests -p test_cloud_sync.py`。服务端使用 Node.js 自带的临时内存 SQLite 执行生产 SQL：`node --test tests/test_cloud_sync_worker.mjs`，无第三方依赖。`tests/visual_cloud_sync_server.py` 可启动隔离 UI 资料库，所有上传 / 下载由模拟服务处理。
+
 构建机需 Windows x64、Python 3.14 和 Windows Python 启动器。普通用户不需要这些开发工具。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build_desktop.ps1
 ```
+
+旧发布目录中的 EXE 正在运行时，使用项目内的独立程序输出目录，避免构建器清理正在运行的目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build_desktop.ps1 -ProgramOutputRoot build/release-check
+py -3.14 -X utf8 tests/verify_packaged.py --program-directory build/release-check/ExCatalog
+```
+
+这会将文件夹版程序放入指定目录，公开 ZIP、SHA256SUMS.txt 和发布正文仍输出到 `dist/`；ZIP 内目录保持 `ExCatalog/`。独立输出路径必须位于项目内，不能包含个人资料。
 
 脚本创建独立 `.venv-desktop`，安装固定版本依赖并输出：
 
@@ -109,6 +122,8 @@ powershell -ExecutionPolicy Bypass -File build_desktop.ps1
 ```powershell
 .venv-desktop\Scripts\python.exe desktop.py
 ```
+
+也可双击 `启动桌面.cmd`。源码与 `.venv-desktop` 环境齐备时，该入口优先运行当前源码，并显式使用原项目资料目录；不再因 `dist/ExCatalog` 里留有旧 EXE 而启动旧版。独立输出目录中的完整程序仍可直接运行，需使用原资料时传入 `--data-root`。启动前关闭旧窗口，不在真实资料库里做验证试验。
 
 打包后的隔离验证（需要先完成构建）：
 
@@ -280,3 +295,5 @@ py -3.14 -m unittest discover -s tests -v
 搜索结果复用 `static/gallery-cards.js` 的卡片和记录页样式；显示方式独立保存为 `search_view`，通过受本机操作令牌保护的 `/api/search/view` 更新。`tests/visual_search_views.cjs` 使用临时模拟资料库，验证四种视图、完整分组标签、零收藏与未知值、原采集者、源站切换、分页、标签筛选和新浏览器恢复独立设置，并在 `logs/` 保存大窗口和小窗口截图。`test_favorite_transfer.py` 覆盖旧目录缺失作品的分享导入、真实目录准备 / 切换 / 重载及重启后的自动 GID 匹配。
 
 客户端启动更新检查由 `ClientUpdater` 的内存状态管理，每个桌面进程只启动一次后台查询；页面切换读取同一次结果。自动通知在本次运行中只领取一次，未读的本版本说明先显示。自动检查失败保持安静，手动检查仍可重试；启动检查不创建下载暂存区。`tests/visual_startup_updates.cjs` 使用模拟版本响应验证无新版、有新版、未读说明、离线及检查中切换页面的情况，打包隔离验证也使用模拟响应检查每个 exe 进程只请求一次。
+
+客户端 v1.1.16 的上传与下载独立配置：cloud_enabled 表示已启用的方向总开关，cloud_download_enabled 单独保存下载选择，旧 cloud_enabled 仅在尚无独立下载设置时作为兼容默认。v1.1.17 起未配置用户的上传和下载均默认不勾选，已保存的选择在重启后恢复；上传必须确认分享并保存。客户端公告确认后返回维护页引导地址，cloud_upload_guide_seen 在实际上传页面呈现后保存，中途退出会继续引导。

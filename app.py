@@ -25,6 +25,7 @@ from covers import CoverCache, CoverUnavailable
 from credentials import export_credentials, import_credentials
 from favorite_transfer import MAX_FILE_BYTES, snapshot_share_info
 from collector_identity import MAX_IDENTITY_BYTES, parse_identity
+from cloud_sync import CloudSync
 from runtime_paths import library_lock, library_root, resource_root
 
 ROOT = library_root()
@@ -427,6 +428,8 @@ class Server(ThreadingHTTPServer):
         self.cover_cache = CoverCache(project_root/"data"/"covers", project_root/"data"/"covers.sqlite3")
         self.maintenance = MaintenanceManager(LibraryMaintenance(catalog.path,project_root),self.exclusive_maintenance,self.reload_catalog,self.reload_translations,self.invalidate_collection_preview)
         self.collector.on_completed = self.maintenance.on_collection_completed
+        self.cloud_sync = CloudSync(lambda: self.catalog.favorites, self.catalog_gate,
+                                    lambda: self.maintenance.stopping or self.maintenance.state.get("busy", False))
 
     @contextmanager
     def exclusive_maintenance(self):
@@ -445,6 +448,8 @@ class Server(ThreadingHTTPServer):
         self.collector.catalog=catalog
         self.collector.store=catalog.favorites
         self.collector.preview_data=None
+        if hasattr(self, "cloud_sync"):
+            self.cloud_sync._seed_self()
         with catalog.favorites.connection() as db:
             stored=db.execute("SELECT value FROM collector_state WHERE key='cooldown_until'").fetchone()
             cooldown=db.execute("SELECT MAX(cooldown_until) FROM jobs").fetchone()[0] or 0
@@ -468,6 +473,8 @@ class Server(ThreadingHTTPServer):
         threading.Thread(target=self.shutdown,daemon=True).start()
 
     def server_close(self):
+        if hasattr(self,"cloud_sync"):
+            self.cloud_sync.close()
         if hasattr(self,"maintenance"):
             self.maintenance.close()
         if hasattr(self,"collector"):
@@ -537,7 +544,9 @@ class Handler(BaseHTTPRequestHandler):
         request = urlparse(self.path)
         try:
             query = parse_qs(request.query, max_num_fields=40)
-            if request.path == "/api/maintenance":
+            if request.path == "/api/cloud-sync":
+                self.reply(self.server.cloud_sync.status())
+            elif request.path == "/api/maintenance":
                 self.reply({**self.server.maintenance.status(), "cover_cache": self.server.cover_cache.stats()})
             elif match := re.fullmatch(r"/api/cover/(\d{1,18})", request.path):
                 gid = int(match[1])
@@ -570,11 +579,16 @@ class Handler(BaseHTTPRequestHandler):
                 files["/platform.js"] = ("platform.js", "text/javascript")
                 files["/gallery-cards.js"] = ("gallery-cards.js", "text/javascript")
                 files["/client-updates.css"] = ("client-updates.css", "text/css")
+                files["/cloud-sync.js"] = ("cloud-sync.js", "text/javascript")
+                files["/contact"] = ("contact.html", "text/html")
+                files["/contact/"] = ("contact.html", "text/html")
+                files["/contact.css"] = ("contact.css", "text/css")
+                files["/qq-group-qr.png"] = ("qq-group-qr.png", "image/png")
                 if request.path not in files:
                     self.reply({"error": "页面不存在。"}, status=404)
                     return
                 filename, mime = files[request.path]
-                self.reply((STATIC_ROOT / filename).read_bytes(), mime + "; charset=utf-8")
+                self.reply((STATIC_ROOT / filename).read_bytes(), mime if mime.startswith("image/") else mime + "; charset=utf-8")
         except ValueError as exc:
             self.reply({"error": str(exc)}, status=400)
         except (sqlite3.OperationalError, TimeoutError):
@@ -623,7 +637,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload,dict):
                 raise ValueError("请求格式不正确。")
-            if self.path.startswith("/api/maintenance/"):
+            if self.path.startswith("/api/cloud-sync/"):
+                with self.server.catalog_gate:
+                    if self.server.maintenance.stopping:raise ValueError("服务正在停止，请重新启动后再操作。")
+                    if self.path == "/api/cloud-sync/settings":
+                        result = self.server.cloud_sync.configure(payload)
+                    elif self.path == "/api/cloud-sync/now" and not payload:
+                        result = self.server.cloud_sync.trigger()
+                    else:raise ValueError("在线同步操作不正确。")
+            elif self.path.startswith("/api/maintenance/"):
                 manager=self.server.maintenance
                 if self.path in {"/api/maintenance/collector-name", "/api/maintenance/collector-identity-create"}:
                     if set(payload) != {"collector_name"}:

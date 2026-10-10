@@ -90,6 +90,13 @@ class DesktopApi:
     def acknowledge_client_notes(self):
         return self._update_action(self._updates.acknowledge)
 
+    def acknowledge_cloud_upload_guide(self):
+        def acknowledge():
+            if urlparse(self._window.get_current_url() or "").path != "/maintenance":
+                raise ValueError("请进入资料库维护的上传页面查看新功能。")
+            return self._updates.acknowledge_upload_guide()
+        return self._update_action(acknowledge)
+
     def check_client_update(self):
         return self._update_action(self._updates.check)
 

@@ -21,6 +21,9 @@ def verify_desktop(report_path, fixture_root=None):
     from desktop_service import DesktopSession
     from initialize_catalog import initialize
     from client_version import APP_VERSION
+    from unittest.mock import patch
+    from cloud_sync import CloudSync, FORMAT, VERSION
+    from urllib.parse import parse_qs, urlsplit
     report_path = report_path.resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {"passed": False, "frozen": bool(getattr(sys, "frozen", False)), "python": sys.version.split()[0], "checks": []}
@@ -56,7 +59,20 @@ def verify_desktop(report_path, fixture_root=None):
         (data / "tag-translations.json").write_text(json.dumps({"data":[{"namespace":"language","data":{"english":{"name":"英语"}}}]}), encoding="utf-8")
         before = hashlib.sha256(database.read_bytes()).hexdigest()
         session = DesktopSession(root)
-        url = session.start(lambda message: None)
+        def mock_cloud(endpoint,path,payload=None,token=""):
+            if path=="/v2/register":
+                return {"version":VERSION,"source_id":"00000000-0000-4000-8000-000000000002","status":"review"}
+            if payload is not None:
+                return {"version":VERSION,"accepted":0,"pending":len(payload["records"]),"kept":0}
+            after=int(parse_qs(urlsplit(path).query).get("after",["0"])[0])
+            return {"format":FORMAT,"version":VERSION,"dataset_id":"0"*32,
+                    "cursor":after,"until":after,"head":after,"has_more":False,"records":[]}
+        class VerifiedCloudSync(CloudSync):
+            def __init__(self,*args,**kwargs):
+                kwargs["transport"]=mock_cloud
+                super().__init__(*args,**kwargs)
+        with patch("app.CloudSync",VerifiedCloudSync):
+            url = session.start(lambda message: None)
         session.server.catalog.favorites.save(1, 123, "exhentai.org", 30)
         api = DesktopApi(session)
         startup_requests=[]
@@ -82,6 +98,21 @@ def verify_desktop(report_path, fixture_root=None):
                 raise TimeoutError("WebView2 JavaScript verification timed out")
             return value[0]
 
+        def capture_page(destination):
+            from System import Action, Func, Object, String
+            from System.Threading.Tasks import Task
+            form = window.gui.BrowserView.instances[window.uid]
+            task = form.Invoke(Func[Object](lambda: form.browser.webview.CoreWebView2.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", '{"format":"png","captureBeyondViewport":false}')))
+            captured = threading.Event()
+            captures = []
+            def completed_capture(completed):
+                captures.append(str(completed.Result))
+                captured.set()
+            task.ContinueWith(Action[Task[String]](completed_capture))
+            if not captured.wait(10):
+                raise TimeoutError("WebView2 screenshot timed out")
+            destination.write_bytes(base64.b64decode(json.loads(captures[0])["data"]))
+
         def check():
             try:
                 stage("waiting for WebView2 page")
@@ -90,7 +121,7 @@ def verify_desktop(report_path, fixture_root=None):
                 report["renderer"] = window.gui.renderer
                 if report["renderer"] != "edgechromium":
                     raise AssertionError("Embedded renderer is not WebView2")
-                for page, selector in (("/", "#search-form"), ("/records", "#records-list"), ("/maintenance", "#favorites-export")):
+                for page, selector in (("/", "#search-form"), ("/records", "#records-list"), ("/contact", "#contact-qq-qr"), ("/maintenance", "#favorites-export")):
                     stage("loading " + page)
                     if page != "/":
                         window.events.loaded.clear()
@@ -101,6 +132,13 @@ def verify_desktop(report_path, fixture_root=None):
                     if not state["content"] or state["bridge"] != "function" or state["platform"] != "function":
                         raise AssertionError(state)
                     report["checks"].append({"page": page, **state})
+                    if page == "/contact":
+                        contact = promise("document.querySelector('#contact-qq-qr').decode().then(()=>{const image=document.querySelector('#contact-qq-qr'),link=document.querySelector('#contact-github');return {width:image.naturalWidth,height:image.naturalHeight,url:link.href,target:link.target,selected:document.querySelector('.nav-contact').getAttribute('aria-current'),overflow:document.documentElement.scrollWidth>innerWidth+1};})")
+                        if (contact["width"] != 840 or contact["height"] != 840
+                                or contact["url"] != "https://github.com/IGreyeyes/exhentai-local-catalog"
+                                or contact["target"] != "_blank" or contact["selected"] != "page" or contact["overflow"]):
+                            raise AssertionError(contact)
+                        report["checks"].append("contact page, local QQ QR image, GitHub destination and selected navigation render in packaged WebView2")
                     client = promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#client-check-update')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Update UI did not initialize'));}},50);})")
                     if not client:
                         raise AssertionError("Client update controls missing")
@@ -116,13 +154,53 @@ def verify_desktop(report_path, fixture_root=None):
                         result = promise("window.pywebview.api.client_info()")
                         if not result.get("show_notes"):
                             raise AssertionError("New version notes were not pending")
-                        promise("window.pywebview.api.acknowledge_client_notes()")
-                        window.evaluate_js("document.querySelector('#client-update-dialog').close()")
-                        report["checks"].append("client version and native notes acknowledgement bridge work")
+                        guide_loaded=threading.Event()
+                        def guide_navigation():guide_loaded.set()
+                        window.events.loaded+=guide_navigation
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{const button=document.querySelector('#client-notes-read');if(button&&!button.disabled){clearInterval(timer);button.click();resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Read-notes button stayed disabled'));}},50);})")
+                        if not guide_loaded.wait(20):
+                            diagnostic=window.evaluate_js("({path:location.href,message:document.querySelector('#client-update-message')?.textContent,open:document.querySelector('#client-update-dialog')?.open,guide:!!document.querySelector('#cloud-upload-guide'),disabled:document.querySelector('#client-notes-read')?.disabled,handler:typeof document.querySelector('#client-notes-read')?.onclick})")
+                            raise TimeoutError("Reading notes did not navigate to upload guide: " + json.dumps(diagnostic,ensure_ascii=False))
+                        window.events.loaded-=guide_navigation
+                        guide=promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(async()=>{const section=document.querySelector('#cloud-sync-section'),save=document.querySelector('#cloud-sync-save');if(section&&save&&!save.disabled){const info=await window.pywebview.api.client_info();if(!info.upload_guide_url){clearInterval(timer);resolve({path:location.pathname,guide:!document.querySelector('#cloud-upload-guide').hidden,first:document.querySelector('.maintenance-card').id,upload:document.querySelector('#cloud-sync-upload').checked,download:document.querySelector('#cloud-sync-enabled').checked,consent:document.querySelector('#cloud-sync-consent').checked});return;}}if(++tries>120){clearInterval(timer);reject(new Error('Upload guide did not initialize'));}},50);})")
+                        if guide!={"path":"/maintenance","guide":True,"first":"cloud-sync-section","upload":False,"download":False,"consent":False}:
+                            raise AssertionError(guide)
+                        if session.server.cloud_sync.status()["enabled"]:
+                            raise AssertionError("Visiting the guide activated sharing before consent")
+                        report["checks"].append("read-notes action automatically navigates to top upload section; upload, download and consent start unchecked, guide persists as viewed")
+                        window.evaluate_js("document.querySelector('#cloud-upload-guide-done').click()")
+                        window.events.loaded.clear()
+                        window.load_url(url)
+                        if not window.events.loaded.wait(20):raise TimeoutError("Could not return from upload guide")
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(document.querySelector('#client-check-update')){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Update controls did not reload'));}},50);})")
+                        if promise("window.pywebview.api.client_info()").get("upload_guide_url"):
+                            raise AssertionError("Completed upload guide was repeated")
                     else:
                         result = promise("window.pywebview.api.client_info()")
                         if result.get("show_notes"):
                             raise AssertionError("Read notes were shown again after navigation")
+                    if page == "/maintenance":
+                        promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{const button=document.querySelector('#cloud-sync-save');if(button&&!button.disabled){clearInterval(timer);resolve(true);}else if(++tries>150){clearInterval(timer);reject(new Error('Sync settings did not load'));}},50);})")
+                        saved=session.server.cloud_sync.status()
+                        choices=window.evaluate_js("({upload:document.querySelector('#cloud-sync-upload').checked,download:document.querySelector('#cloud-sync-enabled').checked})")
+                        if choices!={"upload":saved["upload_enabled"],"download":saved["download_enabled"]}:
+                            raise AssertionError("Saved sync choices were not rendered: " + json.dumps(choices))
+                        if not saved["configured"]:
+                            window.evaluate_js("['cloud-sync-upload','cloud-sync-enabled','cloud-sync-consent'].forEach(id=>{const input=document.getElementById(id);input.checked=true;input.dispatchEvent(new Event('input'));});document.getElementById('cloud-sync-save').click()")
+                            promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(async()=>{const state=await fetch('/api/cloud-sync').then(r=>r.json());if(state.configured&&state.upload_enabled&&state.download_enabled&&!state.busy){clearInterval(timer);resolve(true);}else if(++tries>200){clearInterval(timer);reject(new Error('Both sync choices did not save'));}},50);})")
+                            settings_loaded=threading.Event()
+                            def settings_navigation():settings_loaded.set()
+                            window.events.loaded+=settings_navigation
+                            window.load_url(url + "/maintenance?settings-view=1")
+                            if not settings_loaded.wait(20):raise TimeoutError("Saved sync settings did not reload")
+                            window.events.loaded-=settings_navigation
+                            promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{const button=document.querySelector('#cloud-sync-save');if(button&&!button.disabled){clearInterval(timer);resolve(true);}else if(++tries>150){clearInterval(timer);reject(new Error('Saved settings page did not initialize'));}},50);})")
+                            choices=window.evaluate_js("({upload:document.querySelector('#cloud-sync-upload').checked,download:document.querySelector('#cloud-sync-enabled').checked})")
+                            if choices!={"upload":True,"download":True}:raise AssertionError(choices)
+                            report["checks"].append("both sync choices saved through GUI and remain checked after page reload")
+                        else:
+                            if choices!={"upload":True,"download":True}:raise AssertionError(choices)
+                            report["checks"].append("new client process reopens saved upload and download choices as checked")
                     if page == "/":
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(!document.querySelector('#search-view').disabled){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Search view did not initialize'));}},50);})")
                         actual_view = window.evaluate_js("document.querySelector('#search-view').value")
@@ -191,20 +269,7 @@ def verify_desktop(report_path, fixture_root=None):
                 report["checks"].append("share guide expands and generates title/body in actual packaged WebView2")
                 # Capture only this application-owned test page, never the user's desktop.
                 stage("screenshot")
-                from System import Action, Func, Object, String
-                from System.Threading.Tasks import Task
-                form = window.gui.BrowserView.instances[window.uid]
-                task = form.Invoke(Func[Object](lambda: form.browser.webview.CoreWebView2.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", '{"format":"png","captureBeyondViewport":false}')))
-                captured = threading.Event()
-                captures = []
-                def captured_image(completed):
-                    captures.append(str(completed.Result))
-                    captured.set()
-                task.ContinueWith(Action[Task[String]](captured_image))
-                if not captured.wait(10):
-                    raise TimeoutError("WebView2 screenshot timed out")
-                screenshot = json.loads(captures[0])["data"]
-                report_path.with_suffix(".png").write_bytes(base64.b64decode(screenshot))
+                capture_page(report_path.with_suffix(".png"))
                 report["checks"].append("WebView2 rendered screenshot")
                 session.close()
                 if before != hashlib.sha256(database.read_bytes()).hexdigest():

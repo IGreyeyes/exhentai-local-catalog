@@ -7,14 +7,15 @@ const project=path.resolve(__dirname,'..'),fixture=fs.mkdtempSync(path.join(os.t
 const metadata=JSON.parse(execFileSync('py',['-3.14','-X','utf8','-c','import json,client_version as v;print(json.dumps({"version":v.APP_VERSION,"notes":v.RELEASE_NOTES}))'],{cwd:project,encoding:'utf8',windowsHide:true}));
 let server,browser,baseUrl;
 
-async function scenario(base,{available=false,unread=false,offline=false,delayed=false}={}){
+async function scenario(base,{available=false,unread=false,offline=false,delayed=false,guide=false}={}){
   const context=await browser.newContext({viewport:{width:1360,height:900}});
   const release={available,latest_version:'1.2.0',notes:'- **新版改进**：启动后自动提示更新。'};
-  const state={started:false,checks:0,prompted:false,notesRead:!unread,downloads:0,manualChecks:0,phase:delayed?'checking':offline?'failed':'completed'};
+  const state={started:false,checks:0,prompted:false,notesRead:!unread,downloads:0,manualChecks:0,phase:delayed?'checking':offline?'failed':'completed',guideSeen:false};
   const status=()=>({phase:state.phase,release:offline?null:release,error:offline?'模拟离线':''});
   await context.exposeFunction('startupFixtureCall',operation=>{
-    if(operation==='info')return {version:metadata.version,notes:metadata.notes,show_notes:!state.notesRead,can_install:true};
-    if(operation==='ack'){state.notesRead=true;return {acknowledged:true};}
+    if(operation==='info')return {version:metadata.version,notes:metadata.notes,show_notes:!state.notesRead,upload_guide_url:guide&&!state.guideSeen?'/maintenance?upload-guide=1#cloud-sync-section':'',can_install:true};
+    if(operation==='ack'){state.notesRead=true;return {acknowledged:true,upload_guide_url:guide&&!state.guideSeen?'/maintenance?upload-guide=1#cloud-sync-section':''};}
+    if(operation==='guide'){state.guideSeen=true;return {acknowledged:true};}
     if(operation==='start'){if(!state.started){state.started=true;state.checks++;}return status();}
     if(operation==='status')return status();
     if(operation==='take'){if(state.phase==='completed'&&available&&!state.prompted){state.prompted=true;return {prompt:true,release};}return {prompt:false};}
@@ -25,7 +26,7 @@ async function scenario(base,{available=false,unread=false,offline=false,delayed
   });
   await context.addInitScript(()=>{
     const call=operation=>window.startupFixtureCall(operation);
-    window.pywebview={api:{save_attachment:()=>Promise.resolve({}),client_info:()=>call('info'),acknowledge_client_notes:()=>call('ack'),
+    window.pywebview={api:{save_attachment:()=>Promise.resolve({}),client_info:()=>call('info'),acknowledge_client_notes:()=>call('ack'),acknowledge_cloud_upload_guide:()=>call('guide'),
       start_client_update_check:()=>call('start'),startup_client_update_status:()=>call('status'),take_startup_update_prompt:()=>call('take'),
       check_client_update:()=>call('manual'),prepare_client_update:()=>call('download'),client_update_status:()=>call('progress')}};
     addEventListener('load',()=>dispatchEvent(new Event('pywebviewready')));
@@ -38,6 +39,19 @@ async function scenario(base,{available=false,unread=false,offline=false,delayed
     assert((await page.locator('#client-update-title').textContent()).includes('已更新到'),'Unread notes were replaced by the startup update prompt');
     assert(!state.prompted&&state.downloads===0,'Startup update interrupted unread notes');
     await page.locator('#client-notes-read').click();
+  }
+  if(guide){
+    await page.waitForURL('**/maintenance?upload-guide=1#cloud-sync-section');
+    await page.locator('#cloud-upload-guide').waitFor({state:'visible'});
+    await page.waitForFunction(()=>!document.querySelector('#cloud-sync-save').disabled);
+    assert(!await page.locator('#cloud-sync-upload').isChecked(),'Upload was enabled by default');
+    assert(!await page.locator('#cloud-sync-enabled').isChecked(),'Download was enabled by default');
+    assert(!await page.locator('#cloud-sync-consent').isChecked(),'Consent was preselected');
+    assert((await page.locator('.maintenance-card').first().getAttribute('id'))==='cloud-sync-section','Upload section is not first');
+    await page.waitForFunction(async()=>!(await window.pywebview.api.client_info()).upload_guide_url);
+    assert(state.guideSeen,'Guide visit was not remembered');
+    assert(!await page.locator('#client-update-dialog').evaluate(e=>e.open),'Update prompt covered the upload guide');
+    await page.locator('#cloud-upload-guide-done').click();
   }
   if(available){
     await page.waitForFunction(()=>document.querySelector('#client-update-title').textContent==='发现新版 v1.2.0'&&document.querySelector('#client-update-dialog').open);
@@ -63,7 +77,7 @@ async function scenario(base,{available=false,unread=false,offline=false,delayed
   }
   assert(errors.length===0,'Script errors: '+errors.join('; '));
   await context.close();
-  return {available,unread,offline,delayed,startupChecks:state.checks,manualChecks:state.manualChecks,downloads:state.downloads};
+  return {available,unread,offline,delayed,guide,guideSeen:state.guideSeen,startupChecks:state.checks,manualChecks:state.manualChecks,downloads:state.downloads};
 }
 
 async function main(){
@@ -76,7 +90,7 @@ async function main(){
   baseUrl=base;
   browser=await chromium.launch({headless:true,channel:'chrome'});
   const checks=[];
-  for(const options of [{},{available:true},{available:true,unread:true},{offline:true},{available:true,delayed:true}])checks.push(await scenario(base,options));
+  for(const options of [{},{available:true},{available:true,unread:true},{offline:true},{available:true,delayed:true},{available:true,unread:true,guide:true},{guide:true}])checks.push(await scenario(base,options));
   console.log(JSON.stringify({passed:true,scenarios:checks}));
 }
 main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

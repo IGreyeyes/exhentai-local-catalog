@@ -65,7 +65,13 @@
     title.id="client-update-title";message.id="client-update-message";dialog.setAttribute("aria-labelledby",title.id);dialog.setAttribute("aria-describedby",message.id);icon.setAttribute("aria-hidden","true");
     progress.max=100;progress.hidden=true;install.hidden=true;install.id="client-install-update";close.id="client-notes-read";
     heading.append(eyebrow,title);header.append(icon,heading);body.append(notes,message,progress);actions.append(close,install);dialog.append(header,body,actions);document.body.append(dialog);
-    let info=null,release=null,currentNotes=false,busy=false,phase="idle",poll=null,startupPending=false,startupTimer=null,startupPolling=false;
+    let info=null,release=null,currentNotes=false,busy=false,phase="idle",poll=null,startupPending=false,startupTimer=null,startupPolling=false,navigating=false;
+    const guideLocation=()=>location.pathname==="/maintenance"&&new URLSearchParams(location.search).get("upload-guide")==="1";
+    const guideVisible=()=>{const card=document.getElementById("cloud-upload-guide");return card&&!card.hidden;};
+    function visitGuide(url){
+      if(url!=="/maintenance?upload-guide=1#cloud-sync-section"||guideLocation())return false;
+      navigating=true;dialog.close();location.assign(url);return true;
+    }
     const show=()=>{if(!dialog.open)dialog.showModal();};
     const result=async promise=>{const value=await promise;if(value.error)throw new Error(value.error);return value;};
     function buttons(){check.disabled=busy||startupPending||phase==="ready";update.disabled=busy||!release?.available||!info?.can_install;install.disabled=busy;install.hidden=!release?.available||!info?.can_install||currentNotes;update.textContent=phase==="ready"?"安装客户端更新":"更新客户端";install.textContent=phase==="ready"?"安装并重新打开":"下载并更新";close.classList.toggle("primary",currentNotes);close.classList.toggle("secondary",!currentNotes);}
@@ -78,14 +84,16 @@
         if(state.phase==="failed"){check.title="启动检查未完成，可点击此按钮重试。";return;}
         check.title="手动检查客户端更新";
         if(state.release?.available&&!release){release=state.release;buttons();}
-        if(state.phase==="completed"&&state.release?.available&&!currentNotes&&!dialog.open&&!busy){
+        if(state.phase==="completed"&&state.release?.available&&!currentNotes&&!dialog.open&&!busy&&!navigating&&!guideVisible()){
           const notification=await result(api.take_startup_update_prompt());
           if(notification.prompt){release=notification.release;message.classList.remove("error");showRelease();}
         }
       }catch(error){startupPending=false;check.title="启动检查未完成，可点击此按钮重试。";buttons();}
       finally{startupPolling=false;}
     }
-    dialog.addEventListener("close",()=>{currentNotes=false;pollStartupCheck();});
+    dialog.addEventListener("cancel",event=>{if(currentNotes)event.preventDefault();});
+    dialog.addEventListener("close",()=>{currentNotes=false;if(!navigating)pollStartupCheck();});
+    addEventListener("catalog-upload-guide-done",pollStartupCheck);
     function watchUpdate(){
       poll=setInterval(async()=>{
         try{
@@ -97,7 +105,7 @@
     function showRelease(){currentNotes=false;icon.textContent=release.available?"↑":"✓";close.textContent=release.available?"稍后更新":"关闭";title.textContent=release.available?`发现新版 v${release.latest_version}`:`当前版本 v${info.version}`;renderNotes(release.notes);message.textContent=release.available?(info.can_install?"是否现在更新？更新将保留本地资料；安装时安全退出，并自动重新打开客户端。":"当前正在运行源码，请用 GitHub Desktop 更新源码或从 Releases 下载完整客户端。"):"当前客户端已是最新发布版本，或比最新发布版本更新。";show();buttons();}
     function fail(error){message.textContent=error.message||String(error);message.classList.add("error");show();}
     close.onclick=async()=>{
-      if(currentNotes){try{await result(api.acknowledge_client_notes());info.show_notes=false;}catch(error){fail(error);return;}}
+      if(currentNotes){try{const value=await result(api.acknowledge_client_notes());info.show_notes=false;window.dispatchEvent(new Event("catalog-client-notes-read"));if(visitGuide(value.upload_guide_url))return;}catch(error){fail(error);return;}}
       dialog.close();
     };
     check.onclick=async()=>{
@@ -117,7 +125,8 @@
     install.onclick=performUpdate;update.onclick=()=>{showRelease();if(phase==="ready")message.textContent="新版已校验通过，可以安装并重新打开。";};
     try{
       info=await result(api.client_info());version.textContent=`v${info.version}`;buttons();
-      if(info.show_notes){currentNotes=true;title.textContent=`已更新到 v${info.version}`;renderNotes(info.notes);message.textContent="点击「已读」后，本版本的说明不再自动弹出。";close.textContent="已读";buttons();show();}
+      if(!info.show_notes&&visitGuide(info.upload_guide_url))return;
+      if(info.show_notes){currentNotes=true;title.textContent=`已更新到 v${info.version}`;renderNotes(info.notes);message.textContent=info.upload_guide_url?"读完公告后点击下方按钮，自动前往「资料库维护」最上方查看上传新功能。":"点击「已读」后，本版本的说明不再自动弹出。";close.textContent=info.upload_guide_url?"已读，查看上传功能":"已读";buttons();show();}
       if(api.start_client_update_check){
         startupPending=true;buttons();
         try{await result(api.start_client_update_check());await pollStartupCheck();}

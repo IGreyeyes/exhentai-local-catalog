@@ -1,0 +1,8 @@
+{
+  "name": "excatalog-cloud-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test ../tests/test_cloud_sync_worker.mjs"
+  }
+}

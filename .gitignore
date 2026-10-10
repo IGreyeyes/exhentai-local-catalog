@@ -16,6 +16,9 @@ dist/
 __pycache__/
 *.pyc
 .env
+.dev.vars
+.dev.vars.*
+.wrangler/
 cookies*.json
 cookies*.txt
 *.ehcred

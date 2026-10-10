@@ -12,7 +12,7 @@ ExCatalog.exe --data-root "D:\原资料库文件夹"
 
 指定包含 `data` 的父文件夹，不是 `data` 本身。程序运行文件仍来自当前 exe 的 `_internal`，资料、日志和备份按指定位置及已保存的备份设置管理。桌面版与浏览器版不能同时管理同一资料库。
 
-开发项目中双击 `启动桌面.cmd` 时，脚本会优先使用已构建的桌面 exe，并指定原项目资料目录；尚未构建时可使用已准备好的 `.venv-desktop` 源码环境。
+开发项目中双击 `启动桌面.cmd` 时，若当前目录有 `desktop.py`、`client_version.py` 和 `.venv-desktop/Scripts/pythonw.exe`，脚本会优先启动当前源码并显式指定原项目为资料目录，避免新版在独立目录构建后仍启动 `dist` 中的旧 EXE。源码环境未齐备时，依次使用同目录的 `ExCatalog.exe`、`dist/ExCatalog/ExCatalog.exe`。完整发布包直接运行 `ExCatalog.exe`；切换前关闭原窗口，避免两个服务同时占用同一资料库。
 
 ## 浏览器备用入口
 

@@ -70,6 +70,22 @@ class ClientUpdateTests(unittest.TestCase):
         (self.root / "data" / "client-update-state.json").write_text("broken", encoding="utf-8")
         self.assertTrue(self.updater.info()["show_notes"])
 
+    def test_upload_guide_persists_until_visit_and_is_not_repeated_in_future_versions(self):
+        with patch("desktop_updates.APP_VERSION","1.1.16"):
+            self.assertTrue(self.updater.info()["upload_guide_url"].startswith("/maintenance"))
+            with self.assertRaises(ValueError):self.updater.acknowledge_upload_guide()
+            self.assertTrue(self.updater.acknowledge()["upload_guide_url"])
+            reopened=updates.ClientUpdater(self.root)
+            self.assertFalse(reopened.info()["show_notes"])
+            self.assertTrue(reopened.info()["upload_guide_url"])
+            reopened.acknowledge_upload_guide()
+            self.assertFalse(updates.ClientUpdater(self.root).info()["upload_guide_url"])
+            reopened.acknowledge()
+            self.assertFalse(reopened.info()["upload_guide_url"])
+        with patch("desktop_updates.APP_VERSION","1.1.17"):
+            self.assertTrue(self.updater.info()["show_notes"])
+            self.assertFalse(self.updater.info()["upload_guide_url"])
+
     def test_startup_check_runs_once_and_notification_is_consumed_once(self):
         document=json.dumps(self.release()).encode()
         entered,finish=threading.Event(),threading.Event()

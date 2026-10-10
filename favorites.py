@@ -209,6 +209,15 @@ class FavoriteStore:
                     gid INTEGER PRIMARY KEY, rating_count INTEGER NOT NULL CHECK(rating_count >= 0),
                     checked_at INTEGER NOT NULL, source TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS cloud_self_snapshots (
+                    gid INTEGER PRIMARY KEY, collector_id TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cloud_applied (
+                    gid INTEGER PRIMARY KEY, payload TEXT NOT NULL, original TEXT
+                );
+                CREATE TABLE IF NOT EXISTS cloud_upload_ack (
+                    gid INTEGER PRIMARY KEY, payload TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS collection_failures (
                     gid INTEGER PRIMARY KEY,token TEXT NOT NULL,source TEXT NOT NULL,
                     failed_at INTEGER NOT NULL,error TEXT NOT NULL,attempts INTEGER NOT NULL,
@@ -374,16 +383,21 @@ class FavoriteStore:
         if not db.in_transaction:
             db.execute("BEGIN IMMEDIATE")
         identity = read_identity(db)
+        checked_at = int(time.time())
         db.execute("""INSERT INTO favorites(gid,favorite_count,checked_at,source,collector_id,collector_name)
             VALUES (?,?,?,?,?,?) ON CONFLICT(gid) DO UPDATE SET
             favorite_count=excluded.favorite_count,checked_at=excluded.checked_at,source=excluded.source,
             collector_id=excluded.collector_id,collector_name=excluded.collector_name
-        """, (gid,count,int(time.time()),host,identity["collector_id"],identity["collector_name"]))
+        """, (gid,count,checked_at,host,identity["collector_id"],identity["collector_name"]))
         if rating_count is not None:
             db.execute("""INSERT INTO rating_counts(gid,rating_count,checked_at,source) VALUES(?,?,?,?)
                 ON CONFLICT(gid) DO UPDATE SET rating_count=excluded.rating_count,
                     checked_at=excluded.checked_at,source=excluded.source
-            """, (gid,rating_count,int(time.time()),host))
+            """, (gid,rating_count,checked_at,host))
+        snapshot = {"gid": gid, "favorite_count": count, "rating_count": rating_count,
+                    "checked_at": checked_at, "source": host, **identity}
+        db.execute("INSERT INTO cloud_self_snapshots VALUES(?,?,?) ON CONFLICT(gid) DO UPDATE SET collector_id=excluded.collector_id,payload=excluded.payload",
+                   (gid,identity["collector_id"],json.dumps(snapshot,ensure_ascii=False,sort_keys=True,separators=(",", ":"))))
         db.execute("DELETE FROM collection_failures WHERE gid=?",(gid,))
 
     @staticmethod

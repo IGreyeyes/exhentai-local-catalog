@@ -6,7 +6,7 @@
 
 源码项目中使用 `启动桌面.cmd` 时，已具备 `desktop.py`、`client_version.py` 和 `.venv-desktop` 桌面环境的目录会优先启动当前源码，并继续使用原项目资料目录。新版在独立目录构建后，也不会因此自动启动 `dist` 中的旧 EXE。源码环境未齐备时可使用已有 EXE；完整发布包直接运行 `ExCatalog.exe`。切换前先关闭原窗口，版本可在客户端中核对。
 
-当前客户端版本：**v1.1.17**。
+当前客户端版本：**v1.1.17**。本次发布合并 v1.1.10～v1.1.17 的更新，面向上次发布的 v1.1.9 用户，包含在线共享收藏数、同步进度与续传修复、启动入口修复、联系我们，以及免贡献码上传和首次引导。
 
 获取程序：[本项目发布页](https://github.com/IGreyeyes/exhentai-local-catalog/releases)。桌面发布包文件名为 `ExCatalog-Windows-x64.zip`。GitHub 的 **Code → Download ZIP** 下载的是源码包，供开发和构建使用。
 

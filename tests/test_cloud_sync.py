@@ -363,6 +363,31 @@ class CloudSyncTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:request_json("https://sync.example.invalid","/v3/contribute",{},CODE)
             self.assertNotIn(CODE,str(raised.exception))
 
+    def test_invalid_confirmation_keeps_batch_and_valid_retry_confirms_each_record_once(self):
+        self.seed_upload_queue(5)
+        original=self.sync.transport
+        attempts=0
+        def confirmation(endpoint,path,payload=None,token=""):
+            nonlocal attempts
+            if path=="/v3/contribute":
+                attempts+=1
+                return ({"version":3,"accepted":0,"pending":6,"kept":-1} if attempts==1
+                        else {"version":3,"accepted":0,"pending":3,"kept":2})
+            return original(endpoint,path,payload,token)
+        self.sync.transport=confirmation
+        self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"],"retrying")
+        self.assertEqual(self.sync.status()["upload_remaining"],5)
+        self.assertEqual(self.sync.status()["upload_confirmed"],0)
+        self.assertEqual(self.sync.status()["session_upload_processed"],0)
+        self.assertIsNone(self.read("SELECT * FROM cloud_upload_ack"))
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"],"waiting")
+        self.assertEqual(self.sync.status()["upload_remaining"],0)
+        self.assertEqual(self.sync.status()["upload_confirmed"],5)
+        self.assertEqual(self.sync.status()["session_upload_processed"],5)
+        self.assertEqual(attempts,2)
+
     def seed_upload_queue(self, count):
         with self.store.connection() as db:
             for gid in range(1,count+1):

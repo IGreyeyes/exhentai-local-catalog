@@ -199,11 +199,12 @@ async function contribute(request, env, now) {
       AND ((SELECT pending_count FROM upload_controls WHERE id=1)<${CAPS.pending}
         OR EXISTS(SELECT 1 FROM cloud_pending WHERE source_id=? AND gid=?))
       ON CONFLICT(source_id,gid) DO UPDATE SET payload=excluded.payload,checked_at=excluded.checked_at,
-        reason=excluded.reason,received_at=excluded.received_at WHERE excluded.checked_at>cloud_pending.checked_at`)
+        reason=excluded.reason,received_at=excluded.received_at WHERE excluded.checked_at>cloud_pending.checked_at
+      RETURNING gid`)
       .bind(r.gid,raw,r.checked_at,source.id,source.status==='review'?'新来源待审':'异常变化',now,
         r.gid,r.checked_at,source.id,...args,source.id,r.gid));
     statements.push(env.DB.prepare(`INSERT INTO cloud_public(gid,payload,checked_at,source_id,action,received_at)
-      SELECT ?,?,?,?,'snapshot',? WHERE ${ELIGIBLE} AND NOT ${review} ${UPSERT}`)
+      SELECT ?,?,?,?,'snapshot',? WHERE ${ELIGIBLE} AND NOT ${review} ${UPSERT} RETURNING gid`)
       .bind(r.gid,raw,r.checked_at,source.id,now,r.gid,r.checked_at,source.id,...args));
     statements.push(env.DB.prepare(`DELETE FROM cloud_pending WHERE source_id=? AND gid=? AND checked_at<=?
       AND EXISTS(SELECT 1 FROM cloud_public WHERE gid=? AND checked_at>=?)`)
@@ -214,7 +215,15 @@ async function contribute(request, env, now) {
     (SELECT pending_count FROM upload_controls WHERE id=1)<=${CAPS.pending} THEN 1 ELSE 0 END)`));
   const results=await env.DB.batch(statements);
   let accepted=0,pending=0;
-  for(let i=1;i<results.length-1;i+=3){pending+=results[i].meta.changes;accepted+=results[i+1].meta.changes;}
+  // D1 meta.changes can include history/counter trigger writes. Count only the submitted records.
+  for(let i=1;i<results.length-1;i+=3){
+    const candidates=results[i].results,published=results[i+1].results,gid=records[(i-1)/3].gid;
+    if(!Array.isArray(candidates) || !Array.isArray(published) || candidates.length+published.length>1
+        || [...candidates,...published].some(row=>row.gid!==gid)) {
+      throw new ApiError(503,'上传确认结果暂不可用，请稍后重试；已保存的相同记录不会重复入库。');
+    }
+    pending+=candidates.length;accepted+=published.length;
+  }
   return json({version:VERSION,accepted,pending,kept:records.length-accepted-pending,source_status:source.status});
 }
 function numberParam(url,key,defaultValue,low=0,high=Number.MAX_SAFE_INTEGER) {
@@ -366,6 +375,7 @@ export default {async fetch(request,env){try{
   const info=await meta(env),now=Math.floor(Date.now()/1000);
   if(['/','/health'].includes(url.pathname) && request.method==='GET')return json({service:FORMAT,version:VERSION,ready:true,
     dataset_id:info.dataset_id,read_public:true,upload_scope:'library',preserves_original_collector:true,
+    upload_confirmation:'returning_rows',
     upload_requires_contribution_code:false,new_source_requires_review:true,
     upload_enabled:Boolean((await controls(env)).upload_enabled),admin_configured:typeof env.ADMIN_SECRET==='string' && /^[A-Za-z0-9_-]{32,256}$/.test(env.ADMIN_SECRET)});
   if(url.pathname==='/v3/changes' && request.method==='GET')return await changes(url,env,info);

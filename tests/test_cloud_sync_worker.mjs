@@ -19,8 +19,11 @@ class D1 {
       async all() { return {results: db.sqlite.prepare(sql).all(...this.values)}; }
       async run() {
         let stmt;try{stmt=db.sqlite.prepare(sql);}catch(e){throw new Error(e.message+" SQL "+sql);}
-        const result = stmt.run(...this.values);
-        return {success: true, meta: {changes: Number(result.changes)}};
+        // D1 metadata may include trigger writes; RETURNING rows describe only the target statement.
+        const before = db.sqlite.prepare('SELECT total_changes() AS n').get().n;
+        const results = stmt.columns().length ? stmt.all(...this.values) : (stmt.run(...this.values), []);
+        const after = db.sqlite.prepare('SELECT total_changes() AS n').get().n;
+        return {success: true, results, meta: {changes: Number(after-before)}};
       }
     }();
   }
@@ -59,6 +62,7 @@ function fixture(t){
 }
 test('默认暂停；公开读取、管理认证、旧客户端提示升级',async t=>{
   const {env,call,manage}=fixture(t);const h=await call('/health');assert.equal(h.result.version,3);assert.equal(h.result.upload_scope,'library');assert.equal(h.result.preserves_original_collector,true);assert.equal(h.result.upload_requires_contribution_code,false);assert.equal(h.result.upload_enabled,false);
+  assert.equal(h.result.upload_confirmation,'returning_rows');
   assert.equal((await call('/v3/register',{method:'POST',token:TOKEN,data:{collector_id:OWNER,collector_name:''}})).status,503);
   assert.equal((await call('/v3/changes')).status,200);assert.equal((await call('/v3/admin/status')).status,401);
   assert.equal((await call('/v1/changes')).status,426);assert.equal((await call('/v1/contribute',{method:'POST'})).status,426);
@@ -91,6 +95,34 @@ test('新来源全量待审；批准后才公开，设可信不自动批准已�
   await manage('sources/'+s.source_id,{status:'trusted'});assert.equal((await changes()).result.records.length,0);
   for(const p of (await manage('pending')).result.pending)assert.equal((await manage('pending/'+p.id+'/approve',{})).status,200);
   assert.deepEqual((await changes()).result.records.map(e=>e.snapshot.favorite_count),[100,0]);
+});
+test('上传确认数量不计入 D1 触发器写入，混合待审和已有记录可重试',async t=>{
+  const {trusted,register,upload,manage}=fixture(t);await trusted();
+  await upload([item(1),item(5)]);
+  await register(TOKEN2,OTHER);
+  const records=[item(1),item(2),{...item(3),collector_id:OTHER},
+    {...item(4),collector_id:'',collector_name:''},item(5)];
+  const first=await upload(records,TOKEN2);assert.equal(first.status,200);
+  assert.deepEqual({accepted:first.result.accepted,pending:first.result.pending,kept:first.result.kept},
+    {accepted:0,pending:3,kept:2});
+  assert.equal(first.result.accepted+first.result.pending+first.result.kept,records.length);
+  assert.equal((await manage('pending')).result.pending.length,3);
+  const repeated=await upload(records,TOKEN2);
+  assert.deepEqual({accepted:repeated.result.accepted,pending:repeated.result.pending,kept:repeated.result.kept},
+    {accepted:0,pending:0,kept:5});
+  assert.equal((await manage('pending')).result.pending.length,3);
+});
+test('同批公开接受、待审和保留各按作品计数，重试不增加历史或候选',async t=>{
+  const {trusted,upload,manage,changes}=fixture(t);await trusted();await upload([item(1)]);
+  const records=[item(1),item(2),item(3,2000000)];
+  const first=await upload(records);assert.equal(first.status,200);
+  assert.deepEqual({accepted:first.result.accepted,pending:first.result.pending,kept:first.result.kept},
+    {accepted:1,pending:1,kept:1});
+  const repeated=await upload(records);
+  assert.deepEqual({accepted:repeated.result.accepted,pending:repeated.result.pending,kept:repeated.result.kept},
+    {accepted:0,pending:0,kept:3});
+  assert.equal((await changes()).result.records.length,2);
+  assert.equal((await manage('pending')).result.pending.length,1);
 });
 test('可信正常变更自动发布；旧数据及重复上传不新增历史',async t=>{
   const {trusted,upload,changes}=fixture(t);await trusted();

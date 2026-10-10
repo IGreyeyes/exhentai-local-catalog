@@ -93,6 +93,8 @@ v1.1.19 使用 v3 同步接口。上传从当前 favorites 全表生成 cloud_up
 
 客户端同步测试：`py -3.14 -X utf8 -m unittest discover -s tests -p test_cloud_sync.py`。服务端使用 Node.js 自带的临时内存 SQLite 执行生产 SQL：`node --test tests/test_cloud_sync_worker.mjs`，无第三方依赖。`tests/visual_cloud_sync_server.py` 可启动隔离 UI 资料库，所有上传 / 下载由模拟服务处理。
 
+v1.1.20 的上传确认按候选及公共快照 INSERT / UPSERT 的 `RETURNING gid` 行数计算，不能使用 D1 的 `meta.changes`，因为它可能包含历史和计数触发器的写入。服务端回归适配器以 SQLite `total_changes()` 差值模拟这种元数据，同时返回实际查询行；验证每批公开接受、待审核与保留之和等于提交记录数，以及持久写入后重试不重复入库。客户端继续严格校验数量，错误回执不保存确认，原队列可继续。
+
 构建机需 Windows x64、Python 3.14 和 Windows Python 启动器。普通用户不需要这些开发工具。
 
 ```powershell

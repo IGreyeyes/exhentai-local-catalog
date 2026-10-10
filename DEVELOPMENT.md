@@ -290,6 +290,8 @@ py -3.14 -m unittest discover -s tests -v
 
 客户端更新说明的已读版本保存在 `data/client-update-state.json`，属于本机配置，不写入发布包。安装器只替换允许清单内的程序文件，下载包含个人资料、路径穿越、重复成员、链接或校验不符时拒绝安装。
 
+v1.1.18 的客户端更新优先使用 HTTP/HTTPS 系统／环境代理，遇到临时网络错误后交替尝试直连，总计最多 4 次请求，重试等待 1、2、4 秒。下载通过 Range 续传，严格检查 Content-Range 的起点、总长度与范围；服务端返回完整响应时清空旧下载并重新计算 SHA-256。连接中断和提前结束可重试，范围、大小、校验、证书及本地文件错误不自动重试。所有重试耗尽后清理暂存区，保持旧程序和个人资料。`tests/test_client_updates.py` 使用临时安装目录、模拟响应及本机 HTTP 断流服务验证这些行为。
+
 记录页显示方式保存在 `data/favorites.sqlite3` 的 `app_settings` 表的 `records_view` 配置项中；前端通过 `/api/preferences` 读取，通过受本机操作令牌保护的 `/api/records/view` 保存。旧网页缓存仅作为首次迁移来源，数据库设置优先，桌面 WebView2 继续使用临时浏览环境。打包验证会启动两个独立 exe 进程使用同一临时资料库，确认第二次启动恢复缩略图。
 
 搜索结果复用 `static/gallery-cards.js` 的卡片和记录页样式；显示方式独立保存为 `search_view`，通过受本机操作令牌保护的 `/api/search/view` 更新。`tests/visual_search_views.cjs` 使用临时模拟资料库，验证四种视图、完整分组标签、零收藏与未知值、原采集者、源站切换、分页、标签筛选和新浏览器恢复独立设置，并在 `logs/` 保存大窗口和小窗口截图。`test_favorite_transfer.py` 覆盖旧目录缺失作品的分享导入、真实目录准备 / 切换 / 重载及重启后的自动 GID 匹配。

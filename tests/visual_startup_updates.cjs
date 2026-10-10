@@ -7,21 +7,22 @@ const project=path.resolve(__dirname,'..'),fixture=fs.mkdtempSync(path.join(os.t
 const metadata=JSON.parse(execFileSync('py',['-3.14','-X','utf8','-c','import json,client_version as v;print(json.dumps({"version":v.APP_VERSION,"notes":v.RELEASE_NOTES}))'],{cwd:project,encoding:'utf8',windowsHide:true}));
 let server,browser,baseUrl;
 
-async function scenario(base,{available=false,unread=false,offline=false,delayed=false,guide=false}={}){
+async function scenario(base,{available=false,unread=false,offline=false,delayed=false,guide=false,downloadFailure=false,checkFailure=false}={}){
   const context=await browser.newContext({viewport:{width:1360,height:900}});
-  const release={available,latest_version:'1.2.0',notes:'- **新版改进**：启动后自动提示更新。'};
+  const releasesUrl='https://github.com/IGreyeyes/exhentai-local-catalog/releases';
+  const release={available,latest_version:'1.2.0',notes:'- **新版改进**：启动后自动提示更新。',release_url:releasesUrl+'/tag/v1.2.0'};
   const state={started:false,checks:0,prompted:false,notesRead:!unread,downloads:0,manualChecks:0,phase:delayed?'checking':offline?'failed':'completed',guideSeen:false};
   const status=()=>({phase:state.phase,release:offline?null:release,error:offline?'模拟离线':''});
   await context.exposeFunction('startupFixtureCall',operation=>{
-    if(operation==='info')return {version:metadata.version,notes:metadata.notes,show_notes:!state.notesRead,upload_guide_url:guide&&!state.guideSeen?'/maintenance?upload-guide=1#cloud-sync-section':'',can_install:true};
+    if(operation==='info')return {version:metadata.version,notes:metadata.notes,releases_url:releasesUrl,show_notes:!state.notesRead,upload_guide_url:guide&&!state.guideSeen?'/maintenance?upload-guide=1#cloud-sync-section':'',can_install:true};
     if(operation==='ack'){state.notesRead=true;return {acknowledged:true,upload_guide_url:guide&&!state.guideSeen?'/maintenance?upload-guide=1#cloud-sync-section':''};}
     if(operation==='guide'){state.guideSeen=true;return {acknowledged:true};}
     if(operation==='start'){if(!state.started){state.started=true;state.checks++;}return status();}
     if(operation==='status')return status();
     if(operation==='take'){if(state.phase==='completed'&&available&&!state.prompted){state.prompted=true;return {prompt:true,release};}return {prompt:false};}
-    if(operation==='manual'){state.manualChecks++;return release;}
+    if(operation==='manual'){state.manualChecks++;return checkFailure?{error:'模拟 GitHub 连接中断，已自动重试 3 次。'}:release;}
     if(operation==='download'){state.downloads++;return {phase:'downloading'};}
-    if(operation==='progress')return {phase:'ready',percent:100,message:'新版已经准备好'};
+    if(operation==='progress')return downloadFailure&&state.downloads===1?{phase:'error',percent:0,message:'下载更新包失败：GitHub 连接中断，已自动重试 3 次。请启用系统代理或手动下载，保留 data、logs、backups 和作品目录压缩包。'}:{phase:'ready',percent:100,message:'新版已经准备好'};
     return {};
   });
   await context.addInitScript(()=>{
@@ -71,13 +72,32 @@ async function scenario(base,{available=false,unread=false,offline=false,delayed
   assert(state.checks===1,'More than one startup network check: '+state.checks);
   await page.locator('#client-check-update').click();await page.waitForFunction(()=>document.querySelector('#client-update-dialog').open&&!document.querySelector('#client-check-update').disabled);
   assert(state.manualChecks===1,'Manual check no longer works');
-  if(available){
-    await page.locator('#client-install-update').click();await page.waitForFunction(()=>document.querySelector('#client-install-update').textContent==='安装并重新打开');
-    assert(state.downloads===1,'Confirmed update did not begin a download');
+  if(checkFailure){
+    await page.locator('#client-manual-download').waitFor({state:'visible'});
+    assert(await page.locator('#client-manual-download').getAttribute('href')===releasesUrl,'Check failure did not link the official releases page');
+  }
+  if(available&&!checkFailure){
+    await page.locator('#client-install-update').click();
+    if(downloadFailure){
+      await page.locator('#client-manual-download').waitFor({state:'visible'});
+      assert(await page.locator('#client-manual-download').getAttribute('href')===release.release_url,'Download failure did not link the selected release');
+      assert(await page.locator('#client-manual-download').getAttribute('target')==='_blank','Manual download should open externally');
+      assert(!await page.locator('#client-install-update').isDisabled(),'Download cannot be retried after failure');
+      await page.setViewportSize({width:760,height:560});
+      await page.locator('#client-manual-download').scrollIntoViewIfNeeded();
+      await page.locator('#client-update-dialog').screenshot({path:path.join(project,'logs/update-download-error-v'+metadata.version+'.png')});
+      await page.locator('#client-install-update').click();
+      await page.waitForFunction(()=>document.querySelector('#client-install-update').textContent==='安装并重新打开');
+      assert(state.downloads===2,'Retry did not start a second download');
+      assert(!await page.locator('#client-manual-download').isVisible(),'Stale error link remained after retry');
+    }else{
+      await page.waitForFunction(()=>document.querySelector('#client-install-update').textContent==='安装并重新打开');
+      assert(state.downloads===1,'Confirmed update did not begin a download');
+    }
   }
   assert(errors.length===0,'Script errors: '+errors.join('; '));
   await context.close();
-  return {available,unread,offline,delayed,guide,guideSeen:state.guideSeen,startupChecks:state.checks,manualChecks:state.manualChecks,downloads:state.downloads};
+  return {available,unread,offline,delayed,guide,downloadFailure,checkFailure,guideSeen:state.guideSeen,startupChecks:state.checks,manualChecks:state.manualChecks,downloads:state.downloads};
 }
 
 async function main(){
@@ -90,7 +110,7 @@ async function main(){
   baseUrl=base;
   browser=await chromium.launch({headless:true,channel:'chrome'});
   const checks=[];
-  for(const options of [{},{available:true},{available:true,unread:true},{offline:true},{available:true,delayed:true},{available:true,unread:true,guide:true},{guide:true}])checks.push(await scenario(base,options));
+  for(const options of [{},{available:true},{available:true,unread:true},{offline:true},{available:true,delayed:true},{available:true,unread:true,guide:true},{guide:true},{available:true,downloadFailure:true},{checkFailure:true}])checks.push(await scenario(base,options));
   console.log(JSON.stringify({passed:true,scenarios:checks}));
 }
 main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

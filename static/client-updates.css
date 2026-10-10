@@ -36,6 +36,8 @@
 .client-update-message { margin: 18px 0 0; padding: 12px 14px; border-radius: 8px; background: #f3f7ef; font-size: 12px; line-height: 1.75; color: #76866a; overflow-wrap: anywhere; }
 .client-release-notes[hidden] + .client-update-message { margin-top: 0; }
 .client-update-message.error { color: #a05734; background: #fff3e9; }
+#client-manual-download { margin-top: 12px; }
+#client-manual-download[hidden] { display: none; }
 .client-update-dialog progress { width: 100%; height: 7px; margin-top: 17px; accent-color: #668b49; }
 .client-update-actions { display: flex; flex-shrink: 0; justify-content: flex-end; gap: 10px; padding: 17px 30px 22px; border-top: 1px solid #edf1e9; background: #fbfcf9; }
 .client-update-actions .button { min-width: 98px; min-height: 39px; justify-content: center; }

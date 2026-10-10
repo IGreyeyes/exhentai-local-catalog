@@ -1,9 +1,15 @@
 from pathlib import Path
+from http.client import IncompleteRead
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
+from urllib.request import ProxyHandler, build_opener
 from unittest.mock import patch
 import hashlib
 import io
 import json
 import os
+import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -25,6 +31,19 @@ def archive_bytes(extra=()):
         for name, value in extra:
             archive.writestr(name, value)
     return output.getvalue()
+
+
+class DownloadResponse(io.BytesIO):
+    def __init__(self, raw, status=200, content_range=None, interruption=None):
+        super().__init__(raw)
+        self.status = status
+        self.headers = {"Content-Range": content_range} if content_range is not None else {}
+        self.interruption = interruption
+
+    def read(self, size=-1):
+        if self.interruption is not None and self.tell() == len(self.getvalue()):
+            raise self.interruption
+        return super().read(size)
 
 
 class ClientUpdateTests(unittest.TestCase):
@@ -116,10 +135,10 @@ class ClientUpdateTests(unittest.TestCase):
         self.assertEqual(self.updater.startup_status()["phase"],"completed")
         self.assertFalse(self.updater.take_startup_prompt()["prompt"])
         offline=updates.ClientUpdater(self.root)
-        with patch.object(offline.opener,"open",side_effect=TimeoutError("Offline test")) as network:
+        with patch.object(offline.opener,"open",side_effect=TimeoutError("Offline test")) as network, patch.object(offline.direct_opener,"open",side_effect=TimeoutError("Offline test")) as direct, patch("desktop_updates.time.sleep"):
             offline.start_startup_check();offline._startup_thread.join(5)
             self.assertEqual(offline.start_startup_check()["phase"],"failed")
-            self.assertEqual(network.call_count,1)
+            self.assertEqual(network.call_count + direct.call_count, updates.NETWORK_ATTEMPTS)
         self.assertFalse(offline.take_startup_prompt()["prompt"])
 
     def unpack(self, raw):
@@ -188,6 +207,157 @@ class ClientUpdateTests(unittest.TestCase):
             self.assertTrue(self.updater.lock.acquire(timeout=5))
             self.updater.lock.release()
         return self.updater.state
+
+    def test_updater_uses_system_proxy_with_separate_direct_fallback(self):
+        with patch("desktop_updates.ProxyHandler", wraps=ProxyHandler) as handler:
+            updates.ClientUpdater(self.root)
+        self.assertEqual(handler.call_args_list[0].args, ())
+        self.assertEqual(handler.call_args_list[1].args, ({},))
+
+    def test_release_check_recovers_from_reset_and_uses_direct_fallback(self):
+        with patch.object(self.updater.opener, "open", side_effect=URLError(ConnectionResetError(10054, "simulated reset"))), patch.object(self.updater.direct_opener, "open", return_value=io.BytesIO(json.dumps(self.release()).encode())) as direct, patch("desktop_updates.time.sleep"):
+            self.assertTrue(self.updater.check()["available"])
+        self.assertEqual(direct.call_count, 1)
+        self.assertFalse(self.updater.lock.locked())
+
+    def test_incomplete_release_response_is_retried(self):
+        document = json.dumps(self.release()).encode()
+        short = DownloadResponse(document[:37])
+        short.headers["Content-Length"] = str(len(document))
+        with patch.object(self.updater.opener, "open", return_value=short), patch.object(self.updater.direct_opener, "open", return_value=io.BytesIO(document)), patch("desktop_updates.time.sleep"):
+            self.assertTrue(self.updater.check()["available"])
+
+    def simulated_download(self, raw, responses, checksum=None):
+        program = self.installed_fixture()
+        self.updater.release = updates.release_info(self.release(raw))
+        if checksum:
+            self.updater.release["sha256"] = checksum
+        requests = []
+        def open_response(request, **kwargs):
+            requests.append(request)
+            value = responses[len(requests) - 1]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        with patch.object(self.updater.opener, "open", side_effect=open_response), patch.object(self.updater.direct_opener, "open", side_effect=open_response), patch("desktop_updates.time.sleep"), patch("sys.frozen", True, create=True), patch("sys.executable", str(program / "ExCatalog.exe")):
+            self.updater.prepare()
+            self.assertTrue(self.updater.lock.acquire(timeout=5))
+            self.updater.lock.release()
+        self.assertEqual((program / "ExCatalog.exe").read_bytes(), b"old-exe")
+        self.assertEqual((program / "data" / "favorites.sqlite3").read_bytes(), b"private-records")
+        return requests
+
+    def test_connection_reset_before_download_is_retried(self):
+        raw = archive_bytes()
+        requests = self.simulated_download(raw, [ConnectionResetError(10054, "simulated reset"), DownloadResponse(raw)])
+        self.assertEqual(self.updater.state["phase"], "ready")
+        self.assertEqual(len(requests), 2)
+        self.assertIsNone(requests[1].get_header("Range"))
+
+    def test_reset_during_download_resumes_at_saved_offset(self):
+        raw, offset = archive_bytes(), 37
+        requests = self.simulated_download(raw, [DownloadResponse(raw[:offset], interruption=ConnectionResetError(10054, "simulated reset")), DownloadResponse(raw[offset:], 206, f"bytes {offset}-{len(raw)-1}/{len(raw)}")])
+        self.assertEqual(self.updater.state["phase"], "ready")
+        self.assertEqual(requests[1].get_header("Range"), f"bytes={offset}-")
+        self.assertEqual((self.updater.workspace / PACKAGE_NAME).read_bytes(), raw)
+
+    def test_short_response_is_retried_and_server_ignoring_range_restarts(self):
+        raw = archive_bytes()
+        requests = self.simulated_download(raw, [DownloadResponse(raw[:37]), DownloadResponse(raw)])
+        self.assertEqual(self.updater.state["phase"], "ready")
+        self.assertEqual(requests[1].get_header("Range"), "bytes=37-")
+        self.assertEqual((self.updater.workspace / PACKAGE_NAME).read_bytes(), raw)
+
+    def test_disconnect_after_all_bytes_still_requires_valid_checksum(self):
+        raw = archive_bytes()
+        requests = self.simulated_download(raw, [DownloadResponse(raw, interruption=IncompleteRead(b"", 0))], checksum="0" * 64)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(self.updater.state["phase"], "error")
+        self.assertIn("SHA-256", self.updater.state["message"])
+
+    def test_invalid_resume_range_fails_without_more_requests(self):
+        raw = archive_bytes()
+        requests = self.simulated_download(raw, [DownloadResponse(raw[:37]), DownloadResponse(raw[37:], 206, f"bytes 38-{len(raw)-1}/{len(raw)}")])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(self.updater.state["phase"], "error")
+        self.assertIn("续传范围", self.updater.state["message"])
+        self.assertIsNone(self.updater.workspace)
+
+    def test_changed_bytes_after_resume_fail_checksum(self):
+        raw = archive_bytes()
+        self.simulated_download(raw, [DownloadResponse(raw[:37]), DownloadResponse(b"x" * (len(raw)-37), 206, f"bytes 37-{len(raw)-1}/{len(raw)}")])
+        self.assertEqual(self.updater.state["phase"], "error")
+        self.assertIn("SHA-256", self.updater.state["message"])
+        self.assertIsNone(self.updater.workspace)
+
+    def test_repeated_reset_exhausts_retries_and_cleans_workspace(self):
+        requests = self.simulated_download(archive_bytes(), [ConnectionResetError(10054, "simulated reset")] * updates.NETWORK_ATTEMPTS)
+        self.assertEqual(len(requests), updates.NETWORK_ATTEMPTS)
+        self.assertEqual(self.updater.state["phase"], "error")
+        self.assertIn("已自动重试 3 次", self.updater.state["message"])
+        self.assertIn("手动下载", self.updater.state["message"])
+        self.assertIn("保留 data、logs、backups", self.updater.state["message"])
+        self.assertIsNone(self.updater.workspace)
+
+    def test_nontransient_http_and_certificate_errors_are_not_retried(self):
+        for error in (HTTPError("https://example.invalid", 404, "not found", {}, None), ssl.SSLCertVerificationError("test certificate"), URLError(ssl.SSLCertVerificationError("test certificate")), OSError("simulated disk failure")):
+            with self.subTest(error=type(error).__name__):
+                self.assertFalse(updates.retryable_network_error(error))
+            if isinstance(error, HTTPError):
+                error.close()
+        with patch.object(self.updater.opener, "open", side_effect=HTTPError("https://example.invalid", 404, "not found", {}, None)) as network, patch.object(self.updater.direct_opener, "open") as direct:
+            with self.assertRaises(HTTPError) as failed:
+                self.updater.check()
+            failed.exception.close()
+        self.assertEqual(network.call_count, 1)
+        direct.assert_not_called()
+        self.assertFalse(self.updater.lock.locked())
+
+    def test_temporary_http_failure_retries_but_oversized_package_does_not(self):
+        raw = archive_bytes()
+        requests = self.simulated_download(raw, [HTTPError("https://example.invalid", 503, "unavailable", {}, None), DownloadResponse(raw + b"extra")])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(self.updater.state["phase"], "error")
+        self.assertIn("大小", self.updater.state["message"])
+        self.assertIsNone(self.updater.workspace)
+
+    def test_real_http_interruption_resumes_and_checks_complete_archive(self):
+        raw, ranges = archive_bytes(), []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                requested = self.headers.get("Range")
+                ranges.append(requested)
+                if requested:
+                    start = int(requested.removeprefix("bytes=").removesuffix("-"))
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{len(raw)-1}/{len(raw)}")
+                    self.send_header("Content-Length", str(len(raw)-start))
+                    self.end_headers()
+                    self.wfile.write(raw[start:])
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw[:37])
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_RDWR)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.updater.opener = build_opener(ProxyHandler({}))
+            self.updater.release = updates.release_info(self.release(raw))
+            self.updater.release["url"] = f"http://127.0.0.1:{server.server_port}/package.zip"
+            with patch("desktop_updates.time.sleep"):
+                self.updater._download_archive(self.root / "download.zip")
+            self.assertEqual(ranges, [None, "bytes=37-"])
+            self.assertEqual((self.root / "download.zip").read_bytes(), raw)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
 
     def test_checksum_failure_leaves_original_program_untouched(self):
         state = self.download(archive_bytes(), "0" * 64)

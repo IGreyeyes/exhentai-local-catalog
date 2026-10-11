@@ -27,6 +27,34 @@ function fixture(t){
   const changes=()=>call('/v3/changes');
   return {env,call,manage,register,trusted,upload,changes};
 }
+test('上传昵称更新原来源，保留信任与原采集者；旧登记不会覆盖昵称',async t=>{
+  const {env,call,manage,trusted,upload,changes}=fixture(t);
+  const first=await trusted();await upload([item(1)]);
+  const rename=name=>call('/v3/register',{method:'POST',token:TOKEN,data:{collector_id:OWNER,collector_name:'测试来源',uploader_name:name}});
+  const renamed=await rename('测试上传者');assert.equal(renamed.status,200);
+  assert.deepEqual(renamed.result,{version:3,source_id:first.source_id,status:'trusted'});
+  assert.equal((await manage('sources')).result.sources.find(s=>s.id===first.source_id).name,'测试上传者');
+  assert.equal((await changes()).result.records[0].snapshot.collector_name,'测试采集者');
+  assert.equal((await call('/v3/register',{method:'POST',token:TOKEN,data:{collector_id:OWNER,collector_name:''}})).status,200);
+  assert.equal(env.DB.sqlite.prepare('SELECT name FROM upload_sources WHERE id=?').get(first.source_id).name,'测试上传者');
+  assert.equal((await rename('')).status,200);
+  assert.equal(env.DB.sqlite.prepare('SELECT name FROM upload_sources WHERE id=?').get(first.source_id).name,'');
+});
+test('新来源昵称登记、校验、凭证归属与封禁仍生效',async t=>{
+  const {env,call,manage,register}=fixture(t);const first=await register();
+  const post=(name,owner=OWNER,token=TOKEN)=>call('/v3/register',{method:'POST',token,data:{collector_id:owner,collector_name:'测试来源',uploader_name:name}});
+  assert.equal((await post('另一个上传者',OWNER,TOKEN2)).status,200);
+  assert.equal(env.DB.sqlite.prepare('SELECT name FROM upload_sources WHERE id<>?').get(first.source_id).name,'另一个上传者');
+  assert.equal((await post('无权改名',OTHER)).status,401);
+  assert.equal((await post('字'.repeat(41))).status,400);
+  assert.equal((await post('中\n文')).status,400);
+  // Independent quota windows keep this test focused on authorization rather than request caps.
+  env.DB.sqlite.exec('DELETE FROM upload_limits');
+  assert.equal((await post(null)).status,400);
+  await manage('sources/'+first.source_id,{status:'blocked'});
+  assert.equal((await post('封禁后改名')).status,403);
+  assert.equal(env.DB.sqlite.prepare('SELECT name FROM upload_sources WHERE id=?').get(first.source_id).name,'测试来源');
+});
 test('默认暂停；公开读取、管理认证、旧客户端提示升级',async t=>{
   const {env,call,manage}=fixture(t);const h=await call('/health');assert.equal(h.result.version,3);assert.equal(h.result.upload_scope,'library');assert.equal(h.result.preserves_original_collector,true);assert.equal(h.result.upload_requires_contribution_code,false);assert.equal(h.result.upload_enabled,false);
   assert.equal(h.result.upload_confirmation,'returning_rows');

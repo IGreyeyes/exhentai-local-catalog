@@ -22,6 +22,7 @@ import time
 import zipfile
 
 from client_version import APP_VERSION, PACKAGE_NAME, RELEASE_NOTES, REPOSITORY
+from release_history import ReleaseHistory, upgrade_notes
 
 UPLOAD_GUIDE_URL = "/maintenance?upload-guide=1#cloud-sync-section"
 
@@ -182,6 +183,7 @@ class ClientUpdater:
         # Use Windows/environment proxy settings, independently of collection settings.
         self.opener = build_opener(ProxyHandler())
         self.direct_opener = build_opener(ProxyHandler({}))
+        self.history = ReleaseHistory()
 
     def _network_opener(self, attempt):
         return self.opener if attempt % 2 == 0 else self.direct_opener
@@ -242,7 +244,15 @@ class ClientUpdater:
     def info(self):
         with self._notes_lock:
             state = self._notes_state()
-            return {"version": APP_VERSION, "notes": RELEASE_NOTES,
+            notes = RELEASE_NOTES
+            previous = state.get("acknowledged_version")
+            if previous:
+                try:
+                    if version_tuple(previous) < version_tuple(APP_VERSION):
+                        notes, _ = upgrade_notes(self.history.entries, previous, APP_VERSION, RELEASE_NOTES)
+                except ValueError:
+                    pass
+            return {"version": APP_VERSION, "notes": notes,
                     "releases_url": f"https://github.com/{REPOSITORY}/releases",
                     "show_notes": state.get("acknowledged_version") != APP_VERSION,
                     "upload_guide_url": self._guide_url(state),
@@ -290,6 +300,16 @@ class ClientUpdater:
             if len(raw) > 1024**2:
                 raise ValueError("发布信息超过大小限制。")
             self.release = release_info(json.loads(raw))
+            if self.release["available"]:
+                try:
+                    self.history.refresh()
+                    self.release["history_message"] = ""
+                except Exception:
+                    self.release["history_message"] = "历史发布信息暂不可用，已显示内置日志和目标版本说明；可在更新日志页面刷新。"
+                self.release["notes"], self.release["included_versions"] = upgrade_notes(
+                    self.history.entries, APP_VERSION, self.release["latest_version"], self.release["notes"])
+            else:
+                self.release["notes"] = RELEASE_NOTES
             return self.release
         finally:
             self.lock.release()

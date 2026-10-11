@@ -48,6 +48,9 @@ class DownloadResponse(io.BytesIO):
 
 class ClientUpdateTests(unittest.TestCase):
     def setUp(self):
+        history_network = patch("release_history.ReleaseHistory._request", return_value=[])
+        history_network.start()
+        self.addCleanup(history_network.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.updater = updates.ClientUpdater(self.root)

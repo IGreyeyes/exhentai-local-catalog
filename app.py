@@ -26,6 +26,7 @@ from credentials import export_credentials, import_credentials
 from favorite_transfer import MAX_FILE_BYTES, snapshot_share_info
 from collector_identity import MAX_IDENTITY_BYTES, parse_identity
 from cloud_sync import CloudSync
+from release_history import ReleaseHistory
 from runtime_paths import library_lock, library_root, resource_root
 
 ROOT = library_root()
@@ -421,6 +422,7 @@ class Server(ThreadingHTTPServer):
         self.catalog = catalog
         self.shutdown_token = secrets.token_urlsafe(32)
         self.action_token = secrets.token_urlsafe(32)
+        self.release_history = ReleaseHistory()
         self.catalog_gate = threading.RLock()
         super().__init__(address, Handler)
         self.collector = Collector(catalog)
@@ -546,6 +548,8 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(request.query, max_num_fields=40)
             if request.path == "/api/cloud-sync":
                 self.reply(self.server.cloud_sync.status())
+            elif request.path == "/api/release-history":
+                self.reply(self.server.release_history.info())
             elif request.path == "/api/maintenance":
                 self.reply({**self.server.maintenance.status(), "cover_cache": self.server.cover_cache.stats()})
             elif match := re.fullmatch(r"/api/cover/(\d{1,18})", request.path):
@@ -584,6 +588,11 @@ class Handler(BaseHTTPRequestHandler):
                 files["/contact/"] = ("contact.html", "text/html")
                 files["/contact.css"] = ("contact.css", "text/css")
                 files["/qq-group-qr.png"] = ("qq-group-qr.png", "image/png")
+                files["/changelog"] = ("changelog.html", "text/html")
+                files["/changelog/"] = ("changelog.html", "text/html")
+                files["/changelog.css"] = ("changelog.css", "text/css")
+                files["/changelog.js"] = ("changelog.js", "text/javascript")
+                files["/release-notes.js"] = ("release-notes.js", "text/javascript")
                 if request.path not in files:
                     self.reply({"error": "页面不存在。"}, status=404)
                     return
@@ -637,7 +646,11 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload,dict):
                 raise ValueError("请求格式不正确。")
-            if self.path.startswith("/api/cloud-sync/"):
+            if self.path == "/api/release-history/refresh":
+                if payload:
+                    raise ValueError("刷新发布记录不接受额外选项。")
+                result = self.server.release_history.refresh()
+            elif self.path.startswith("/api/cloud-sync/"):
                 with self.server.catalog_gate:
                     if self.server.maintenance.stopping:raise ValueError("服务正在停止，请重新启动后再操作。")
                     if self.path == "/api/cloud-sync/settings":

@@ -109,6 +109,13 @@ def verify(program_directory=None):
                 contact=response.read()
                 if b'id="contact-qq-qr"' not in contact or b'1127148424' not in contact:
                     raise AssertionError("Packaged contact page is missing")
+            with opener.open(base+"/changelog",timeout=10) as response:
+                history_page=response.read()
+                if b'id="history-list"' not in history_page or b'/release-notes.js' not in history_page:
+                    raise AssertionError("Packaged complete release history page is missing")
+            history=get('/api/release-history')
+            if not any(item['version']=='1.1.10' for item in history['entries']) or not any(item['version']==history['current_version'] for item in history['entries']):
+                raise AssertionError("Packaged offline history is incomplete")
             with opener.open(base+"/qq-group-qr.png",timeout=10) as response:
                 if response.headers.get_content_type()!='image/png' or response.read()!=(PROJECT/'static'/'qq-group-qr.png').read_bytes():
                     raise AssertionError("Packaged QQ QR image differs from the supplied asset")

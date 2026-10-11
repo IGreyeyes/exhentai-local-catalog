@@ -2,7 +2,7 @@
 (() => {
   const ui=id=>document.getElementById(id);
   let state=null, token="", requestBusy=false, edited=false, loaded=false, polling=false, localError="";
-  const fields=["cloud-sync-endpoint","cloud-sync-enabled","cloud-sync-upload","cloud-sync-consent"];
+  const fields=["cloud-sync-endpoint","cloud-sync-name","cloud-sync-enabled","cloud-sync-upload","cloud-sync-consent"];
   const display=text=>ui("cloud-sync-message").textContent=text;
   const guided=new URLSearchParams(location.search).get("upload-guide")==="1";
   let guideAcknowledged=false,guideAcknowledging=false,guidePositioned=false;
@@ -26,6 +26,7 @@
   function render(){
     if(!loaded||!edited){
       ui("cloud-sync-endpoint").value=state.endpoint;
+      ui("cloud-sync-name").value=state.uploader_name||"";
       ui("cloud-sync-enabled").checked=state.download_enabled;
       ui("cloud-sync-upload").checked=state.upload_enabled;
       ui("cloud-sync-consent").checked=state.upload_enabled;
@@ -69,6 +70,7 @@
   }
   fields.forEach(id=>ui(id).addEventListener("input",()=>{edited=true;localError="";}));
   ui("cloud-sync-save").onclick=()=>action("settings",{
+    uploader_name:ui("cloud-sync-name").value.trim(),
     endpoint:ui("cloud-sync-endpoint").value.trim(),download_enabled:ui("cloud-sync-enabled").checked,
     upload_enabled:ui("cloud-sync-upload").checked,consent:ui("cloud-sync-consent").checked,
   });

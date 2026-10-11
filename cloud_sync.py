@@ -67,6 +67,8 @@ def request_json(endpoint, path, payload=None, token=""):
                     400: "同步数据或采集身份不符合服务要求。",
                     404: "同步服务尚未支持资料库全量上传，请维护者部署 v1.1.19 的 worker.js（v3）后重试。",
                     503: "上传可能已暂停、候选容量已满或服务尚未就绪，请检查云端管理页。"}
+        if status == 400 and path == "/v3/register" and payload is not None and "uploader_name" in payload:
+            raise ValueError("上传者昵称登记未完成；请维护者部署 v1.1.23 或更新版本的 Worker，并检查昵称与采集身份。昵称及上传队列已保留。") from None
         raise ValueError(messages.get(status, f"同步服务返回 HTTP {status}，稍后重试。")) from None
     except (URLError, OSError, TimeoutError):
         raise ValueError("同步网络连接失败；本地资料保留，稍后自动重试。") from None
@@ -140,6 +142,7 @@ class CloudSync:
             download = self._get(db, "cloud_download_enabled", self._get(db, "cloud_enabled", "0")) == "1"
             upload = self._get(db, "cloud_upload_enabled", "0") == "1"
             return {"endpoint": self._get(db, "cloud_endpoint", DEFAULT_ENDPOINT),
+                    "uploader_name": self._get(db, "cloud_uploader_name"),
                     "enabled": download or upload, "download_enabled": download, "upload_enabled": upload,
                     "configured": bool(db.execute("SELECT 1 FROM app_settings WHERE key IN ('cloud_enabled','cloud_download_enabled')").fetchone())}
 
@@ -158,11 +161,17 @@ class CloudSync:
 
     def configure(self, value):
         # Accept the older local API field as a download preference during upgrades.
-        if set(value) == {"endpoint", "enabled", "upload_enabled", "consent"}:
+        if set(value) - {"uploader_name"} == {"endpoint", "enabled", "upload_enabled", "consent"}:
             value = {**value, "download_enabled": value["enabled"]}
             del value["enabled"]
-        if set(value) != {"endpoint", "download_enabled", "upload_enabled", "consent"}:
+        if set(value) - {"uploader_name"} != {"endpoint", "download_enabled", "upload_enabled", "consent"}:
             raise ValueError("在线同步设置字段不正确。")
+        if "uploader_name" in value:
+            name = value["uploader_name"]
+            if not isinstance(name, str):
+                raise ValueError("上传者昵称必须是文本。")
+            name = name.strip()
+            validate_collector("00000000-0000-4000-8000-000000000000", name)
         endpoint = validate_endpoint(value["endpoint"])
         if any(type(value[key]) is not bool for key in ("download_enabled", "upload_enabled", "consent")):
             raise ValueError("同步选项须为开关值。")
@@ -184,7 +193,10 @@ class CloudSync:
                     self._put(db, "cloud_" + key, "1" if value[key] else "0")
                 self._put(db, "cloud_enabled", "1" if enabled else "0")
                 self._put(db, "cloud_endpoint", endpoint)
-            self.message = "设置已保存；上传与下载独立运行，新来源的提交先待审核。" if enabled else "在线同步已关闭。"
+                if "uploader_name" in value:
+                    self._put(db, "cloud_uploader_name", name)
+            self.message = ("设置及上传者昵称已保存；开启上传后同步到后台，新来源的提交先待审核。"
+                            if enabled else "设置及上传者昵称已保存；在线同步已关闭，开启上传后同步昵称。")
             self.phase = "queued" if enabled else "idle"
             self.upload_remaining = None
             self.upload_total = self.upload_confirmed = None
@@ -206,7 +218,7 @@ class CloudSync:
 
     @staticmethod
     def _clear_identity(db):
-        db.execute("DELETE FROM app_settings WHERE key IN ('cloud_upload_token','cloud_upload_owner','cloud_upload_endpoint','cloud_source_id','cloud_source_status')")
+        db.execute("DELETE FROM app_settings WHERE key IN ('cloud_upload_token','cloud_upload_owner','cloud_upload_endpoint','cloud_source_id','cloud_source_status','cloud_uploader_name_synced')")
 
     def _identity_status(self):
         with self.gate, self.store_provider().connection() as db:
@@ -220,14 +232,18 @@ class CloudSync:
                 self._clear_identity(db)
                 db.execute("DELETE FROM cloud_upload_ack")
             token = self._get(db, "cloud_upload_token")
-            if token and self._get(db, "cloud_source_id"):
+            name_row = db.execute("SELECT value FROM app_settings WHERE key='cloud_uploader_name'").fetchone()
+            name = name_row[0] if name_row else None
+            name_synced = name is None or self._get(db, "cloud_uploader_name_synced", None) == name
+            if token and self._get(db, "cloud_source_id") and name_synced:
                 return token
             if not token:
                 token = "src_" + secrets.token_urlsafe(32)
                 self._put(db, "cloud_upload_token", token)
                 self._put(db, "cloud_upload_owner", identity["collector_id"])
                 self._put(db, "cloud_upload_endpoint", config["endpoint"])
-        result = self.transport(config["endpoint"], "/v3/register", identity, token)
+        payload = {**identity, **({"uploader_name": name} if name is not None else {})}
+        result = self.transport(config["endpoint"], "/v3/register", payload, token)
         if (not isinstance(result, dict) or set(result) != {"version", "source_id", "status"}
                 or result["version"] != VERSION or result["status"] not in {"review", "trusted"}):
             raise ValueError("上传身份登记结果不正确。")
@@ -235,6 +251,8 @@ class CloudSync:
         with self.gate, self.store_provider().connection() as db:
             self._put(db, "cloud_source_id", result["source_id"])
             self._put(db, "cloud_source_status", result["status"])
+            if name is not None:
+                self._put(db, "cloud_uploader_name_synced", name)
         return token
 
     def _available(self):
@@ -288,6 +306,8 @@ class CloudSync:
             return False
         self._refresh_upload_snapshots()
         if not self.upload_total:
+            if self._identity_status()[0]:
+                self._upload_identity(config)
             self._count_upload_queue()
             return False
         token = self._upload_identity(config)

@@ -23,6 +23,7 @@
 .client-update-eyebrow { margin: 0 0 5px; font-size: 11px; color: #7a8c72; }
 .client-update-dialog h2 { font-size: 22px; line-height: 1.45; margin: 0; overflow-wrap: anywhere; }
 .client-update-body { padding: 23px 30px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.client-update-body:focus-visible { outline: 2px solid #aac2a4; outline-offset: -2px; }
 .client-release-notes { font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
 .client-release-notes p { margin: 0 0 14px; }
 .client-release-notes h3 { font-size: 15px; font-weight: 650; line-height: 1.6; margin: 19px 0 10px; }
@@ -33,6 +34,10 @@
 .client-note-list li::marker { color: #63845b; font-size: 12px; font-weight: 600; }
 .client-release-notes strong { font-weight: 650; color: #284d32; }
 .client-release-notes code { font-size: 12px; padding: 2px 5px; border-radius: 4px; background: #f0f4ec; word-break: break-word; }
+.client-release-notes blockquote { margin: 16px 0; padding: 8px 16px; border-left: 3px solid #b9cfad; color: #6d8064; background: #f7faf4; }
+.client-release-notes pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: #f2f6ee; border-radius: 6px; }
+.client-release-notes pre code { padding: 0; background: none; }
+.client-release-notes a { color: #486f45; }
 .client-update-message { margin: 18px 0 0; padding: 12px 14px; border-radius: 8px; background: #f3f7ef; font-size: 12px; line-height: 1.75; color: #76866a; overflow-wrap: anywhere; }
 .client-release-notes[hidden] + .client-update-message { margin-top: 0; }
 .client-update-message.error { color: #a05734; background: #fff3e9; }

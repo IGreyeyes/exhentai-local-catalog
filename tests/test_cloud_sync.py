@@ -44,6 +44,72 @@ class CloudSyncTests(unittest.TestCase):
     def config(self, **changes):
         return {"endpoint":DEFAULT_ENDPOINT,"download_enabled":True,"upload_enabled":False,"consent":False,**changes}
 
+    def test_uploader_name_persists_independently_and_old_settings_keep_it(self):
+        self.sync.configure(self.config(uploader_name=" 测试上传者 ", download_enabled=False))
+        self.sync.configure(self.config(download_enabled=False))
+        restarted = CloudSync(lambda: self.store, self.gate, start=False)
+        try:
+            self.assertEqual(restarted.status()["uploader_name"], "测试上传者")
+            self.assertFalse(restarted.status()["enabled"])
+            self.assertEqual(self.read("SELECT value FROM app_settings WHERE key='collector_name'")["value"], "")
+        finally:
+            restarted.close()
+        for name in (None, 123, "字" * 41, "中\n文", "中\x7f文"):
+            with self.assertRaises(ValueError):
+                self.sync.configure(self.config(uploader_name=name))
+        self.assertEqual(self.sync.status()["uploader_name"], "测试上传者")
+
+    def test_rename_registered_source_without_resending_confirmed_records(self):
+        self.store.save(1,100,"e-hentai.org",20)
+        config = self.config(upload_enabled=True, consent=True, download_enabled=False)
+        self.sync.configure({**config, "uploader_name":"测试上传者"})
+        with patch.object(self.sync.stopped,"wait",return_value=False):
+            self.sync.run_once()
+        first = next(r for r in self.requests if r[1]=="/v3/register")
+        self.assertEqual(first[2]["uploader_name"], "测试上传者")
+        self.assertEqual(first[2]["collector_name"], "")
+        self.requests.clear()
+        self.sync.configure({**config, "uploader_name":"改名测试"})
+        self.sync.run_once()
+        self.assertEqual([r[1] for r in self.requests], ["/v3/register"])
+        self.assertEqual(self.requests[0][3], first[3])
+        self.assertEqual(self.requests[0][2]["uploader_name"], "改名测试")
+        self.assertEqual(self.sync.status()["source_id"], OTHER)
+        self.assertEqual(self.sync.status()["upload_confirmed"], 1)
+        with self.store.connection() as db:
+            db.execute("DELETE FROM favorites")
+        self.requests.clear()
+        self.sync.configure({**config, "uploader_name":""})
+        self.sync.run_once()
+        self.assertEqual([r[1] for r in self.requests], ["/v3/register"])
+        self.assertEqual(self.requests[0][2]["uploader_name"], "")
+        self.requests.clear()
+        self.sync.run_once()
+        self.assertFalse(self.requests)
+
+    def test_failed_rename_keeps_name_identity_and_queue_for_retry(self):
+        self.store.save(1,100,"e-hentai.org",20)
+        config = self.config(upload_enabled=True, consent=True)
+        self.sync.configure(config)
+        with patch.object(self.sync.stopped,"wait",return_value=False):
+            self.sync.run_once()
+        self.sync.configure({**config, "uploader_name":"网络重试测试"})
+        original = self.sync.transport
+        def offline(endpoint,path,payload=None,token=""):
+            if path=="/v3/register":
+                raise ValueError("测试网络不可用")
+            return original(endpoint,path,payload,token)
+        self.sync.transport = offline
+        self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"], "retrying")
+        self.assertEqual(self.sync.status()["uploader_name"], "网络重试测试")
+        self.assertEqual(self.sync.status()["source_id"], OTHER)
+        self.assertEqual(self.read("SELECT count(*) AS n FROM cloud_upload_ack")["n"], 1)
+        self.requests.clear()
+        self.sync.transport = original
+        self.sync.run_once()
+        self.assertEqual([r[1].split('?')[0] for r in self.requests], ["/v3/register", "/v3/changes"])
+
     def item(self, gid=1, count=100, rating=20, checked=None, revision=1):
         return {"gid":gid,"favorite_count":count,"rating_count":rating,"checked_at":checked or self.now,
                 "source":"e-hentai.org","collector_id":OTHER,"collector_name":"测试采集者","revision":revision}

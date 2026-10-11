@@ -135,18 +135,28 @@ async function register(request, env, now) {
   const token = bearer(request);
   if (!SOURCE_TOKEN.test(token)) throw new ApiError(401,'自动上传凭证格式不正确，请升级客户端。');
   const value = await body(request);
-  if (!exactKeys(value,['collector_id','collector_name'])) throw new ApiError(400,'登记字段不正确。');
-  record({gid:1,favorite_count:0,rating_count:null,checked_at:now,source:'e-hentai.org',...value},now);
+  const named = Object.hasOwn(value || {}, 'uploader_name');
+  if (!exactKeys(value,named?['collector_id','collector_name','uploader_name']:['collector_id','collector_name'])) throw new ApiError(400,'登记字段不正确。');
+  if (named && !boundedName(value.uploader_name)) throw new ApiError(400,'上传者昵称最多 40 个字符，不能包含首尾空白、换行或控制字符。');
+  record({gid:1,favorite_count:0,rating_count:null,checked_at:now,source:'e-hentai.org',
+    collector_id:value.collector_id,collector_name:value.collector_name},now);
   if (!value.collector_id) throw new ApiError(400,'上传来源须登记有效的采集者 ID；记录中的未知采集者可保留为空。');
   const hash = await digest(token);
   await env.DB.prepare(`INSERT INTO upload_sources(id,token_hash,collector_id,name,created_at)
     SELECT ?,?,?,?,? WHERE (SELECT source_count FROM upload_controls WHERE id=1)<${CAPS.sources}
     AND (SELECT upload_enabled FROM upload_controls WHERE id=1)=1 ON CONFLICT(token_hash) DO NOTHING`)
-    .bind(crypto.randomUUID(),hash,value.collector_id,value.collector_name,now).run();
+    .bind(crypto.randomUUID(),hash,value.collector_id,named?value.uploader_name:value.collector_name,now).run();
   const source = await env.DB.prepare('SELECT id,collector_id,status FROM upload_sources WHERE token_hash=?').bind(hash).first();
   if (!source) throw new ApiError(429,'上传来源容量已满或上传已暂停。');
   if (source.collector_id!==value.collector_id) throw new ApiError(401,'上传凭证身份不匹配。');
   if (source.status==='blocked') throw new ApiError(403,'该上传来源已封禁。');
+  if (named) {
+    const updated = await env.DB.prepare(`UPDATE upload_sources SET name=? WHERE id=? AND token_hash=?
+      AND collector_id=? AND status<>'blocked' RETURNING status`)
+      .bind(value.uploader_name,source.id,hash,value.collector_id).first();
+    if (!updated) throw new ApiError(403,'该上传来源已封禁。');
+    source.status = updated.status;
+  }
   return json({version:VERSION,source_id:source.id,status:source.status});
 }
 const AUTH = `EXISTS(SELECT 1 FROM upload_sources WHERE id=? AND collector_id=? AND status<>'blocked')
@@ -442,6 +452,7 @@ export default {async fetch(request,env){try{
     dataset_id:info.dataset_id,read_public:true,upload_scope:'library',preserves_original_collector:true,
     upload_confirmation:'returning_rows',
     trusted_pending_bulk_approval:true,
+    uploader_nickname:true,
     upload_requires_contribution_code:false,new_source_requires_review:true,
     upload_enabled:Boolean((await controls(env)).upload_enabled),admin_configured:typeof env.ADMIN_SECRET==='string' && /^[A-Za-z0-9_-]{32,256}$/.test(env.ADMIN_SECRET)});
   if(url.pathname==='/v3/changes' && request.method==='GET')return await changes(url,env,info);

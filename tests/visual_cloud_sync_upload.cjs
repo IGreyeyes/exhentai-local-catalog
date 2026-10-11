@@ -36,6 +36,16 @@ async function main(){
   const repeated=await (await fetch(baseUrl+'/api/cloud-sync')).json();
   assert(repeated.session_upload_processed===230,'Repeated sync resent confirmed records');
   assert(errors.length===0,'Script errors: '+errors.join('; '));
+  await page.locator('#cloud-sync-name').fill('界面昵称测试');
+  await page.waitForTimeout(3200);
+  assert(await page.locator('#cloud-sync-name').inputValue()==='界面昵称测试','Status polling erased unsaved nickname');
+  await page.locator('#cloud-sync-save').click();
+  await page.waitForFunction(()=>!document.querySelector('#cloud-sync-save').disabled&&document.querySelector('#cloud-sync-message').textContent.includes('同步完成'));
+  await page.reload();
+  await page.waitForFunction(()=>document.querySelector('#cloud-sync-name').value==='界面昵称测试');
+  const named=await (await fetch(baseUrl+'/api/cloud-sync')).json();
+  assert(named.uploader_name==='界面昵称测试'&&named.session_upload_processed===230,'Nickname change was lost or resent confirmed snapshots');
+  await page.locator('#cloud-sync-section').screenshot({path:path.join(project,'logs/uploader-nickname-small.png')});
   console.log(JSON.stringify({passed:true,mixedLibraryRecords:230,submitted:repeated.session_upload_processed,confirmed:repeated.upload_confirmed,pending:repeated.upload_remaining,repeatDidNotResend:true,smallViewport:true}));
 }
 main().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

@@ -20,6 +20,7 @@
       <a class="nav-item" href="/"><span aria-hidden="true">⌕</span> 标签搜索</a>
       <a class="nav-item" href="/records"><span aria-hidden="true">✓</span> 已记录</a>
       <a class="nav-item selected" href="/maintenance" aria-current="page"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <a class="nav-item nav-changelog" href="/changelog"><span aria-hidden="true">☷</span> 更新日志</a>
       <a class="nav-item nav-contact" href="/contact"><span aria-hidden="true">✉</span> 联系我们</a>
       <div class="sidebar-note"><span class="small-dot"></span> 给资料留一份副本<p>备份到本机文件夹、其他磁盘，或已连接的网络共享文件夹。</p></div>
       <div class="sidebar-bottom"><span>资料管理</span><strong>备份与导入，都在这里</strong><p>导入前先校验文件，再自动备份当前资料。每份备份独立保存。</p></div>
@@ -34,6 +35,9 @@
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">⇄</span><div><h2 id="cloud-sync-title">上传收藏数与在线同步</h2><p>共享大家最近采集的作品收藏数和评分人数；断网时继续使用本地资料。</p></div></div>
           <label class="maintenance-field" for="cloud-sync-endpoint">同步服务地址</label>
           <div class="maintenance-path-row"><input id="cloud-sync-endpoint" type="url" autocomplete="off" spellcheck="false" placeholder="HTTPS 同步服务根地址"></div>
+          <label class="maintenance-field" for="cloud-sync-name">上传者昵称（选填，最多 40 个字符）</label>
+          <div class="maintenance-path-row"><input id="cloud-sync-name" type="text" maxlength="40" autocomplete="off" placeholder="不填写时，后台显示无昵称"></div>
+          <p class="field-hint">点击「保存同步设置」后，昵称在下次打开时仍保留。开启上传后同步到后台「上传来源」；修改昵称沿用原来源及审核状态，作品的原采集者信息保留。</p>
           <div id="cloud-upload-guide" class="cloud-upload-guide" hidden role="region" aria-labelledby="cloud-upload-guide-title">
             <strong id="cloud-upload-guide-title">上传并分享资料库中的收藏数</strong>
             <p>以后从「资料库维护」最上方就能找到这里。上传和下载首次默认关闭，可按需要单独勾选。上传需确认下方公开分享范围并保存；已保存的选择会在下次打开时保留。新来源先待审核，通过后供大家同步使用。</p>
@@ -198,6 +202,7 @@
       </div>
     </main>
   </div>
+  <script src="/release-notes.js"></script>
   <script src="/platform.js"></script>
 </body>
 </html>

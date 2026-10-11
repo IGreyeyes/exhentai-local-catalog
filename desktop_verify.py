@@ -61,8 +61,10 @@ def verify_desktop(report_path, fixture_root=None):
         before = hashlib.sha256(database.read_bytes()).hexdigest()
         session = DesktopSession(root)
         cloud_submissions=[]
+        cloud_names=[]
         def mock_cloud(endpoint,path,payload=None,token=""):
             if path=="/v3/register":
+                if "uploader_name" in payload:cloud_names.append(payload["uploader_name"])
                 return {"version":VERSION,"source_id":"00000000-0000-4000-8000-000000000002","status":"review"}
             if payload is not None:
                 cloud_submissions.extend(dict(item) for item in payload["records"])
@@ -185,11 +187,13 @@ def verify_desktop(report_path, fixture_root=None):
                     if page == "/maintenance":
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{const button=document.querySelector('#cloud-sync-save');if(button&&!button.disabled){clearInterval(timer);resolve(true);}else if(++tries>150){clearInterval(timer);reject(new Error('Sync settings did not load'));}},50);})")
                         saved=session.server.cloud_sync.status()
+                        if window.evaluate_js("document.querySelector('#cloud-sync-name').value") != saved["uploader_name"]:
+                            raise AssertionError("Saved uploader nickname was not rendered")
                         choices=window.evaluate_js("({upload:document.querySelector('#cloud-sync-upload').checked,download:document.querySelector('#cloud-sync-enabled').checked})")
                         if choices!={"upload":saved["upload_enabled"],"download":saved["download_enabled"]}:
                             raise AssertionError("Saved sync choices were not rendered: " + json.dumps(choices))
                         if not saved["configured"]:
-                            window.evaluate_js("['cloud-sync-upload','cloud-sync-enabled','cloud-sync-consent'].forEach(id=>{const input=document.getElementById(id);input.checked=true;input.dispatchEvent(new Event('input'));});document.getElementById('cloud-sync-save').click()")
+                            window.evaluate_js("const name=document.getElementById('cloud-sync-name');name.value='测试上传者';name.dispatchEvent(new Event('input'));['cloud-sync-upload','cloud-sync-enabled','cloud-sync-consent'].forEach(id=>{const input=document.getElementById(id);input.checked=true;input.dispatchEvent(new Event('input'));});document.getElementById('cloud-sync-save').click()")
                             promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(async()=>{const state=await fetch('/api/cloud-sync').then(r=>r.json());if(state.configured&&state.upload_enabled&&state.download_enabled&&!state.busy){clearInterval(timer);resolve(true);}else if(++tries>200){clearInterval(timer);reject(new Error('Both sync choices did not save'));}},50);})")
                             settings_loaded=threading.Event()
                             def settings_navigation():settings_loaded.set()
@@ -200,9 +204,13 @@ def verify_desktop(report_path, fixture_root=None):
                             promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{const button=document.querySelector('#cloud-sync-save');if(button&&!button.disabled){clearInterval(timer);resolve(true);}else if(++tries>150){clearInterval(timer);reject(new Error('Saved settings page did not initialize'));}},50);})")
                             choices=window.evaluate_js("({upload:document.querySelector('#cloud-sync-upload').checked,download:document.querySelector('#cloud-sync-enabled').checked})")
                             if choices!={"upload":True,"download":True}:raise AssertionError(choices)
+                            if window.evaluate_js("document.querySelector('#cloud-sync-name').value")!='测试上传者' or '测试上传者' not in cloud_names:
+                                raise AssertionError("Uploader nickname did not save, register and reload")
                             report["checks"].append("both sync choices saved through GUI and remain checked after page reload")
                         else:
                             if choices!={"upload":True,"download":True}:raise AssertionError(choices)
+                            if saved["uploader_name"]!='测试上传者':raise AssertionError("Uploader nickname was lost after process restart")
+                            report["checks"].append("uploader nickname persists through GUI save, reload and a separate EXE process restart")
                             report["checks"].append("new client process reopens saved upload and download choices as checked")
                     if page == "/":
                         promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{if(!document.querySelector('#search-view').disabled){clearInterval(timer);resolve(true);}else if(++tries>100){clearInterval(timer);reject(new Error('Search view did not initialize'));}},50);})")
@@ -270,6 +278,21 @@ def verify_desktop(report_path, fixture_root=None):
                     raise AssertionError({"share_info": result.get("share_info"), "ui": sharing})
                 report["checks"].append("native bridge exports favorites to chosen file")
                 report["checks"].append("share guide expands and generates title/body in actual packaged WebView2")
+                stage("complete offline release history")
+                history_loaded=threading.Event()
+                def history_navigation():history_loaded.set()
+                window.events.loaded+=history_navigation
+                window.load_url(url+'/changelog')
+                if not history_loaded.wait(20):raise TimeoutError("Release history page did not load")
+                window.events.loaded-=history_navigation
+                history_ui=promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{const rows=document.querySelectorAll('#history-list button');if(rows.length>10){clearInterval(timer);resolve({count:rows.length,current:document.querySelector('#history-list button[aria-pressed=true]').dataset.version,heading:document.querySelector('#history-title').textContent,overflow:document.documentElement.scrollWidth>innerWidth+1});}else if(++tries>200){clearInterval(timer);reject(new Error('Offline release history did not render'));}},50);})")
+                if history_ui['current']!=APP_VERSION or history_ui['overflow']:raise AssertionError(history_ui)
+                report['checks'].append('actual packaged WebView2 renders offline full release history and selects current version')
+                history_loaded.clear();window.events.loaded+=history_navigation
+                window.load_url(url+'/maintenance')
+                if not history_loaded.wait(20):raise TimeoutError("Could not return from release history")
+                window.events.loaded-=history_navigation
+                promise("new Promise((resolve,reject)=>{let tries=0;const timer=setInterval(()=>{const button=document.querySelector('#cloud-sync-save');if(button&&!button.disabled){clearInterval(timer);resolve(true);}else if(++tries>200){clearInterval(timer);reject(new Error('Maintenance did not reload'));}},50);})")
                 stage("mixed collector library upload")
                 other="00000000-0000-4000-8000-000000000002"
                 with session.server.catalog.favorites.connection() as db:

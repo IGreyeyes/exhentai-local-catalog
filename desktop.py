@@ -80,6 +80,8 @@ class DesktopApi:
     def _update_action(self, action):
         try:
             self._local_page()
+            if self._session.server:
+                self._updates.history = self._session.server.release_history
             return action()
         except Exception as error:
             return {"error": str(error)}

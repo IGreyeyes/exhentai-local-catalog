@@ -4,7 +4,7 @@ const {spawn,execFileSync}=require('child_process');
 const {chromium}=require(require.resolve('playwright',{paths:[path.resolve(path.dirname(process.execPath),'..')]}));
 const assert=(condition,message)=>{if(!condition)throw new Error(message);};
 const project=path.resolve(__dirname,'..'),fixture=fs.mkdtempSync(path.join(os.tmpdir(),'excatalog-release-history-'));
-const metadata=JSON.parse(execFileSync('py',['-3.14','-X','utf8','-c','import json;from release_history import bundled_history,upgrade_notes;from client_version import APP_VERSION;notes,versions=upgrade_notes(bundled_history(),"1.1.10","1.1.21","");print(json.dumps({"version":APP_VERSION,"notes":notes,"versions":versions}))'],{cwd:project,encoding:'utf8',windowsHide:true}));
+const metadata=JSON.parse(execFileSync('py',['-3.14','-X','utf8','-c','import json;from release_history import bundled_history,announcement_notes;from client_version import APP_VERSION,RELEASE_NOTES;notes,versions=announcement_notes(APP_VERSION,RELEASE_NOTES,bundled_history());print(json.dumps({"version":APP_VERSION,"notes":notes,"versions":versions}))'],{cwd:project,encoding:'utf8',windowsHide:true}));
 let server,browser,base;
 (async()=>{
   server=spawn('py',['-3.14','-X','utf8','-u',path.join(__dirname,'visual_release_history_server.py'),fixture],{windowsHide:true});
@@ -36,7 +36,7 @@ let server,browser,base;
   for(const route of ['/','/records','/maintenance','/contact']){await page.goto(base+route);assert(await page.locator('a.nav-changelog').isVisible(),'History navigation missing on '+route);}
   const context=await browser.newContext({viewport:{width:1360,height:900}});
   await context.exposeFunction('releaseHistoryFixture',operation=>{
-    const release={available:true,current_version:'1.1.10',latest_version:'1.1.21',notes:metadata.notes,included_versions:metadata.versions};
+    const release={available:true,current_version:'1.1.10',latest_version:metadata.version,notes:metadata.notes,included_versions:metadata.versions};
     if(operation==='info')return {version:'1.1.10',show_notes:false,can_install:true};
     if(operation==='take')return {prompt:true,release};
     return {phase:'completed',release};
@@ -44,11 +44,12 @@ let server,browser,base;
   await context.addInitScript(()=>{const call=operation=>window.releaseHistoryFixture(operation);window.pywebview={api:{save_attachment:()=>Promise.resolve({}),client_info:()=>call('info'),start_client_update_check:()=>call('start'),startup_client_update_status:()=>call('status'),take_startup_update_prompt:()=>call('take')}};addEventListener('load',()=>dispatchEvent(new Event('pywebviewready')));});
   const popup=await context.newPage();popup.on('pageerror',error=>errors.push(error.message));await popup.goto(base+'/');await popup.locator('#client-update-dialog[open]').waitFor();
   const headings=await popup.locator('.client-release-notes h3').allTextContents();
-  assert(headings.length===11&&headings[0].includes('1.1.21')&&headings.at(-1).includes('1.1.11'),'Cross-version popup is incomplete');
-  assert(!(await popup.locator('.client-release-notes').textContent()).includes('## v1.1.10'),'Current version included in update range');
+  const shownVersions=[...new Set(headings.map(h=>(h.match(/v?(\d+\.\d+\.\d+)/)||[])[1]).filter(Boolean))];
+  assert(JSON.stringify(shownVersions)===JSON.stringify([metadata.version,'1.1.25']),'Popup omitted current or merged version');
+  assert(!(await popup.locator('.client-release-notes').textContent()).includes('历史更新概览'),'Popup includes historical overview');
   await popup.locator('#client-update-dialog').screenshot({path:path.join(project,'logs/cross-version-update.png')});
   assert(errors.length===0,'UI errors: '+errors.join('; '));await context.close();await page.close();
-  console.log(JSON.stringify({passed:true,offlineHistory:true,prereleaseFilter:true,safeMarkup:true,crossVersionNotes:11,sidebarAllPages:true,smallViewport:true}));
+  console.log(JSON.stringify({passed:true,offlineHistory:true,prereleaseFilter:true,safeMarkup:true,announcementVersions:2,sidebarAllPages:true,smallViewport:true}));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
   if(browser)await browser.close();
   if(server){const ended=new Promise(resolve=>{if(server.exitCode!==null)resolve();else server.once('exit',resolve);});if(base){const status=await(await fetch(base+'/api/status')).json();await fetch(base+'/api/maintenance/stop',{method:'POST',headers:{'Content-Type':'application/json','X-Catalog-Token':status.action_token},body:'{}'});}else server.kill();await ended;}

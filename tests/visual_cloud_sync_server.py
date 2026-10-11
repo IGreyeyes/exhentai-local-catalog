@@ -15,19 +15,26 @@ def main():
     server=Server(('127.0.0.1',0),Catalog(make_library(root)))
     mock_checked_at=int(time.time())-1
     def transport(endpoint,path,payload=None,token=''):
-        if path=='/health':return {'version':3,'max_upload_batch':50}
+        if path=='/health':return {'version':3,'max_upload_batch':50,'upload_preflight':True,'max_upload_check_batch':500,'public_correction_state':True}
         if path=='/v3/register':return {'version':3,'source_id':'00000000-0000-4000-8000-000000000003','status':'review'}
+        if path.startswith('/v3/upload-state?'):
+            from urllib.parse import parse_qs,urlsplit
+            dataset=parse_qs(urlsplit(path).query).get('dataset_id',[''])[0]
+            return {'version':3,'dataset_id':'0'*32,'reset':dataset!='0'*32,'cursor':81,'until':81,'has_more':False,'corrections':[]}
+        if path=='/v3/upload-check':
+            return {'version':3,'dataset_id':'0'*32,'source_id':'00000000-0000-4000-8000-000000000003','status':'review',
+                'records':[{'gid':r['gid'],'skip':r['gid']<=80,'revision':r['gid'] if r['gid']<=80 else 0} for r in payload['records']]}
         if payload is not None:
             return {'version':3,'accepted':len(payload['records']),'pending':0,'kept':0}
         time.sleep(.2)
         from urllib.parse import parse_qs,urlsplit
         after=int(parse_qs(urlsplit(path).query).get('after',['0'])[0])
-        records=[] if after else [{'revision':1,'gid':99,'favorite_count':120,'rating_count':30,
+        records=[] if after>=81 else [{'revision':81,'gid':99,'favorite_count':120,'rating_count':30,
             'checked_at':mock_checked_at,'source':'e-hentai.org',
             'collector_id':'00000000-0000-4000-8000-000000000002','collector_name':'测试贡献者'}]
         records=[{'gid':r['gid'],'revision':r.pop('revision'),'action':'snapshot','snapshot':r} for r in records]
         return {'format':'excatalog-cloud-sync','version':3,'dataset_id':'0'*32,
-            'cursor':1,'until':1,'head':1,'has_more':False,'records':records}
+            'cursor':81,'until':81,'head':81,'has_more':False,'records':records}
     server.cloud_sync.transport=transport
     queued=int(sys.argv[2]) if len(sys.argv)>2 else 0
     if queued:

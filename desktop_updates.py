@@ -22,7 +22,7 @@ import time
 import zipfile
 
 from client_version import APP_VERSION, PACKAGE_NAME, RELEASE_NOTES, REPOSITORY
-from release_history import ReleaseHistory, upgrade_notes
+from release_history import ReleaseHistory, announcement_notes
 
 UPLOAD_GUIDE_URL = "/maintenance?upload-guide=1#cloud-sync-section"
 
@@ -244,14 +244,7 @@ class ClientUpdater:
     def info(self):
         with self._notes_lock:
             state = self._notes_state()
-            notes = RELEASE_NOTES
-            previous = state.get("acknowledged_version")
-            if previous:
-                try:
-                    if version_tuple(previous) < version_tuple(APP_VERSION):
-                        notes, _ = upgrade_notes(self.history.entries, previous, APP_VERSION, RELEASE_NOTES)
-                except ValueError:
-                    pass
+            notes, _ = announcement_notes(APP_VERSION, RELEASE_NOTES, self.history.entries)
             return {"version": APP_VERSION, "notes": notes,
                     "releases_url": f"https://github.com/{REPOSITORY}/releases",
                     "show_notes": state.get("acknowledged_version") != APP_VERSION,
@@ -301,15 +294,11 @@ class ClientUpdater:
                 raise ValueError("发布信息超过大小限制。")
             self.release = release_info(json.loads(raw))
             if self.release["available"]:
-                try:
-                    self.history.refresh()
-                    self.release["history_message"] = ""
-                except Exception:
-                    self.release["history_message"] = "历史发布信息暂不可用，已显示内置日志和目标版本说明；可在更新日志页面刷新。"
-                self.release["notes"], self.release["included_versions"] = upgrade_notes(
-                    self.history.entries, APP_VERSION, self.release["latest_version"], self.release["notes"])
+                self.release["history_message"] = ""
+                self.release["notes"], self.release["included_versions"] = announcement_notes(
+                    self.release["latest_version"], self.release["notes"], self.history.entries)
             else:
-                self.release["notes"] = RELEASE_NOTES
+                self.release["notes"], self.release["included_versions"] = announcement_notes(APP_VERSION, RELEASE_NOTES, self.history.entries)
             return self.release
         finally:
             self.lock.release()

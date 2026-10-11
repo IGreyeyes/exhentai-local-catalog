@@ -39,6 +39,24 @@ def changes_for(notes, version):
     return changes or scoped
 
 
+def announcement_notes(target, notes, entries=()):
+    """Show the target announcement and its merged versions; history remains in the log."""
+    notes = re.split(r"^##\s+历史更新概览\s*$", notes, maxsplit=1, flags=re.M)[0].strip()
+    matches = list(re.finditer(r"^#{2,6}\s+(v?\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)\b[^\n]*\n", notes, re.M))
+    combined = {item["version"] for item in entries if item.get("combined_in")==target}
+    if not matches:
+        return notes, [target]
+    parts = [notes[:matches[0].start()].strip()]
+    included = []
+    for index, match in enumerate(matches):
+        version = match[1].removeprefix("v")
+        merged_here = "合并于本次" in match[0] or re.search(r"合并(?:于|到)\s*v?"+re.escape(target)+r"\b",match[0])
+        if version == target or version in combined or merged_here:
+            parts.append(notes[match.start():matches[index+1].start() if index+1<len(matches) else len(notes)].strip())
+            included.append(version)
+    return "\n\n".join(part for part in parts if part) or "请查看 GitHub 发布页中的本次更新说明。", included or [target]
+
+
 def bundled_history():
     entries = json.loads((resource_root() / "static" / "release-history.json").read_text(encoding="utf-8"))
     entries = [dict(item) for item in entries]

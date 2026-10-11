@@ -467,6 +467,115 @@ class CloudSyncTests(unittest.TestCase):
             return {"version":3,"max_upload_batch":50}
         return self.transport(endpoint,path,payload,token)
 
+    def preflight_transport(self, endpoint, path, payload=None, token=""):
+        if path=="/health":return {"version":3,"max_upload_batch":50,"upload_preflight":True,
+            "max_upload_check_batch":500,"public_correction_state":True}
+        if path.startswith("/v3/upload-state?"):
+            from urllib.parse import parse_qs,urlsplit
+            query=parse_qs(urlsplit(path).query);dataset=query.get("dataset_id",[""])[0]
+            head=getattr(self,"preflight_head",1);active=getattr(self,"preflight_dataset",DATASET)
+            return {"version":3,"dataset_id":active,"reset":dataset!=active or int(query['after'][0])>head,
+                "cursor":head,"until":head,"has_more":False,"corrections":[]}
+        if path=="/v3/upload-check":
+            self.preflight_requests.append(payload)
+            return {"version":3,"dataset_id":getattr(self,"preflight_dataset",DATASET),"source_id":OTHER,"status":"review",
+                "records":[{"gid":r["gid"],"skip":r["gid"] in self.public_gids,"revision":1 if r["gid"] in self.public_gids else 0} for r in payload["records"]]}
+        return self.transport(endpoint,path,payload,token)
+
+    def test_overlap_15000_skips_8000_and_only_uploads_7000(self):
+        self.seed_upload_queue(15000);self.public_gids=set(range(1,8001));self.preflight_requests=[]
+        self.sync.transport=self.preflight_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):
+            for _ in range(20):
+                self.sync.run_once()
+                if self.sync.status()["phase"]=="waiting":break
+        state=self.sync.status();uploads=[r for r in self.requests if r[1]=="/v3/contribute"]
+        self.assertEqual(state["upload_remaining"],0);self.assertEqual(state["upload_skipped"],8000)
+        self.assertEqual(state["upload_confirmed"],15000);self.assertEqual(state["session_upload_processed"],7000)
+        self.assertEqual(len(uploads),140);self.assertEqual(len(self.preflight_requests),30)
+        self.assertEqual([v["gid"] for r in uploads for v in r[2]["records"]],list(range(8001,15001)))
+        self.sync.run_once();self.assertEqual(len(self.preflight_requests),30)
+
+    def test_skip_cache_restart_manual_recheck_and_correction_invalidation(self):
+        self.seed_upload_queue(3);self.public_gids={1,2,3};self.preflight_requests=[]
+        self.sync.transport=self.preflight_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_skipped"],3)
+        restarted=CloudSync(lambda:self.store,self.gate,transport=self.preflight_transport,start=False)
+        try:
+            restarted.run_once();self.assertEqual(len(self.preflight_requests),1)
+            self.public_gids.remove(2);original=restarted.transport
+            def corrected(endpoint,path,payload=None,token=""):
+                if path.startswith('/v3/upload-state?'):
+                    return {"version":3,"dataset_id":DATASET,"reset":False,"cursor":2,"until":2,"has_more":False,
+                        "corrections":[{"gid":2,"revision":2}]}
+                return original(endpoint,path,payload,token)
+            restarted.transport=corrected
+            with patch.object(restarted.stopped,"wait",return_value=False):restarted.run_once()
+            self.assertEqual(restarted.status()["upload_skipped"],2)
+            self.assertEqual(restarted.status()["session_upload_processed"],1)
+            self.preflight_head=2
+            restarted.transport=original
+            restarted.trigger()
+            with patch.object(restarted.stopped,"wait",return_value=False):restarted.run_once()
+            self.assertEqual(restarted.status()["upload_skipped"],2)
+        finally:restarted.close()
+
+    def test_preflight_dataset_reset_and_expired_confirmations_are_rechecked(self):
+        self.seed_upload_queue(2);self.public_gids={1,2};self.preflight_requests=[]
+        self.sync.transport=self.preflight_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        with self.store.connection() as db:db.execute("UPDATE cloud_upload_skips SET verified_at=?",(int(time.time())-86401,))
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(len(self.preflight_requests),2);self.assertEqual(self.sync.status()["upload_skipped"],2)
+        self.preflight_dataset="1"*32;self.public_gids.clear()
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_skipped"],0);self.assertEqual(self.sync.status()["session_upload_processed"],2)
+        self.assertEqual(self.sync.status()["upload_remaining"],0)
+
+    def test_interleaved_public_records_do_not_repeat_checks_at_upload_batch_boundaries(self):
+        self.seed_upload_queue(1200);self.public_gids=set(range(3,1201,3));self.preflight_requests=[]
+        self.sync.transport=self.preflight_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):
+            for _ in range(4):self.sync.run_once()
+        checked=[r["gid"] for p in self.preflight_requests for r in p["records"]]
+        uploads=[r for r in self.requests if r[1]=="/v3/contribute"]
+        self.assertEqual(len(checked),1200);self.assertEqual(len(set(checked)),1200)
+        self.assertEqual(len(uploads),16);self.assertEqual(self.sync.status()["upload_skipped"],400)
+
+    def test_unavailable_preflight_keeps_queue_and_legacy_service_clears_only_skip_confirmations(self):
+        self.seed_upload_queue(2);self.public_gids={1};self.preflight_requests=[]
+        self.sync.transport=self.preflight_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_skipped"],1)
+        self.sync.capabilities_endpoint=None
+        def offline(endpoint,path,payload=None,token=""):
+            if path=="/health":raise ValueError("测试网络未连接")
+            return self.preflight_transport(endpoint,path,payload,token)
+        self.sync.transport=offline;self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"],"retrying");self.assertEqual(self.sync.status()["upload_skipped"],1)
+        self.sync.transport=self.transport;self.requests.clear()
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        sent=[v["gid"] for r in self.requests if r[1]=="/v3/contribute" for v in r[2]["records"]]
+        self.assertEqual(sent,[1]);self.assertEqual(self.sync.status()["upload_skipped"],0)
+
+    def test_bad_preflight_response_does_not_acknowledge_and_data_change_during_check_stays_queued(self):
+        self.seed_upload_queue(2);self.public_gids={1,2};self.preflight_requests=[]
+        def invalid(endpoint,path,payload=None,token=""):
+            result=self.preflight_transport(endpoint,path,payload,token)
+            if path=="/v3/upload-check":result["records"][1]["gid"]=1
+            return result
+        self.sync.transport=invalid;self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"],"retrying");self.assertIsNone(self.read("SELECT * FROM cloud_upload_ack"))
+        def changing(endpoint,path,payload=None,token=""):
+            result=self.preflight_transport(endpoint,path,payload,token)
+            if path=="/v3/upload-check":self.store.save(1,110,"e-hentai.org",30)
+            return result
+        self.sync.transport=changing
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_remaining"],1)
+        self.assertEqual(self.read("SELECT favorite_count FROM favorites WHERE gid=1")["favorite_count"],110)
+
     def test_fast_upload_batches_confirm_all_records_and_resume_without_duplicates(self):
         self.seed_upload_queue(1200)
         self.sync.transport=self.fast_transport

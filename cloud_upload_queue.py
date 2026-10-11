@@ -4,6 +4,9 @@
 def initialize_upload_queue(db):
     db.execute("CREATE TABLE IF NOT EXISTS cloud_upload_dirty (gid INTEGER PRIMARY KEY)")
     db.execute("CREATE TABLE IF NOT EXISTS cloud_upload_queue (gid INTEGER PRIMARY KEY,payload TEXT NOT NULL)")
+    db.execute("""CREATE TABLE IF NOT EXISTS cloud_upload_skips (
+        gid INTEGER PRIMARY KEY,payload TEXT NOT NULL,dataset_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,verified_at INTEGER NOT NULL)""")
     for table in ("favorites", "rating_counts"):
         for event in ("INSERT", "UPDATE", "DELETE"):
             row = "OLD" if event == "DELETE" else "NEW"

@@ -18,4 +18,4 @@ const assert=require('assert/strict');let server,browser,base;
   await page.locator('section').filter({has:page.locator('#policy-save')}).screenshot({path:path.join(__dirname,'../logs/cloud-upload-policy.png')});
   await page.setViewportSize({width:760,height:900});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   assert.deepEqual(errors,[]);console.log(JSON.stringify({passed:true,quotaGuiSaved:true,reloaded:true,audit:true,smallViewport:true}));
-})().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{if(browser)await browser.close();if(base)await fetch(base+'/__stop');else if(server)server.kill();});
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{if(browser)await browser.close();try{if(base)await fetch(base+'/__stop');else if(server)server.kill();}catch{if(server)server.kill();}});

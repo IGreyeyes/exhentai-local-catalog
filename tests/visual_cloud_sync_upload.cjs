@@ -20,7 +20,7 @@ async function main(){
   await page.waitForFunction(()=>document.querySelector('#cloud-sync-progress').textContent.includes('服务器已确认 230 条'),{},{timeout:30000});
   const state=await (await fetch(baseUrl+'/api/cloud-sync')).json();
   assert(state.upload_total===230&&state.upload_confirmed===230&&state.upload_remaining===0,'Mixed library upload was incomplete');
-  assert(state.session_upload_processed===230,'Mixed library records were omitted or duplicated');
+  assert(state.session_upload_processed===150&&state.upload_skipped===80,'Public duplicates were uploaded or records omitted');
   const scope=await page.locator('label').filter({has:page.locator('#cloud-sync-upload')}).textContent();
   assert(scope.includes('全部成功收藏数'),'Upload label still says self captures only');
   const consent=await page.locator('label').filter({has:page.locator('#cloud-sync-consent')}).textContent();
@@ -34,7 +34,7 @@ async function main(){
   await page.locator('#cloud-sync-now').click();
   await page.waitForFunction(()=>!document.querySelector('#cloud-sync-now').disabled&&document.querySelector('#cloud-sync-message').textContent.includes('同步完成'));
   const repeated=await (await fetch(baseUrl+'/api/cloud-sync')).json();
-  assert(repeated.session_upload_processed===230,'Repeated sync resent confirmed records');
+  assert(repeated.session_upload_processed===150&&repeated.upload_skipped===80,'Repeated sync resent confirmed records');
   assert(errors.length===0,'Script errors: '+errors.join('; '));
   await page.locator('#cloud-sync-name').fill('界面昵称测试');
   await page.waitForTimeout(3200);
@@ -44,7 +44,7 @@ async function main(){
   await page.reload();
   await page.waitForFunction(()=>document.querySelector('#cloud-sync-name').value==='界面昵称测试');
   const named=await (await fetch(baseUrl+'/api/cloud-sync')).json();
-  assert(named.uploader_name==='界面昵称测试'&&named.session_upload_processed===230,'Nickname change was lost or resent confirmed snapshots');
+  assert(named.uploader_name==='界面昵称测试'&&named.session_upload_processed===150,'Nickname change was lost or resent confirmed snapshots');
   await page.locator('#cloud-sync-section').screenshot({path:path.join(project,'logs/uploader-nickname-small.png')});
   console.log(JSON.stringify({passed:true,mixedLibraryRecords:230,submitted:repeated.session_upload_processed,confirmed:repeated.upload_confirmed,pending:repeated.upload_remaining,repeatDidNotResend:true,smallViewport:true}));
 }

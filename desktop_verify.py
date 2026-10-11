@@ -62,8 +62,15 @@ def verify_desktop(report_path, fixture_root=None):
         session = DesktopSession(root)
         cloud_submissions=[]
         cloud_names=[]
+        cloud_public_snapshot=None
         def mock_cloud(endpoint,path,payload=None,token=""):
-            if path=="/health":return {"version":VERSION,"max_upload_batch":50}
+            if path=="/health":return {"version":VERSION,"max_upload_batch":50,"upload_preflight":True,"max_upload_check_batch":500,"public_correction_state":True}
+            if path.startswith('/v3/upload-state?'):
+                dataset=parse_qs(urlsplit(path).query).get('dataset_id',[''])[0]
+                return {"version":VERSION,"dataset_id":"0"*32,"reset":dataset!="0"*32,"cursor":1,"until":1,"has_more":False,"corrections":[]}
+            if path=="/v3/upload-check":
+                return {"version":VERSION,"dataset_id":"0"*32,"source_id":"00000000-0000-4000-8000-000000000002","status":"review",
+                    "records":[{"gid":r["gid"],"skip":r["gid"]==1,"revision":1 if r["gid"]==1 else 0} for r in payload["records"]]}
             if path=="/v3/register":
                 if "uploader_name" in payload:cloud_names.append(payload["uploader_name"])
                 return {"version":VERSION,"source_id":"00000000-0000-4000-8000-000000000002","status":"review"}
@@ -72,7 +79,8 @@ def verify_desktop(report_path, fixture_root=None):
                 return {"version":VERSION,"accepted":0,"pending":len(payload["records"]),"kept":0}
             after=int(parse_qs(urlsplit(path).query).get("after",["0"])[0])
             return {"format":FORMAT,"version":VERSION,"dataset_id":"0"*32,
-                    "cursor":after,"until":after,"head":after,"has_more":False,"records":[]}
+                    "cursor":1,"until":1,"head":1,"has_more":False,
+                    "records":[] if after else [{"gid":1,"revision":1,"action":"snapshot","snapshot":cloud_public_snapshot}]}
         class VerifiedCloudSync(CloudSync):
             def __init__(self,*args,**kwargs):
                 kwargs["transport"]=mock_cloud
@@ -80,6 +88,7 @@ def verify_desktop(report_path, fixture_root=None):
         with patch("app.CloudSync",VerifiedCloudSync):
             url = session.start(lambda message: None)
         session.server.catalog.favorites.save(1, 123, "exhentai.org", 30)
+        with session.server.catalog.favorites.connection() as db:cloud_public_snapshot=session.server.cloud_sync._read_snapshot(db,1)
         api = DesktopApi(session)
         startup_requests=[]
         def mock_release(request,timeout):
@@ -307,9 +316,11 @@ def verify_desktop(report_path, fixture_root=None):
                     raise AssertionError("Packaged upload did not preserve foreign and unknown attribution")
                 scope=window.evaluate_js("document.querySelector('label:has(#cloud-sync-upload)').textContent")
                 if mixed['upload_batch_size']!=50:raise AssertionError("Packaged client did not negotiate fifty-record batches")
+                if mixed['upload_skipped']!=1:raise AssertionError("Packaged client did not skip the public snapshot")
+                report["checks"].append("packaged client checks public versions and skips existing data without resending the full snapshot")
                 report["checks"].append("packaged client negotiates fifty-record uploads and uses the persistent queue index")
                 if '全部成功收藏数' not in scope:raise AssertionError("Packaged sharing scope is stale")
-                report["checks"].append("actual packaged GUI uploads own, foreign and unknown collector records with original attribution and reports all three confirmed")
+                report["checks"].append("actual packaged GUI confirms own, foreign and unknown collector records, skips the public snapshot and uploads differences with original attribution")
                 with session.server.catalog.favorites.connection() as db:
                     db.execute("DELETE FROM favorites WHERE gid IN (2,3)")
                 # Capture only this application-owned test page, never the user's desktop.

@@ -67,9 +67,9 @@ def request_json(endpoint, path, payload=None, token=""):
                                   else "同步服务限流，按服务器给出的时间重试。", delay, batch_limit) from None
         if status == 409 and path.startswith("/v3/changes"):
             raise SyncReset("公共库已更换或恢复，正在重新下载。") from None
-        if status == 401 and path == "/v3/contribute":
+        if status == 401 and path in {"/v3/contribute", "/v3/upload-check"}:
             raise UploadIdentityMissing("上传身份需重新登记，稍后重试。") from None
-        if status == 403 and path in {"/v3/register", "/v3/contribute"}:
+        if status == 403 and path in {"/v3/register", "/v3/contribute", "/v3/upload-check"}:
             raise UploadBlocked("该上传来源已被管理员封禁；公共下载继续可用。") from None
         messages = {401: "上传身份未登记或不匹配，请检查同步身份设置。", 403: "该上传来源已被管理员封禁；公共下载继续可用。", 426: "同步服务需要新版客户端，请更新后重试。", 429: "同步服务限流，稍后自动重试。",
                     400: "同步数据或采集身份不符合服务要求。",
@@ -121,6 +121,9 @@ class CloudSync:
         self.upload_batch_size = 5
         self.capabilities_endpoint = None
         self.upload_retry_until = 0
+        self.preflight_enabled = False
+        self.preflight_needed = {}
+        self.session_preflight_checked = 0
         self._seed_self()
         with self.gate, self.store_provider().connection() as db:
             if self._get(db, "cloud_protocol") not in {"2", str(VERSION)}:
@@ -166,6 +169,7 @@ class CloudSync:
     def status(self):
         config = self._config()
         source_id, source_status = self._identity_status()
+        skipped = self._skip_count()
         with self.lock:
             return {**config, "busy": self.busy, "source_id": source_id, "source_status": source_status, "message": self.message,
                     "last_success": self.last_success, "downloaded": self.downloaded, "uploaded": self.uploaded,
@@ -173,6 +177,8 @@ class CloudSync:
                     "upload_remaining": self.upload_remaining, "session_upload_processed": self.session_upload_processed,
                     "upload_total": self.upload_total, "upload_confirmed": self.upload_confirmed,
                     "upload_batch_size": self.upload_batch_size,
+                    "upload_preflight_enabled": self.preflight_enabled,
+                    "upload_skipped": skipped, "session_preflight_checked": self.session_preflight_checked,
                     "upload_retry_at": int(time.time()+self.upload_retry_until-time.monotonic())
                         if self.upload_retry_until > time.monotonic() else None,
                     "session_download_received": self.session_download_received,
@@ -222,6 +228,7 @@ class CloudSync:
             self.upload_total = self.upload_confirmed = None
             self.next_due = 0
             self.upload_retry_until = 0
+            self.preflight_needed.clear()
             self.wake.set()
         return self.status()
 
@@ -233,6 +240,9 @@ class CloudSync:
                 raise ValueError("同步或维护正在进行，请等待完成。")
             self.next_due = 0
             self.upload_retry_until = 0
+            with self.store_provider().connection() as db:
+                self._clear_skips(db)
+            self.preflight_needed.clear()
             self.phase = "queued"
             self.message = "已安排立即同步，将继续未完成的队列。"
             self.wake.set()
@@ -241,6 +251,8 @@ class CloudSync:
     @staticmethod
     def _clear_identity(db):
         db.execute("DELETE FROM app_settings WHERE key IN ('cloud_upload_token','cloud_upload_owner','cloud_upload_endpoint','cloud_source_id','cloud_source_status','cloud_uploader_name_synced')")
+        db.execute("DELETE FROM cloud_upload_skips")
+        db.execute("DELETE FROM app_settings WHERE key IN ('cloud_preflight_dataset','cloud_preflight_cursor')")
 
     def _identity_status(self):
         with self.gate, self.store_provider().connection() as db:
@@ -252,6 +264,7 @@ class CloudSync:
             if (self._get(db, "cloud_upload_owner") != identity["collector_id"]
                     or self._get(db, "cloud_upload_endpoint") != config["endpoint"]):
                 self._clear_identity(db)
+                self.preflight_needed.clear()
                 db.execute("DELETE FROM cloud_upload_ack")
             token = self._get(db, "cloud_upload_token")
             name_row = db.execute("SELECT value FROM app_settings WHERE key='cloud_uploader_name'").fetchone()
@@ -311,6 +324,135 @@ class CloudSync:
             self.upload_confirmed = self.upload_total - remaining if self.upload_total is not None else None
         return remaining
 
+    def _skip_count(self):
+        with self.gate, self.store_provider().connection() as db:
+            return db.execute("""SELECT COUNT(*) FROM cloud_upload_skips s
+                JOIN cloud_upload_snapshots o ON o.gid=s.gid AND o.payload=s.payload
+                JOIN cloud_upload_ack a ON a.gid=s.gid AND a.payload=s.payload""").fetchone()[0]
+
+    @staticmethod
+    def _clear_skips(db):
+        db.execute("""DELETE FROM cloud_upload_ack WHERE EXISTS(SELECT 1 FROM cloud_upload_skips s
+            WHERE s.gid=cloud_upload_ack.gid AND s.payload=cloud_upload_ack.payload)""")
+        db.execute("DELETE FROM cloud_upload_skips")
+
+    @staticmethod
+    def _invalidate_skip(db, gid, revision):
+        row = db.execute("SELECT payload,revision FROM cloud_upload_skips WHERE gid=?", (gid,)).fetchone()
+        if row and revision > row["revision"]:
+            db.execute("DELETE FROM cloud_upload_ack WHERE gid=? AND payload=?", (gid, row["payload"]))
+            db.execute("DELETE FROM cloud_upload_skips WHERE gid=?", (gid,))
+
+    def _sync_preflight_state(self, config):
+        with self.gate, self.store_provider().connection() as db:
+            self._available()
+            dataset = self._get(db, "cloud_preflight_dataset")
+            cursor = int(self._get(db, "cloud_preflight_cursor", "0"))
+            expired = db.execute("SELECT gid,payload FROM cloud_upload_skips WHERE verified_at<?", (int(time.time())-86400,)).fetchall()
+            db.executemany("DELETE FROM cloud_upload_ack WHERE gid=? AND payload=?", ((r["gid"],r["payload"]) for r in expired))
+            db.execute("DELETE FROM cloud_upload_skips WHERE verified_at<?", (int(time.time())-86400,))
+        until = None
+        for _ in range(50):
+            self._available()
+            params = {"after":cursor}
+            if dataset:params["dataset_id"] = dataset
+            if until is not None:params["until"] = until
+            result = self.transport(config["endpoint"], "/v3/upload-state?"+urlencode(params))
+            keys = {"version","dataset_id","reset","cursor","until","has_more","corrections"}
+            if (not isinstance(result,dict) or set(result)!=keys or type(result["version"]) is not int or result["version"]!=VERSION
+                or not isinstance(result["dataset_id"],str) or not re.fullmatch(r"[0-9a-f]{32}",result["dataset_id"])
+                or type(result["reset"]) is not bool or type(result["has_more"]) is not bool
+                or any(type(result[k]) is not int or not 0<=result[k]<=2**53-1 for k in ("cursor","until"))
+                or result["cursor"]>result["until"] or not isinstance(result["corrections"],list) or len(result["corrections"])>500):
+                raise ValueError("公共版本校验结果不正确，已保留上传队列。")
+            if result["reset"]:
+                if result["has_more"] or result["corrections"] or result["cursor"]!=result["until"]:
+                    raise ValueError("公共库重置确认不正确。")
+            elif (result["dataset_id"]!=dataset or not cursor<=result["cursor"]
+                  or until is not None and result["until"]!=until
+                  or result["has_more"] and result["cursor"]==cursor):
+                raise ValueError("公共版本校验进度不正确。")
+            revision = cursor
+            for item in result["corrections"]:
+                if (not isinstance(item,dict) or set(item)!={"gid","revision"}
+                    or type(item["gid"]) is not int or not 1<=item["gid"]<=2**53-1
+                    or type(item["revision"]) is not int or not revision<item["revision"]<=result["cursor"]):
+                    raise ValueError("公共纠正记录不正确，已保留上传队列。")
+                revision = item["revision"]
+            if result["has_more"] and revision!=result["cursor"]:
+                raise ValueError("公共纠正分页不正确。")
+            if not result["has_more"] and result["cursor"]!=result["until"]:
+                raise ValueError("公共校验尚未完成，已保留队列。")
+            with self.gate, self.store_provider().connection() as db:
+                self._available()
+                if result["reset"]:
+                    if dataset:db.execute("DELETE FROM cloud_upload_ack")
+                    self._clear_skips(db)
+                    self.preflight_needed.clear()
+                else:
+                    for item in result["corrections"]:
+                        self._invalidate_skip(db,item["gid"],item["revision"])
+                        self.preflight_needed.pop(item["gid"],None)
+                dataset,cursor = result["dataset_id"],result["cursor"]
+                self._put(db,"cloud_preflight_dataset",dataset)
+                self._put(db,"cloud_preflight_cursor",cursor)
+            if not result["has_more"]:return True
+            until = result["until"]
+        return False
+
+    def _preflight_check(self, config, rows, token):
+        records=[]
+        for row in rows:
+            item=json.loads(row["payload"])
+            if (not isinstance(item,dict) or set(item)!=FIELDS or type(item["gid"]) is not int or item["gid"]!=row["gid"]
+                or type(item["favorite_count"]) is not int or not 0<=item["favorite_count"]<=MAX_COUNT
+                or item["rating_count"] is not None and (type(item["rating_count"]) is not int or not 0<=item["rating_count"]<=MAX_COUNT)
+                or type(item["checked_at"]) is not int or not 1<=item["checked_at"]<=int(time.time())+300
+                or item["source"] not in {"e-hentai.org","exhentai.org"}):
+                raise ValueError("本地待上传快照不符合要求，已保留队列。")
+            validate_collector(item["collector_id"],item["collector_name"],allow_unknown=True)
+            records.append({"gid":item["gid"],"checked_at":item["checked_at"]})
+        with self.lock:
+            self.phase="checking_upload"
+            self.message=f"正在检查云端差异：本次运行累计检查 {self.session_preflight_checked:,} 条摘要。"
+        result=self.transport(config["endpoint"],"/v3/upload-check",{"version":VERSION,"records":records},token)
+        expected={r["gid"]:r for r in rows}
+        if (not isinstance(result,dict) or set(result)!={"version","dataset_id","source_id","status","records"}
+            or type(result["version"]) is not int or result["version"]!=VERSION
+            or not isinstance(result["dataset_id"],str) or not re.fullmatch(r"[0-9a-f]{32}",result["dataset_id"])
+            or result["source_id"]!=self._identity_status()[0] or result["status"] not in {"trusted","review"}
+            or not isinstance(result["records"],list) or len(result["records"])!=len(rows)):
+            raise ValueError("上传差异检查结果不正确，已保留队列。")
+        seen=set()
+        for item in result["records"]:
+            if (not isinstance(item,dict) or set(item)!={"gid","skip","revision"}
+                or type(item["gid"]) is not int or item["gid"] not in expected or item["gid"] in seen
+                or type(item["skip"]) is not bool or type(item["revision"]) is not int
+                or not 0<=item["revision"]<=2**53-1 or item["skip"] and not item["revision"]):
+                raise ValueError("上传差异检查记录不正确，已保留队列。")
+            seen.add(item["gid"])
+        with self.gate, self.store_provider().connection() as db:
+            self._available()
+            old_dataset=self._get(db,"cloud_preflight_dataset")
+            if old_dataset and old_dataset!=result["dataset_id"]:
+                db.execute("DELETE FROM cloud_upload_ack")
+                self._clear_skips(db)
+                self.preflight_needed.clear()
+                self._put(db,"cloud_preflight_cursor",0)
+            self._put(db,"cloud_preflight_dataset",result["dataset_id"])
+            self._put(db,"cloud_source_status",result["status"])
+            for item in result["records"]:
+                row=expected[item["gid"]]
+                if item["skip"]:
+                    db.execute("INSERT INTO cloud_upload_ack VALUES(?,?) ON CONFLICT(gid) DO UPDATE SET payload=excluded.payload",(row["gid"],row["payload"]))
+                    db.execute("""INSERT INTO cloud_upload_skips VALUES(?,?,?,?,?) ON CONFLICT(gid) DO UPDATE SET
+                        payload=excluded.payload,dataset_id=excluded.dataset_id,revision=excluded.revision,verified_at=excluded.verified_at""",
+                        (row["gid"],row["payload"],result["dataset_id"],item["revision"],int(time.time())))
+                    self.preflight_needed.pop(row["gid"],None)
+                else:self.preflight_needed[row["gid"]]=(row["payload"],time.monotonic()+300)
+        with self.lock:self.session_preflight_checked+=len(rows)
+        self._count_upload_queue()
+
     def _upload_progress(self):
         with self.lock:
             self.phase = "uploading"
@@ -338,22 +480,56 @@ class CloudSync:
             self._count_upload_queue()
             return False
         token = self._upload_identity(config)
-        if not self._count_upload_queue():
+        if not self._count_upload_queue() and not self._skip_count():
             return False
         if self.capabilities_endpoint != config["endpoint"]:
             self.upload_batch_size = 5
+            self.preflight_enabled = False
             try:
                 capabilities = self.transport(config["endpoint"], "/health")
                 size = capabilities.get("max_upload_batch") if isinstance(capabilities, dict) else None
                 if isinstance(capabilities, dict) and capabilities.get("version") == VERSION and type(size) is int and 5 <= size <= 50:
                     self.upload_batch_size = size
+                    self.preflight_enabled = (capabilities.get("upload_preflight") is True
+                        and capabilities.get("public_correction_state") is True
+                        and type(capabilities.get("max_upload_check_batch")) is int
+                        and capabilities.get("max_upload_check_batch") == 500)
                 self.capabilities_endpoint = config["endpoint"]
             except ValueError:
-                pass  # Older services keep the original five-record protocol.
+                if self._skip_count():raise ValueError("暂时无法核对服务能力，免上传确认及本地资料保留，稍后重试。") from None
+        if self.preflight_enabled:
+            if not self._sync_preflight_state(config):return True
+        elif self._skip_count():
+            with self.gate, self.store_provider().connection() as db:self._clear_skips(db)
+            self.preflight_needed.clear()
+        if not self._count_upload_queue():return False
         for _ in range(20):
             self._available()
-            self._upload_progress()
             batch_size = self.upload_batch_size
+            if self.preflight_enabled:
+                with self.gate, self.store_provider().connection() as db:
+                    candidates = db.execute("SELECT gid,payload FROM cloud_upload_queue ORDER BY gid LIMIT 1000").fetchall()
+                if not candidates:
+                    self._refresh_upload_snapshots()
+                    return self._count_upload_queue()>0
+                def already_checked(row):
+                    cached=self.preflight_needed.get(row["gid"])
+                    return bool(cached and cached[0]==row["payload"] and cached[1]>time.monotonic())
+                prefix=[]
+                for row in candidates[:batch_size]:
+                    if not already_checked(row):break
+                    prefix.append(row)
+                if len(prefix)<batch_size and len(candidates)>len(prefix):
+                    unchecked=[r for r in candidates if not already_checked(r)][:500]
+                    try:self._preflight_check(config,unchecked,token)
+                    except UploadIdentityMissing:
+                        with self.gate, self.store_provider().connection() as db:
+                            db.execute("DELETE FROM app_settings WHERE key='cloud_source_id'")
+                        raise
+                    if self.stopped.wait(2.1):return False
+                    continue
+                batch_size=len(prefix)
+            self._upload_progress()
             while True:
                 self._available()
                 with self.gate, self.store_provider().connection() as db:
@@ -384,6 +560,7 @@ class CloudSync:
                 with self.store_provider().connection() as db:
                     db.executemany("INSERT INTO cloud_upload_ack VALUES(?,?) ON CONFLICT(gid) DO UPDATE SET payload=excluded.payload",
                                    ((row["gid"], row["payload"]) for row in rows))
+                    db.executemany("DELETE FROM cloud_upload_skips WHERE gid=?",((row["gid"],) for row in rows))
                     if result.get("source_status") in {"review", "trusted"}:
                         self._put(db, "cloud_source_status", result["source_status"])
             with self.lock:
@@ -393,6 +570,7 @@ class CloudSync:
                 if self.upload_remaining is not None:
                     self.upload_remaining = max(0,self.upload_remaining-len(items))
                     self.upload_confirmed = self.upload_total - self.upload_remaining
+            for row in rows:self.preflight_needed.pop(row["gid"],None)
             self._upload_progress()
             if self.stopped.wait(2.1):
                 return False
@@ -501,6 +679,7 @@ class CloudSync:
                 db.execute("BEGIN IMMEDIATE")
                 for item in page["records"]:
                     changed += self._apply_event(db, item)
+                    if item["action"]=="correction":self._invalidate_skip(db,item["gid"],item["revision"])
                 self._put(db, "cloud_cursor", page["cursor"])
                 self._put(db, "cloud_dataset", page["dataset_id"])
         with self.lock:

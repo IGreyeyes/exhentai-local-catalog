@@ -251,6 +251,8 @@ class FavoriteStore:
                 FROM app_settings WHERE key='collector_name'
             """)
             read_identity(db)
+            from cloud_upload_queue import initialize_upload_queue
+            initialize_upload_queue(db)
             if "selection_json" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
                 db.execute("ALTER TABLE jobs ADD COLUMN selection_json TEXT NOT NULL DEFAULT '{}'")
             if "priority" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:

@@ -4,6 +4,7 @@ import {readFileSync} from "node:fs";
 // 真实的临时内存 SQLite 执行生产 SQL，适配 D1 接口；不访问 Cloudflare 或真实资料库。
 export class D1 {
   constructor() {
+    this.queryCount = 0;
     this.sqlite = new DatabaseSync(":memory:");
     this.sqlite.exec(readFileSync(new URL("../cloudflare/schema.sql", import.meta.url), "utf8"));
   }
@@ -12,9 +13,10 @@ export class D1 {
     return new class {
       values = [];
       bind(...values) { this.values = values; return this; }
-      async first() { return db.sqlite.prepare(sql).get(...this.values) ?? null; }
-      async all() { return {results: db.sqlite.prepare(sql).all(...this.values)}; }
+      async first() { db.queryCount++; return db.sqlite.prepare(sql).get(...this.values) ?? null; }
+      async all() { db.queryCount++; return {results: db.sqlite.prepare(sql).all(...this.values)}; }
       async run() {
+        db.queryCount++;
         let stmt;try{stmt=db.sqlite.prepare(sql);}catch(e){throw new Error(e.message+" SQL "+sql);}
         // D1 metadata may include trigger writes; RETURNING rows describe only the target statement.
         const before = db.sqlite.prepare('SELECT total_changes() AS n').get().n;

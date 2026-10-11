@@ -22,8 +22,9 @@ class ReleaseHistoryTests(unittest.TestCase):
         self.assertIn(APP_VERSION,sections)
         self.assertIn("1.1.11",sections)
         self.assertNotIn("历史更新概览",sections[APP_VERSION])
-        self.assertIn("上传者昵称",sections[APP_VERSION])
-        self.assertIn("跨版本升级汇总",sections["1.1.22"])
+        self.assertIn("批量上传提速",sections[APP_VERSION])
+        self.assertIn("上传者昵称",sections["1.1.23"])
+        self.assertIn("跨版本",sections["1.1.22"])
 
     def test_v22_is_combined_with_v23_without_duplicate_changes(self):
         entries = bundled_history()

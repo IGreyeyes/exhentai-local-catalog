@@ -15,6 +15,7 @@ def main():
     server=Server(('127.0.0.1',0),Catalog(make_library(root)))
     mock_checked_at=int(time.time())-1
     def transport(endpoint,path,payload=None,token=''):
+        if path=='/health':return {'version':3,'max_upload_batch':50}
         if path=='/v3/register':return {'version':3,'source_id':'00000000-0000-4000-8000-000000000003','status':'review'}
         if payload is not None:
             return {'version':3,'accepted':len(payload['records']),'pending':0,'kept':0}

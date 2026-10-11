@@ -63,6 +63,7 @@ def verify_desktop(report_path, fixture_root=None):
         cloud_submissions=[]
         cloud_names=[]
         def mock_cloud(endpoint,path,payload=None,token=""):
+            if path=="/health":return {"version":VERSION,"max_upload_batch":50}
             if path=="/v3/register":
                 if "uploader_name" in payload:cloud_names.append(payload["uploader_name"])
                 return {"version":VERSION,"source_id":"00000000-0000-4000-8000-000000000002","status":"review"}
@@ -305,6 +306,8 @@ def verify_desktop(report_path, fixture_root=None):
                 if not foreign or foreign['collector_id']!=other or foreign['collector_name']!='测试原采集者' or not unknown or unknown['collector_id'] or unknown['collector_name']:
                     raise AssertionError("Packaged upload did not preserve foreign and unknown attribution")
                 scope=window.evaluate_js("document.querySelector('label:has(#cloud-sync-upload)').textContent")
+                if mixed['upload_batch_size']!=50:raise AssertionError("Packaged client did not negotiate fifty-record batches")
+                report["checks"].append("packaged client negotiates fifty-record uploads and uses the persistent queue index")
                 if '全部成功收藏数' not in scope:raise AssertionError("Packaged sharing scope is stale")
                 report["checks"].append("actual packaged GUI uploads own, foreign and unknown collector records with original attribution and reports all three confirmed")
                 with session.server.catalog.favorites.connection() as db:

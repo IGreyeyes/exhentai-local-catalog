@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS upload_controls (
   source_count INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO upload_controls(id) VALUES(1);
+CREATE TABLE IF NOT EXISTS upload_policy (
+  id INTEGER PRIMARY KEY CHECK(id=1),trusted_daily_records INTEGER NOT NULL DEFAULT 5000,
+  ip_daily_records INTEGER NOT NULL DEFAULT 10000,global_daily_records INTEGER NOT NULL DEFAULT 50000
+);
 CREATE TABLE IF NOT EXISTS upload_guard (id INTEGER PRIMARY KEY CHECK(id=1), allowed INTEGER NOT NULL CHECK(allowed=1));
 CREATE TABLE IF NOT EXISTS upload_sources (
   id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, collector_id TEXT NOT NULL,

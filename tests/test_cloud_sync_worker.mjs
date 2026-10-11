@@ -59,12 +59,65 @@ test('默认暂停；公开读取、管理认证、旧客户端提示升级',asy
   const {env,call,manage}=fixture(t);const h=await call('/health');assert.equal(h.result.version,3);assert.equal(h.result.upload_scope,'library');assert.equal(h.result.preserves_original_collector,true);assert.equal(h.result.upload_requires_contribution_code,false);assert.equal(h.result.upload_enabled,false);
   assert.equal(h.result.upload_confirmation,'returning_rows');
   assert.equal(h.result.trusted_pending_bulk_approval,true);
+  assert.equal(h.result.max_upload_batch,50);assert.equal(h.result.upload_strategy,'set_based');
   assert.equal((await call('/v3/register',{method:'POST',token:TOKEN,data:{collector_id:OWNER,collector_name:''}})).status,503);
   assert.equal((await call('/v3/changes')).status,200);assert.equal((await call('/v3/admin/status')).status,401);
   assert.equal((await call('/v1/changes')).status,426);assert.equal((await call('/v1/contribute',{method:'POST'})).status,426);
   assert.equal((await call('/v2/changes')).status,426);assert.equal((await call('/v2/contribute',{method:'POST'})).status,426);
   assert.equal((await manage('status')).result.pending_count,0);delete env.ADMIN_SECRET;
   assert.equal((await manage('controls',{upload_enabled:true})).status,503);assert.equal((await call('/v3/changes')).status,200);
+});
+test('50 条混合结果计数准确、少于免费计划查询上限，重试不重复写历史',async t=>{
+  const {env,trusted,upload,changes,manage}=fixture(t);await trusted();
+  await upload(Array.from({length:10},(_,i)=>item(i+1)));
+  const records=Array.from({length:50},(_,i)=>({...item(i+1,i>=40?2000000:100,now-100,i%2?null:20),
+    ...(i%3===0?{collector_id:'',collector_name:''}:i%3===1?{collector_id:OTHER,collector_name:'测试原作者'}:{})}));
+  env.DB.queryCount=0;const r=await upload(records);
+  assert.equal(r.status,200,JSON.stringify(r.result));
+  assert.deepEqual([r.result.accepted,r.result.pending,r.result.kept],[30,10,10]);
+  assert.ok(env.DB.queryCount<50,'Exceeded the free request query limit: '+env.DB.queryCount);
+  const before=env.DB.sqlite.prepare('SELECT count(*) n FROM cloud_history').get().n;
+  const repeated=await upload(records);assert.deepEqual([repeated.result.accepted,repeated.result.pending,repeated.result.kept],[0,0,50]);
+  assert.equal(env.DB.sqlite.prepare('SELECT count(*) n FROM cloud_history').get().n,before);
+  assert.equal((await manage('status')).result.pending_count,10);
+  const snapshots=(await changes()).result.records.map(e=>e.snapshot);
+  assert.equal(snapshots.find(r=>r.gid===13).collector_id,'');
+  assert.equal(snapshots.find(r=>r.gid===14).collector_id,OTHER);
+  assert.equal(snapshots.find(r=>r.gid===12).rating_count,null);
+});
+test('每日额度持久配置、鉴权与审计，不重置已用量，新来源仍限 500',async t=>{
+  const {env,call,manage,trusted,upload,register}=fixture(t);const s=await trusted();
+  await upload([item()]);
+  const used=env.DB.sqlite.prepare('SELECT used FROM upload_limits WHERE key=?').get('upload:source:day:'+s.source_id).used;
+  const policy={trusted_daily_records:20000,ip_daily_records:30000,global_daily_records:100000};
+  assert.equal((await call('/v3/admin/policy',{method:'POST',data:policy})).status,401);
+  for(const v of [{...policy,trusted_daily_records:499},{...policy,ip_daily_records:1.5},{...policy,extra:1}])assert.equal((await manage('policy',v)).status,400);
+  assert.equal((await manage('policy',policy)).status,200);
+  const m=(await manage('status')).result;for(const key of Object.keys(policy))assert.equal(m.caps[key],policy[key]);
+  assert.equal(env.DB.sqlite.prepare('SELECT used FROM upload_limits WHERE key=?').get('upload:source:day:'+s.source_id).used,used);
+  assert.ok(m.actions.some(a=>a.action==='upload_policy'));
+  env.DB.sqlite.prepare('UPDATE upload_limits SET used=5000 WHERE key=?').run('upload:source:day:'+s.source_id);
+  assert.equal((await upload([item(2)])).status,200);
+  const review=await register(TOKEN2,OTHER);
+  env.DB.sqlite.prepare('INSERT INTO upload_limits VALUES(?,?,?)').run('upload:source:day:'+review.source_id,Math.floor(now/86400)*86400,499);
+  const denied=await upload([item(3),item(4)],TOKEN2);assert.equal(denied.status,429);
+  assert.equal(denied.headers.get('X-Upload-Limit-Scope'),'day');assert.equal(denied.headers.get('X-Upload-Remaining'),'1');
+  assert.ok(Number(denied.headers.get('Retry-After'))>0&&Number(denied.headers.get('Retry-After'))<=86400);
+  assert.equal((await upload([item(3)],TOKEN2)).status,200);
+  env.DB.failBatch=true;
+  assert.equal((await manage('policy',{...policy,trusted_daily_records:30000})).status,503);
+  assert.equal((await manage('status')).result.caps.trusted_daily_records,20000);
+});
+test('已有 v3 服务自动补建额度表，保留开关、来源和数据',async t=>{
+  const {env,trusted,upload,manage,call}=fixture(t);await trusted();await upload([item()]);
+  env.DB.sqlite.exec('DROP TABLE upload_policy');
+  // A newly deployed Worker receives a fresh binding object.
+  const replacement={DB:Object.create(env.DB),ADMIN_SECRET:ADMIN};
+  const r=await worker.fetch(new Request('https://sync.example.invalid/health'),replacement);
+  const health=await r.json();assert.equal(r.status,200);assert.equal(health.max_upload_batch,50);
+  assert.ok(replacement.DB.sqlite.prepare("SELECT name FROM sqlite_master WHERE name='upload_policy'").get());
+  assert.equal(health.upload_enabled,true);
+  assert.equal(env.DB.sqlite.prepare('SELECT count(*) n FROM cloud_public').get().n,1);
 });
 test('自动身份绑定凭证；相同 UUID 的新凭证不会继承信任',async t=>{
   const {env,register,trusted,call}=fixture(t);const first=await trusted();const second=await register(TOKEN2);
@@ -267,7 +320,7 @@ test('字段白名单、数字、时间、同批重复和身份严格检查',asy
   const {trusted,upload,call,changes}=fixture(t);await trusted();
   for(const r of [{...item(),cookie:'test-only-placeholder'},{...item(),favorite_count:true},{...item(),rating_count:-1},
     {...item(),checked_at:now+1000},{...item(),collector_id:'invalid'}, {...item(),collector_id:'',collector_name:'无 ID 的昵称'}, {...item(),collector_name:'\n'}, {...item(),source:'example.invalid'}])assert.equal((await upload([r])).status,400);
-  assert.equal((await upload([item(),item()])).status,400);assert.equal((await upload(Array.from({length:6},(_,i)=>item(i+1)))).status,400);
+  assert.equal((await upload([item(),item()])).status,400);assert.equal((await upload(Array.from({length:51},(_,i)=>item(i+1)))).status,400);
   assert.equal((await upload([item()],TOKEN2)).status,401);assert.equal((await changes()).result.records.length,0);
   const r=await call('/v3/contribute',{method:'POST',token:TOKEN,data:{version:3,records:[item()]},headers:{'Content-Length':'200000'}});assert.equal(r.status,413);
 });

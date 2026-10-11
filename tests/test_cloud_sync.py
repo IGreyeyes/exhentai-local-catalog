@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 
-from cloud_sync import CloudSync, DEFAULT_ENDPOINT, SyncReset, UploadBlocked, UploadIdentityMissing, encode_snapshot, request_json, validate_endpoint, NoRedirect
+from cloud_sync import CloudSync, DEFAULT_ENDPOINT, SyncReset, SyncRateLimited, UploadBlocked, UploadIdentityMissing, encode_snapshot, request_json, validate_endpoint, NoRedirect
 from favorites import FavoriteStore
 
 CODE = "exc_" + "test_only_placeholder_" + "0"*21
@@ -32,6 +32,8 @@ class CloudSyncTests(unittest.TestCase):
 
     def transport(self, endpoint, path, payload=None, token=""):
         self.requests.append((endpoint,path,payload,token))
+        if path == "/health":
+            return {"version":3,"max_upload_batch":5}
         if path == "/v3/register":
             return {"version":3,"source_id":OTHER,"status":"review"}
         if payload is not None:
@@ -459,6 +461,117 @@ class CloudSyncTests(unittest.TestCase):
             for gid in range(1,count+1):
                 self.store._save(db,gid,100,"e-hentai.org",20)
         self.sync.configure(self.config(upload_enabled=True,consent=True))
+
+    def fast_transport(self, endpoint, path, payload=None, token=""):
+        if path=="/health":
+            return {"version":3,"max_upload_batch":50}
+        return self.transport(endpoint,path,payload,token)
+
+    def test_fast_upload_batches_confirm_all_records_and_resume_without_duplicates(self):
+        self.seed_upload_queue(1200)
+        self.sync.transport=self.fast_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):
+            self.sync.run_once()
+            self.assertEqual(self.sync.status()["upload_confirmed"],1000)
+            self.assertEqual(self.sync.status()["upload_remaining"],200)
+            self.sync.run_once()
+        uploads=[r for r in self.requests if r[1]=="/v3/contribute"]
+        self.assertEqual(len(uploads),24)
+        self.assertTrue(all(len(r[2]["records"])==50 for r in uploads))
+        self.assertEqual([v["gid"] for r in uploads for v in r[2]["records"]],list(range(1,1201)))
+        self.assertEqual(self.sync.status()["upload_remaining"],0)
+        self.assertEqual(self.sync.status()["phase"],"waiting")
+
+    def test_changed_rows_only_and_stale_ack_cannot_remove_newer_queue_payload(self):
+        self.seed_upload_queue(1000)
+        self.sync.transport=self.fast_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        old=self.read("SELECT payload FROM cloud_upload_ack WHERE gid=1")["payload"]
+        with patch("cloud_sync.encode_snapshot", wraps=encode_snapshot) as encode:
+            self.sync._refresh_upload_snapshots()
+            self.assertEqual(encode.call_count,0)
+            self.store.save(1,110,"e-hentai.org",30)
+            self.sync._refresh_upload_snapshots()
+            self.assertEqual(encode.call_count,1)
+        with self.store.connection() as db:
+            db.execute("UPDATE cloud_upload_ack SET payload=? WHERE gid=1",(old,))
+        queued=self.read("SELECT payload FROM cloud_upload_queue WHERE gid=1")
+        self.assertEqual(json.loads(queued["payload"])["favorite_count"],110)
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_remaining"],0)
+
+    def test_daily_limit_wait_keeps_downloading_and_partial_quota_uses_smaller_batch(self):
+        self.seed_upload_queue(70)
+        budget=55
+        def limited(endpoint,path,payload=None,token=""):
+            nonlocal budget
+            if path=="/health":return {"version":3,"max_upload_batch":50}
+            if path=="/v3/contribute":
+                if len(payload["records"])>budget:
+                    raise SyncRateLimited("测试日额度",7200,budget or None)
+                budget-=len(payload["records"])
+            return self.transport(endpoint,path,payload,token)
+        self.sync.transport=limited
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_confirmed"],55)
+        self.assertEqual(self.sync.status()["upload_remaining"],15)
+        self.assertIsNotNone(self.sync.status()["upload_retry_at"])
+        self.assertLessEqual(self.sync.next_due-time.monotonic(),900)
+        self.requests.clear()
+        self.responses=[self.page([self.item(99)])]
+        self.sync.run_once()
+        self.assertEqual([r[1].split('?')[0] for r in self.requests],["/v3/changes"])
+        self.assertIsNotNone(self.read("SELECT gid FROM favorites WHERE gid=99"))
+        budget=50
+        self.sync.trigger()
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_remaining"],0)
+
+    def test_http_rate_limit_uses_safe_headers_and_returns_remaining_capacity(self):
+        from io import BytesIO
+        failure=HTTPError("https://sync.example.invalid",429,"test",
+            {"Retry-After":"3600","X-Upload-Limit-Scope":"day","X-Upload-Remaining":"7"},BytesIO(CODE.encode()))
+        with patch("cloud_sync.build_opener") as opener:
+            opener.return_value.open.side_effect=failure
+            with self.assertRaises(SyncRateLimited) as raised:
+                request_json(DEFAULT_ENDPOINT,"/v3/contribute",{},CODE)
+        self.assertEqual(raised.exception.retry_after,3600)
+        self.assertEqual(raised.exception.batch_limit,7)
+        self.assertNotIn(CODE,str(raised.exception))
+
+    def test_legacy_library_migration_preserves_confirmations_and_indexes_new_changes(self):
+        import sqlite3
+        from contextlib import closing
+        legacy_path=Path(self.temp.name)/"legacy.sqlite3"
+        snapshot={k:v for k,v in self.item().items() if k!="revision"}
+        payload=encode_snapshot(snapshot)
+        with closing(sqlite3.connect(legacy_path)) as db:
+            db.executescript("""CREATE TABLE favorites(gid INTEGER PRIMARY KEY,favorite_count INTEGER,
+                checked_at INTEGER,source TEXT,collector_id TEXT,collector_name TEXT);
+                CREATE TABLE cloud_upload_snapshots(gid INTEGER PRIMARY KEY,payload TEXT NOT NULL);
+                CREATE TABLE cloud_upload_ack(gid INTEGER PRIMARY KEY,payload TEXT NOT NULL);
+                CREATE TABLE app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                INSERT INTO app_settings VALUES('cloud_protocol','3');""")
+            db.execute("INSERT INTO favorites VALUES(?,?,?,?,?,?)",tuple(snapshot[k] for k in
+                ("gid","favorite_count","checked_at","source","collector_id","collector_name")))
+            for table in ("cloud_upload_snapshots","cloud_upload_ack"):
+                db.execute(f"INSERT INTO {table} VALUES(1,?)",(payload,))
+            db.execute("INSERT INTO cloud_upload_snapshots VALUES(2,?)",(encode_snapshot({**snapshot,"gid":2}),))
+            db.commit()
+        store=FavoriteStore(legacy_path)
+        sync=CloudSync(lambda:store,self.gate,transport=self.transport,start=False)
+        try:
+            # The matching rating row is absent, so seed the legacy matching row before refresh.
+            with store.connection() as db:
+                db.execute("INSERT INTO rating_counts VALUES(1,?,?,?)",(snapshot["rating_count"],snapshot["checked_at"],snapshot["source"]))
+            sync._refresh_upload_snapshots()
+            self.assertEqual(sync._count_upload_queue(),0)
+            with store.connection() as db:
+                self.assertEqual(db.execute("SELECT payload FROM cloud_upload_ack").fetchone()[0],payload)
+                db.execute("UPDATE favorites SET favorite_count=110 WHERE gid=1")
+            sync._refresh_upload_snapshots()
+            self.assertEqual(sync._count_upload_queue(),1)
+        finally:sync.close()
 
     def test_exact_full_upload_round_finishes_without_empty_continuation(self):
         self.seed_upload_queue(100)

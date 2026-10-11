@@ -56,7 +56,15 @@ def request_json(endpoint, path, payload=None, token=""):
         return json.loads(raw.decode("utf-8"))
     except HTTPError as error:
         status = error.code
+        retry_after = error.headers.get("Retry-After", "")
+        quota_scope = error.headers.get("X-Upload-Limit-Scope", "")
+        remaining = error.headers.get("X-Upload-Remaining", "")
         error.close()
+        if status == 429:
+            delay = min(86400, max(1, int(retry_after))) if retry_after.isdecimal() else 300
+            batch_limit = int(remaining) if remaining.isdecimal() and 0 < int(remaining) < 50 and quota_scope == "day" else None
+            raise SyncRateLimited("今日上传额度已用完，等待额度重置。" if quota_scope == "day"
+                                  else "同步服务限流，按服务器给出的时间重试。", delay, batch_limit) from None
         if status == 409 and path.startswith("/v3/changes"):
             raise SyncReset("公共库已更换或恢复，正在重新下载。") from None
         if status == 401 and path == "/v3/contribute":
@@ -88,6 +96,12 @@ class UploadBlocked(ValueError):
     pass
 
 
+class SyncRateLimited(ValueError):
+    def __init__(self, message, retry_after=300, batch_limit=None):
+        super().__init__(message)
+        self.retry_after, self.batch_limit = retry_after, batch_limit
+
+
 class CloudSync:
     def __init__(self, store_provider, gate, maintenance_busy=lambda: False, transport=request_json, start=True):
         self.store_provider, self.gate, self.maintenance_busy = store_provider, gate, maintenance_busy
@@ -104,6 +118,9 @@ class CloudSync:
         self.upload_total = self.upload_confirmed = None
         self.session_upload_processed = self.session_download_received = 0
         self.next_due = 0
+        self.upload_batch_size = 5
+        self.capabilities_endpoint = None
+        self.upload_retry_until = 0
         self._seed_self()
         with self.gate, self.store_provider().connection() as db:
             if self._get(db, "cloud_protocol") not in {"2", str(VERSION)}:
@@ -155,6 +172,9 @@ class CloudSync:
                     "pending": self.pending, "interval_minutes": 15, "phase": self.phase,
                     "upload_remaining": self.upload_remaining, "session_upload_processed": self.session_upload_processed,
                     "upload_total": self.upload_total, "upload_confirmed": self.upload_confirmed,
+                    "upload_batch_size": self.upload_batch_size,
+                    "upload_retry_at": int(time.time()+self.upload_retry_until-time.monotonic())
+                        if self.upload_retry_until > time.monotonic() else None,
                     "session_download_received": self.session_download_received,
                     "next_sync_at": int(time.time()+max(0,self.next_due-time.monotonic()))
                         if config["enabled"] and not self.busy and self.next_due else None}
@@ -201,6 +221,7 @@ class CloudSync:
             self.upload_remaining = None
             self.upload_total = self.upload_confirmed = None
             self.next_due = 0
+            self.upload_retry_until = 0
             self.wake.set()
         return self.status()
 
@@ -211,6 +232,7 @@ class CloudSync:
             if self.busy or self.maintenance_busy():
                 raise ValueError("同步或维护正在进行，请等待完成。")
             self.next_due = 0
+            self.upload_retry_until = 0
             self.phase = "queued"
             self.message = "已安排立即同步，将继续未完成的队列。"
             self.wake.set()
@@ -260,28 +282,30 @@ class CloudSync:
             raise ValueError("正在停止服务或维护资料库，同步已暂停。")
 
     def _refresh_upload_snapshots(self):
-        """Build the outbox from current library records without changing attribution."""
+        """Refresh changed records only; triggers retain changes made during network requests."""
         with self.gate:
             self._available()
             with self.store_provider().connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 rows = db.execute("""SELECT f.gid,f.favorite_count,f.checked_at,f.source,f.collector_id,f.collector_name,
                     CASE WHEN r.checked_at=f.checked_at AND r.source=f.source THEN r.rating_count END AS rating_count
-                    FROM favorites f LEFT JOIN rating_counts r ON r.gid=f.gid""").fetchall()
+                    FROM cloud_upload_dirty d JOIN favorites f ON f.gid=d.gid
+                    LEFT JOIN rating_counts r ON r.gid=f.gid""").fetchall()
                 db.executemany("""INSERT INTO cloud_upload_snapshots VALUES(?,?) ON CONFLICT(gid) DO UPDATE SET
                     payload=excluded.payload WHERE cloud_upload_snapshots.payload IS NOT excluded.payload""",
                     ((row["gid"], encode_snapshot(dict(row))) for row in rows))
-                db.execute("DELETE FROM cloud_upload_snapshots WHERE gid NOT IN (SELECT gid FROM favorites)")
+                db.execute("""DELETE FROM cloud_upload_snapshots WHERE gid IN (SELECT gid FROM cloud_upload_dirty)
+                    AND NOT EXISTS(SELECT 1 FROM favorites WHERE favorites.gid=cloud_upload_snapshots.gid)""")
+                db.execute("DELETE FROM cloud_upload_dirty")
+                total = db.execute("SELECT COUNT(*) FROM favorites").fetchone()[0]
         with self.lock:
-            self.upload_total = len(rows)
+            self.upload_total = total
 
     def _count_upload_queue(self):
         with self.gate:
             self._available()
             with self.store_provider().connection() as db:
-                remaining = db.execute("""SELECT COUNT(*) FROM cloud_upload_snapshots o
-                    LEFT JOIN cloud_upload_ack a ON a.gid=o.gid
-                    WHERE o.payload IS NOT a.payload""").fetchone()[0]
+                remaining = db.execute("SELECT COUNT(*) FROM cloud_upload_queue").fetchone()[0]
         with self.lock:
             self.upload_remaining = remaining
             self.upload_confirmed = self.upload_total - remaining if self.upload_total is not None else None
@@ -304,6 +328,9 @@ class CloudSync:
                 self.upload_remaining = None
                 self.upload_total = self.upload_confirmed = None
             return False
+        if self.upload_retry_until > time.monotonic():
+            raise SyncRateLimited("上传仍在等待服务器额度重置或解除限流。",
+                                  max(1,int(self.upload_retry_until-time.monotonic())))
         self._refresh_upload_snapshots()
         if not self.upload_total:
             if self._identity_status()[0]:
@@ -313,23 +340,41 @@ class CloudSync:
         token = self._upload_identity(config)
         if not self._count_upload_queue():
             return False
+        if self.capabilities_endpoint != config["endpoint"]:
+            self.upload_batch_size = 5
+            try:
+                capabilities = self.transport(config["endpoint"], "/health")
+                size = capabilities.get("max_upload_batch") if isinstance(capabilities, dict) else None
+                if isinstance(capabilities, dict) and capabilities.get("version") == VERSION and type(size) is int and 5 <= size <= 50:
+                    self.upload_batch_size = size
+                self.capabilities_endpoint = config["endpoint"]
+            except ValueError:
+                pass  # Older services keep the original five-record protocol.
         for _ in range(20):
             self._available()
             self._upload_progress()
-            with self.gate, self.store_provider().connection() as db:
-                rows = db.execute("""SELECT o.gid,o.payload FROM cloud_upload_snapshots o
-                    LEFT JOIN cloud_upload_ack a ON a.gid=o.gid
-                    WHERE o.payload IS NOT a.payload ORDER BY o.gid LIMIT 5""").fetchall()
-            if not rows:
-                self._refresh_upload_snapshots()
-                return self._count_upload_queue() > 0
-            items = [json.loads(row["payload"]) for row in rows]
-            try:
-                result = self.transport(config["endpoint"], "/v3/contribute", {"version": VERSION, "records": items}, token)
-            except UploadIdentityMissing:
+            batch_size = self.upload_batch_size
+            while True:
+                self._available()
                 with self.gate, self.store_provider().connection() as db:
-                    db.execute("DELETE FROM app_settings WHERE key='cloud_source_id'")
-                raise
+                    rows = db.execute("SELECT gid,payload FROM cloud_upload_queue ORDER BY gid LIMIT ?",
+                                      (batch_size,)).fetchall()
+                if not rows:
+                    self._refresh_upload_snapshots()
+                    return self._count_upload_queue() > 0
+                items = [json.loads(row["payload"]) for row in rows]
+                try:
+                    result = self.transport(config["endpoint"], "/v3/contribute", {"version": VERSION, "records": items}, token)
+                    break
+                except SyncRateLimited as error:
+                    if error.batch_limit is not None and 0 < error.batch_limit < len(items):
+                        batch_size = error.batch_limit
+                        continue
+                    raise
+                except UploadIdentityMissing:
+                    with self.gate, self.store_provider().connection() as db:
+                        db.execute("DELETE FROM app_settings WHERE key='cloud_source_id'")
+                    raise
             if (not isinstance(result, dict) or result.get("version") != VERSION
                     or any(type(result.get(key)) is not int or not 0 <= result[key] <= len(items) for key in ("accepted", "pending", "kept"))
                     or sum(result[key] for key in ("accepted", "pending", "kept")) != len(items)):
@@ -518,6 +563,7 @@ class CloudSync:
         try:
             # 上传错误不阻止公开数据下载。
             upload_error = ""
+            upload_delay = 300
             try:
                 upload_more = self._upload(config)
             except ValueError as error:
@@ -525,18 +571,34 @@ class CloudSync:
                     with self.gate, self.store_provider().connection() as db:
                         self._put(db, "cloud_source_status", "blocked")
                 upload_error, upload_more = str(error), False
-            download_more = self._download(config) if config["download_enabled"] else False
+                if isinstance(error, SyncRateLimited):
+                    upload_delay = error.retry_after
+                    self.upload_retry_until = time.monotonic()+upload_delay
+            download_delay = None
+            download_error = ""
+            try:
+                download_more = self._download(config) if config["download_enabled"] else False
+            except SyncRateLimited as error:
+                download_more = False
+                download_delay = error.retry_after
+                download_error = str(error)
             with self.lock:
-                if config["download_enabled"] or not upload_error:
+                if (config["download_enabled"] and not download_error) or (config["upload_enabled"] and not upload_error):
                     self.last_success = int(time.time())
                 summary = f"本轮本地新增或更新 {self.downloaded:,} 条，公开接受上传 {self.uploaded:,} 条，待审核 {self.pending:,} 条。"
-                if upload_error:
+                if upload_error or download_error:
                     self.phase = "retrying"
-                    self.message = "上传未完成：" + upload_error + " " + summary
+                    self.message = (("上传未完成：" + upload_error + " ") if upload_error else "")
+                    self.message += (("公共下载限流：" + download_error + " ") if download_error else "") + summary
                     if download_more:
                         self.message += " 公共数据仍有后续分页。"
-                    self.message += " 5 分钟后重试。"
-                    delay = 300
+                    delay = max(upload_delay if upload_error else 0, download_delay or 0)
+                    if upload_error:
+                        self.message += f" {upload_delay} 秒后重试上传；公共下载继续独立检查。"
+                    if download_error:
+                        self.message += f" {download_delay} 秒后重试公共下载。"
+                    if config["download_enabled"] and not download_delay:
+                        delay = min(delay, 900)
                 elif upload_more or download_more:
                     self.phase = "continuing"
                     self.message = "分批同步进行中：" + summary

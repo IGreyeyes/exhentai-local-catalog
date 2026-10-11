@@ -469,7 +469,8 @@ class CloudSyncTests(unittest.TestCase):
 
     def preflight_transport(self, endpoint, path, payload=None, token=""):
         if path=="/health":return {"version":3,"max_upload_batch":50,"upload_preflight":True,
-            "max_upload_check_batch":500,"public_correction_state":True}
+            "max_upload_check_batch":500,"public_correction_state":True,
+            "upload_min_interval_days":getattr(self,"interval_days",14)}
         if path.startswith("/v3/upload-state?"):
             from urllib.parse import parse_qs,urlsplit
             query=parse_qs(urlsplit(path).query);dataset=query.get("dataset_id",[""])[0]
@@ -542,6 +543,64 @@ class CloudSyncTests(unittest.TestCase):
         uploads=[r for r in self.requests if r[1]=="/v3/contribute"]
         self.assertEqual(len(checked),1200);self.assertEqual(len(set(checked)),1200)
         self.assertEqual(len(uploads),16);self.assertEqual(self.sync.status()["upload_skipped"],400)
+
+    def test_changed_interval_rechecks_skip_cache_but_keeps_actual_upload_confirmations(self):
+        self.seed_upload_queue(3);self.public_gids={1,2};self.preflight_requests=[]
+        self.sync.transport=self.preflight_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_min_interval_days"],14)
+        self.assertEqual(self.sync.status()["upload_skipped"],2)
+        self.assertEqual(self.sync.status()["session_upload_processed"],1)
+        self.interval_days=0;self.public_gids={1}
+        self.sync.capabilities_refresh_at=0
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_min_interval_days"],0)
+        self.assertEqual(self.sync.status()["upload_skipped"],1)
+        self.assertEqual(self.sync.status()["session_upload_processed"],2)
+        uploads=[v["gid"] for r in self.requests if r[1]=="/v3/contribute" for v in r[2]["records"]]
+        self.assertEqual(uploads,[3,2])
+        self.assertEqual([r["gid"] for r in self.preflight_requests[-1]["records"]],[1,2])
+        restarted=CloudSync(lambda:self.store,self.gate,transport=self.preflight_transport,start=False)
+        try:
+            restarted.run_once()
+            self.assertEqual(restarted.status()["upload_min_interval_days"],0)
+            self.assertEqual(len(self.preflight_requests),2)
+            self.interval_days=7;restarted.trigger()
+            with patch.object(restarted.stopped,"wait",return_value=False):restarted.run_once()
+            self.assertEqual(restarted.status()["upload_min_interval_days"],7)
+            self.assertEqual(len(self.preflight_requests),3)
+            self.assertEqual(restarted.status()["session_upload_processed"],0)
+        finally:restarted.close()
+
+    def test_submit_time_skip_is_rechecked_after_interval_change_without_resending_other_records(self):
+        self.seed_upload_queue(3);self.public_gids=set();self.preflight_requests=[]
+        def raced(endpoint,path,payload=None,token=""):
+            if path=="/v3/contribute":
+                self.requests.append((endpoint,path,payload,token))
+                return {"version":3,"accepted":2,"pending":0,"kept":1,"upload_skips":[{"gid":1,"revision":1}],
+                    "dataset_id":DATASET,"upload_min_interval_days":14}
+            return self.preflight_transport(endpoint,path,payload,token)
+        self.sync.transport=raced
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["upload_skipped"],1)
+        self.assertEqual(self.sync.status()["upload_confirmed"],3)
+        self.interval_days=0;self.sync.capabilities_refresh_at=0;self.sync.transport=self.preflight_transport
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        uploads=[[r["gid"] for r in request[2]["records"]] for request in self.requests if request[1]=="/v3/contribute"]
+        self.assertEqual(uploads,[[1,2,3],[1]])
+        self.assertEqual(self.sync.status()["upload_skipped"],0)
+
+    def test_invalid_submit_time_skip_keeps_queue_without_acknowledging(self):
+        self.seed_upload_queue(2);self.public_gids=set();self.preflight_requests=[]
+        def invalid(endpoint,path,payload=None,token=""):
+            if path=="/v3/contribute":return {"version":3,"accepted":1,"pending":0,"kept":1,
+                "upload_skips":[{"gid":3,"revision":1}],"dataset_id":DATASET,"upload_min_interval_days":14}
+            return self.preflight_transport(endpoint,path,payload,token)
+        self.sync.transport=invalid
+        with patch.object(self.sync.stopped,"wait",return_value=False):self.sync.run_once()
+        self.assertEqual(self.sync.status()["phase"],"retrying")
+        self.assertEqual(self.sync.status()["upload_remaining"],2)
+        self.assertIsNone(self.read("SELECT * FROM cloud_upload_ack"))
 
     def test_unavailable_preflight_keeps_queue_and_legacy_service_clears_only_skip_confirmations(self):
         self.seed_upload_queue(2);self.public_gids={1};self.preflight_requests=[]

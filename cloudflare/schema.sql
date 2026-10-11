@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS upload_controls (
 INSERT OR IGNORE INTO upload_controls(id) VALUES(1);
 CREATE TABLE IF NOT EXISTS upload_policy (
   id INTEGER PRIMARY KEY CHECK(id=1),trusted_daily_records INTEGER NOT NULL DEFAULT 5000,
-  ip_daily_records INTEGER NOT NULL DEFAULT 10000,global_daily_records INTEGER NOT NULL DEFAULT 50000
+  ip_daily_records INTEGER NOT NULL DEFAULT 10000,global_daily_records INTEGER NOT NULL DEFAULT 50000,
+  upload_min_interval_days INTEGER NOT NULL DEFAULT 14 CHECK(upload_min_interval_days BETWEEN 0 AND 365)
 );
 CREATE TABLE IF NOT EXISTS upload_guard (id INTEGER PRIMARY KEY CHECK(id=1), allowed INTEGER NOT NULL CHECK(allowed=1));
 CREATE TABLE IF NOT EXISTS upload_sources (

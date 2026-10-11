@@ -15,7 +15,7 @@ def main():
     server=Server(('127.0.0.1',0),Catalog(make_library(root)))
     mock_checked_at=int(time.time())-1
     def transport(endpoint,path,payload=None,token=''):
-        if path=='/health':return {'version':3,'max_upload_batch':50,'upload_preflight':True,'max_upload_check_batch':500,'public_correction_state':True}
+        if path=='/health':return {'version':3,'max_upload_batch':50,'upload_preflight':True,'max_upload_check_batch':500,'public_correction_state':True,'upload_min_interval_days':14}
         if path=='/v3/register':return {'version':3,'source_id':'00000000-0000-4000-8000-000000000003','status':'review'}
         if path.startswith('/v3/upload-state?'):
             from urllib.parse import parse_qs,urlsplit

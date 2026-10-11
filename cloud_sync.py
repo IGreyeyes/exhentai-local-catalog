@@ -120,6 +120,8 @@ class CloudSync:
         self.next_due = 0
         self.upload_batch_size = 5
         self.capabilities_endpoint = None
+        self.capabilities_refresh_at = 0
+        self.upload_min_interval_days = None
         self.upload_retry_until = 0
         self.preflight_enabled = False
         self.preflight_needed = {}
@@ -178,6 +180,7 @@ class CloudSync:
                     "upload_total": self.upload_total, "upload_confirmed": self.upload_confirmed,
                     "upload_batch_size": self.upload_batch_size,
                     "upload_preflight_enabled": self.preflight_enabled,
+                    "upload_min_interval_days": self.upload_min_interval_days,
                     "upload_skipped": skipped, "session_preflight_checked": self.session_preflight_checked,
                     "upload_retry_at": int(time.time()+self.upload_retry_until-time.monotonic())
                         if self.upload_retry_until > time.monotonic() else None,
@@ -229,6 +232,7 @@ class CloudSync:
             self.next_due = 0
             self.upload_retry_until = 0
             self.preflight_needed.clear()
+            self.capabilities_refresh_at = 0
             self.wake.set()
         return self.status()
 
@@ -243,6 +247,7 @@ class CloudSync:
             with self.store_provider().connection() as db:
                 self._clear_skips(db)
             self.preflight_needed.clear()
+            self.capabilities_refresh_at = 0
             self.phase = "queued"
             self.message = "已安排立即同步，将继续未完成的队列。"
             self.wake.set()
@@ -252,7 +257,7 @@ class CloudSync:
     def _clear_identity(db):
         db.execute("DELETE FROM app_settings WHERE key IN ('cloud_upload_token','cloud_upload_owner','cloud_upload_endpoint','cloud_source_id','cloud_source_status','cloud_uploader_name_synced')")
         db.execute("DELETE FROM cloud_upload_skips")
-        db.execute("DELETE FROM app_settings WHERE key IN ('cloud_preflight_dataset','cloud_preflight_cursor')")
+        db.execute("DELETE FROM app_settings WHERE key IN ('cloud_preflight_dataset','cloud_preflight_cursor','cloud_preflight_interval_days')")
 
     def _identity_status(self):
         with self.gate, self.store_provider().connection() as db:
@@ -482,9 +487,10 @@ class CloudSync:
         token = self._upload_identity(config)
         if not self._count_upload_queue() and not self._skip_count():
             return False
-        if self.capabilities_endpoint != config["endpoint"]:
+        if self.capabilities_endpoint != config["endpoint"] or time.monotonic() >= self.capabilities_refresh_at:
             self.upload_batch_size = 5
             self.preflight_enabled = False
+            self.upload_min_interval_days = None
             try:
                 capabilities = self.transport(config["endpoint"], "/health")
                 size = capabilities.get("max_upload_batch") if isinstance(capabilities, dict) else None
@@ -494,7 +500,19 @@ class CloudSync:
                         and capabilities.get("public_correction_state") is True
                         and type(capabilities.get("max_upload_check_batch")) is int
                         and capabilities.get("max_upload_check_batch") == 500)
+                    days = capabilities.get("upload_min_interval_days")
+                    if self.preflight_enabled and type(days) is int and 0 <= days <= 365:
+                        self.upload_min_interval_days = days
+                    with self.gate, self.store_provider().connection() as db:
+                        policy_key = "cloud_preflight_interval_days"
+                        policy_value = str(self.upload_min_interval_days) if self.upload_min_interval_days is not None else "legacy"
+                        previous = self._get(db, policy_key)
+                        if previous and previous != policy_value:
+                            self._clear_skips(db)
+                            self.preflight_needed.clear()
+                        self._put(db, policy_key, policy_value)
                 self.capabilities_endpoint = config["endpoint"]
+                self.capabilities_refresh_at = time.monotonic()+300
             except ValueError:
                 if self._skip_count():raise ValueError("暂时无法核对服务能力，免上传确认及本地资料保留，稍后重试。") from None
         if self.preflight_enabled:
@@ -555,15 +573,40 @@ class CloudSync:
                     or any(type(result.get(key)) is not int or not 0 <= result[key] <= len(items) for key in ("accepted", "pending", "kept"))
                     or sum(result[key] for key in ("accepted", "pending", "kept")) != len(items)):
                 raise ValueError("上传结果不正确，保留本地队列以便重试。")
+            skipped = result.get("upload_skips", [])
+            row_by_gid = {row["gid"]:row for row in rows}
+            if (not isinstance(skipped,list) or len(skipped)>result["kept"]
+                or any(not isinstance(item,dict) or set(item)!={"gid","revision"}
+                    or type(item["gid"]) is not int or item["gid"] not in row_by_gid
+                    or type(item["revision"]) is not int or not 1<=item["revision"]<=2**53-1 for item in skipped)
+                or len({item["gid"] for item in skipped})!=len(skipped)
+                or skipped and (not isinstance(result.get("dataset_id"),str)
+                    or not re.fullmatch(r"[0-9a-f]{32}",result["dataset_id"])
+                    or type(result.get("upload_min_interval_days")) is not int
+                    or not 0<=result["upload_min_interval_days"]<=365)):
+                raise ValueError("提交时的免上传确认不正确，已保留本地队列。")
             with self.gate:
                 self._available()
                 with self.store_provider().connection() as db:
+                    if skipped:
+                        old_dataset=self._get(db,"cloud_preflight_dataset")
+                        if old_dataset and old_dataset!=result["dataset_id"]:
+                            db.execute("DELETE FROM cloud_upload_ack")
+                            self._clear_skips(db)
+                            self._put(db,"cloud_preflight_cursor",0)
+                            self.preflight_needed.clear()
+                        self._put(db,"cloud_preflight_dataset",result["dataset_id"])
+                        self._put(db,"cloud_preflight_interval_days",result["upload_min_interval_days"])
                     db.executemany("INSERT INTO cloud_upload_ack VALUES(?,?) ON CONFLICT(gid) DO UPDATE SET payload=excluded.payload",
                                    ((row["gid"], row["payload"]) for row in rows))
                     db.executemany("DELETE FROM cloud_upload_skips WHERE gid=?",((row["gid"],) for row in rows))
+                    db.executemany("""INSERT INTO cloud_upload_skips VALUES(?,?,?,?,?) ON CONFLICT(gid) DO UPDATE SET
+                        payload=excluded.payload,dataset_id=excluded.dataset_id,revision=excluded.revision,verified_at=excluded.verified_at""",
+                        ((item["gid"],row_by_gid[item["gid"]]["payload"],result["dataset_id"],item["revision"],int(time.time())) for item in skipped))
                     if result.get("source_status") in {"review", "trusted"}:
                         self._put(db, "cloud_source_status", result["source_status"])
             with self.lock:
+                if skipped:self.upload_min_interval_days=result["upload_min_interval_days"]
                 self.uploaded += result["accepted"]
                 self.pending += result["pending"]
                 self.session_upload_processed += len(items)

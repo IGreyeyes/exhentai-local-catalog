@@ -52,7 +52,7 @@
           <div class="maintenance-actions"><button class="button primary" id="cloud-sync-save" disabled>保存同步设置</button><button class="button secondary" id="cloud-sync-now" disabled>立即同步</button></div>
           <p class="maintenance-feedback" id="cloud-sync-message" role="status">正在读取同步设置…</p>
           <p class="field-hint" id="cloud-sync-progress"></p>
-          <p class="field-hint">「服务器已确认」包含公开接受、待审核、保留已有和云端免上传确认，不等于公共作品总数。「云端已有，免上传」只检查公开数据，不扣上传条数额度；采集时间更新或尚未公开的记录仍需上传。新来源与异常数据通过审核后才可供其他用户下载。未完成队列会保留并继续。</p>
+          <p class="field-hint">「服务器已确认」包含公开接受、待审核、保留已有和云端免上传确认，不等于公共作品总数。「云端已有，免上传」只检查公开数据，不扣日上传条数。本机采集时间比公共快照晚不足服务器设定的间隔时免上传，达到间隔才提交；新版服务默认 14 天，管理员可调整，0 天恢复有更新就提交。新作品与仅待审核、已撤回的记录仍正常提交。新来源与异常数据通过审核后才可供其他用户下载。间隔越长，公共收藏数更新越慢。</p>
           <p class="field-hint" id="cloud-sync-last"></p>
           <details class="favorites-merge-guide"><summary>在线同步如何合并</summary><p>公共库采用已接受的最新抓取快照，收藏数可能正常减少；同一抓取时间保留先接受的公共快照。下载时按抓取时间合并，本地更晚的快照保留，同时间采用公共快照。收藏数和评分人数作为同一份快照更新；公共快照缺少评分人数时显示未知，避免与旧评分人数混算。较新的本地失败记录及个人阅读状态保留。</p><p>首次同步分批下载全量，之后只下载变更；大量上传或下载会自动分批续传。新来源、异常上涨、下跌或归零进入云端待审核，通过后才能共享。管理员恢复历史或撤回错误快照时，客户端会纠正仍在使用的云端值，并保留更新的自采记录。此功能与手动 JSON 导入的原合并规则分别工作，原文件格式和 Discussion 分享继续可用。开启前可先使用下方备份功能保存资料。</p></details>
         </section>

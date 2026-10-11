@@ -40,6 +40,7 @@
     if(typeof state.upload_total==="number")progress.push(`资料库可提交 ${state.upload_total.toLocaleString("zh-CN")} 条`);
     if(typeof state.upload_confirmed==="number")progress.push(`服务器已确认 ${state.upload_confirmed.toLocaleString("zh-CN")} 条`);
     if(typeof state.upload_skipped==="number")progress.push(`云端已有，免上传 ${state.upload_skipped.toLocaleString("zh-CN")} 条`);
+    if(typeof state.upload_min_interval_days==="number")progress.push(`公共更新间隔 ${state.upload_min_interval_days} 天`);
     if(state.upload_preflight_enabled&&typeof state.session_preflight_checked==="number")progress.push(`本次运行累计检查 ${state.session_preflight_checked.toLocaleString("zh-CN")} 条摘要`);
     if(typeof state.session_upload_processed==="number")progress.push(`本次运行累计提交 ${state.session_upload_processed.toLocaleString("zh-CN")} 条快照`);
     if(typeof state.session_download_received==="number")progress.push(`本次运行累计接收 ${state.session_download_received.toLocaleString("zh-CN")} 条公共快照`);

@@ -17,16 +17,25 @@ async function main(){
   const page=await browser.newPage({viewport:{width:1360,height:1000}}),errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(baseUrl+'/maintenance');
-  await page.waitForFunction(()=>document.querySelector('#cloud-sync-progress').textContent.includes('服务器已确认 230 条'),{},{timeout:30000});
+  try{await page.waitForFunction(()=>document.querySelector('#cloud-sync-progress').textContent.includes('服务器已确认 230 条'),{},{timeout:30000});}
+  catch(error){
+    const state=await(await fetch(baseUrl+'/api/cloud-sync')).json();
+    console.error(JSON.stringify({phase:state.phase,message:state.message,total:state.upload_total,confirmed:state.upload_confirmed,
+      remaining:state.upload_remaining,skipped:state.upload_skipped,submitted:state.session_upload_processed,pageErrors:errors,
+      displayedProgress:await page.locator('#cloud-sync-progress').textContent()}));
+    throw error;
+  }
   const state=await (await fetch(baseUrl+'/api/cloud-sync')).json();
   assert(state.upload_total===230&&state.upload_confirmed===230&&state.upload_remaining===0,'Mixed library upload was incomplete');
   assert(state.session_upload_processed===150&&state.upload_skipped===80,'Public duplicates were uploaded or records omitted');
+  assert(state.upload_min_interval_days===14,'Server update interval is missing');
   const scope=await page.locator('label').filter({has:page.locator('#cloud-sync-upload')}).textContent();
   assert(scope.includes('全部成功收藏数'),'Upload label still says self captures only');
   const consent=await page.locator('label').filter({has:page.locator('#cloud-sync-consent')}).textContent();
   assert(consent.includes('自己、他人及采集者未知'),'Consent does not describe the full upload scope');
   assert(await page.locator('#cloud-sync-upload').isChecked(),'Saved upload preference was lost');
   assert((await page.locator('#cloud-sync-progress').textContent()).includes('待上传 0 条'),'Pending count is missing');
+  assert((await page.locator('#cloud-sync-progress').textContent()).includes('公共更新间隔 14 天'),'Update interval is not displayed');
   await page.locator('#cloud-sync-section').screenshot({path:path.join(project,'logs/library-upload-wide.png')});
   await page.setViewportSize({width:760,height:900});
   await page.locator('#cloud-sync-section').screenshot({path:path.join(project,'logs/library-upload-small.png')});

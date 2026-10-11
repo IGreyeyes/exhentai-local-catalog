@@ -45,11 +45,11 @@ let server,browser,base;
   const popup=await context.newPage();popup.on('pageerror',error=>errors.push(error.message));await popup.goto(base+'/');await popup.locator('#client-update-dialog[open]').waitFor();
   const headings=await popup.locator('.client-release-notes h3').allTextContents();
   const shownVersions=[...new Set(headings.map(h=>(h.match(/v?(\d+\.\d+\.\d+)/)||[])[1]).filter(Boolean))];
-  assert(JSON.stringify(shownVersions)===JSON.stringify([metadata.version,'1.1.25']),'Popup omitted current or merged version');
+  assert(JSON.stringify(shownVersions)===JSON.stringify([metadata.version]),'Popup included already published versions');
   assert(!(await popup.locator('.client-release-notes').textContent()).includes('历史更新概览'),'Popup includes historical overview');
   await popup.locator('#client-update-dialog').screenshot({path:path.join(project,'logs/cross-version-update.png')});
   assert(errors.length===0,'UI errors: '+errors.join('; '));await context.close();await page.close();
-  console.log(JSON.stringify({passed:true,offlineHistory:true,prereleaseFilter:true,safeMarkup:true,announcementVersions:2,sidebarAllPages:true,smallViewport:true}));
+  console.log(JSON.stringify({passed:true,offlineHistory:true,prereleaseFilter:true,safeMarkup:true,announcementVersions:shownVersions.length,sidebarAllPages:true,smallViewport:true}));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
   if(browser)await browser.close();
   if(server){const ended=new Promise(resolve=>{if(server.exitCode!==null)resolve();else server.once('exit',resolve);});if(base){const status=await(await fetch(base+'/api/status')).json();await fetch(base+'/api/maintenance/stop',{method:'POST',headers:{'Content-Type':'application/json','X-Catalog-Token':status.action_token},body:'{}'});}else server.kill();await ended;}

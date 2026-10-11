@@ -23,7 +23,7 @@ try{
     await call('/v3/admin/sources/'+source.source_id,{status:'trusted'});
   }
   for(let start=1;start<=10000;start+=50){await call('/v3/contribute',{version:3,records:Array.from({length:50},(_,i)=>item(start+i,owners[0]))},first);clock+=3;}
-  const records=[...Array.from({length:8000},(_,i)=>item(i+1,owners[1])),...Array.from({length:7000},(_,i)=>item(i+10001,owners[1]))];
+  const records=[...Array.from({length:8000},(_,i)=>({...item(i+1,owners[1]),checked_at:base-50})),...Array.from({length:7000},(_,i)=>item(i+10001,owners[1]))];
   const needed=[];let checked=0,checks=0,skipped=0,uploads=0;
   for(let offset=0;offset<records.length;offset+=500){
     const batch=records.slice(offset,offset+500),byId=new Map(batch.map(r=>[r.gid,r]));
@@ -39,5 +39,6 @@ try{
   assert.deepEqual(used,[7000,10000]);assert.equal(skipped,8000);assert.equal(checks,30);assert.equal(uploads,140);
   assert.equal(env.DB.sqlite.prepare('SELECT COUNT(*) n FROM cloud_public').get().n,17000);
   console.log(JSON.stringify({passed:true,userARecords:10000,userBRecords:checked,publicDuplicatesSkipped:skipped,
-    summariesRequests:checks,fullRecordRequests:uploads,uploadRecordsChargedToB:7000,simulatedTime:true,measuresInternetSpeed:false}));
+    summariesRequests:checks,fullRecordRequests:uploads,uploadRecordsChargedToB:7000,uploadMinIntervalDays:14,
+    duplicateSnapshotsNewerBySeconds:50,simulatedTime:true,measuresInternetSpeed:false}));
 }finally{Date.now=realNow;env.DB.close();}

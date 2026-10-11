@@ -64,7 +64,7 @@ def verify_desktop(report_path, fixture_root=None):
         cloud_names=[]
         cloud_public_snapshot=None
         def mock_cloud(endpoint,path,payload=None,token=""):
-            if path=="/health":return {"version":VERSION,"max_upload_batch":50,"upload_preflight":True,"max_upload_check_batch":500,"public_correction_state":True}
+            if path=="/health":return {"version":VERSION,"max_upload_batch":50,"upload_preflight":True,"max_upload_check_batch":500,"public_correction_state":True,"upload_min_interval_days":14}
             if path.startswith('/v3/upload-state?'):
                 dataset=parse_qs(urlsplit(path).query).get('dataset_id',[''])[0]
                 return {"version":VERSION,"dataset_id":"0"*32,"reset":dataset!="0"*32,"cursor":1,"until":1,"has_more":False,"corrections":[]}
@@ -317,6 +317,7 @@ def verify_desktop(report_path, fixture_root=None):
                 scope=window.evaluate_js("document.querySelector('label:has(#cloud-sync-upload)').textContent")
                 if mixed['upload_batch_size']!=50:raise AssertionError("Packaged client did not negotiate fifty-record batches")
                 if mixed['upload_skipped']!=1:raise AssertionError("Packaged client did not skip the public snapshot")
+                if mixed['upload_min_interval_days']!=14:raise AssertionError("Packaged client did not read the server update interval")
                 report["checks"].append("packaged client checks public versions and skips existing data without resending the full snapshot")
                 report["checks"].append("packaged client negotiates fifty-record uploads and uses the persistent queue index")
                 if '全部成功收藏数' not in scope:raise AssertionError("Packaged sharing scope is stale")

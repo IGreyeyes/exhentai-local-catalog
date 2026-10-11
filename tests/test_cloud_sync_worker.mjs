@@ -12,8 +12,11 @@ const TOKEN='src_'+'A'.repeat(43),TOKEN2='src_'+'B'.repeat(43);
 const now=Math.floor(Date.now()/1000);
 const schema=readFileSync(new URL('../cloudflare/schema.sql',import.meta.url),'utf8');
 function item(gid=1,favorite_count=100,checked_at=now-100,rating_count=20){return {gid,favorite_count,rating_count,checked_at,source:'e-hentai.org',collector_id:OWNER,collector_name:'测试采集者'};}
-function fixture(t){
+function fixture(t,intervalDays=0){
   const env={DB:new D1(),ADMIN_SECRET:ADMIN};t.after(()=>env.DB.close());
+  // Existing protocol tests exercise the original update rule explicitly.
+  // Passing 14 leaves the policy row absent to test the production default.
+  if(intervalDays!==14)env.DB.sqlite.prepare('INSERT INTO upload_policy(id,upload_min_interval_days) VALUES(1,?)').run(intervalDays);
   async function call(path,{method='GET',token,data,headers={}}={}){
     const r=await worker.fetch(new Request('https://sync.example.invalid'+path,{method,headers:{
       'CF-Connecting-IP':'127.0.0.1',...(token?{Authorization:'Bearer '+token}:{}),
@@ -93,6 +96,74 @@ test('差异检查字段、批次、身份与频率限制生效',async t=>{
   f.env.DB.sqlite.exec('DELETE FROM upload_limits');
   for(let i=0;i<30;i++)assert.equal((await call({version:3,records})).status,200);
   const rate=await call({version:3,records});assert.equal(rate.status,429);assert.equal(rate.headers.get('X-Upload-Limit-Scope'),'minute');
+});
+
+test('默认 14 天按采集时间差判断，临界秒、新作品与仅待审记录均正确',async t=>{
+  const f=fixture(t,14),days=14*86400,old=now-days-100;
+  const health=(await f.call('/health')).result;assert.equal(health.upload_min_interval_days,14);
+  await f.trusted();assert.equal((await f.upload([item(1,100,old),item(2,100,old),item(3,100,now-30*86400)])).status,200);
+  await f.register(TOKEN2,OTHER);await f.upload([item(4)],TOKEN2);
+  const records=[{gid:1,checked_at:old+days-1},{gid:2,checked_at:old+days},{gid:3,checked_at:now-29*86400},
+    {gid:4,checked_at:now-90},{gid:5,checked_at:now-100},{gid:1,checked_at:old-1}];
+  const check=await f.call('/v3/upload-check',{method:'POST',token:TOKEN2,data:{version:3,records:records.slice(0,5)}});
+  assert.deepEqual(check.result.records.map(r=>r.skip),[true,false,true,false,false]);
+  const older=await f.call('/v3/upload-check',{method:'POST',token:TOKEN2,data:{version:3,records:records.slice(5)}});
+  assert.equal(older.result.records[0].skip,true);
+  const before=f.env.DB.sqlite.prepare("SELECT key,used FROM upload_limits WHERE key LIKE 'upload:%:day%' ORDER BY key").all();
+  const result=await f.upload([item(1,110,old+days-1),item(2,110,old+days),item(5)],TOKEN2);
+  assert.deepEqual([result.result.accepted,result.result.pending,result.result.kept],[0,2,1]);
+  const after=f.env.DB.sqlite.prepare("SELECT key,used FROM upload_limits WHERE key LIKE 'upload:%:day%' ORDER BY key").all();
+  for(const row of before)assert.equal(after.find(v=>v.key===row.key).used-row.used,row.key.endsWith(check.result.source_id)||row.key==='upload:global:day'||row.key.startsWith('upload:ip:day:')?2:0);
+  assert.equal(JSON.parse(f.env.DB.sqlite.prepare('SELECT payload FROM cloud_public WHERE gid=1').get().payload).favorite_count,100);
+});
+
+test('更新间隔可保存并重读，0 天恢复原规则，旧配置请求保留间隔且不清零用量',async t=>{
+  const f=fixture(t,14);await f.trusted();await f.upload([item(1)]);
+  const quota=f.env.DB.sqlite.prepare("SELECT key,used FROM upload_limits WHERE key LIKE 'upload:%:day%' ORDER BY key").all();
+  const policy={trusted_daily_records:5000,ip_daily_records:10000,global_daily_records:50000};
+  for(const days of [-1,366,1.5,true,'14',null])assert.equal((await f.manage('policy',{...policy,upload_min_interval_days:days})).status,400);
+  assert.equal((await f.manage('policy',{...policy,upload_min_interval_days:0})).status,200);
+  assert.equal((await f.call('/health')).result.upload_min_interval_days,0);
+  assert.equal((await f.upload([item(1,110,now-90)])).result.accepted,1);
+  await f.manage('policy',{...policy,upload_min_interval_days:7});await f.manage('policy',policy);
+  assert.equal((await f.manage('status')).result.caps.upload_min_interval_days,7);
+  const replacement={DB:Object.create(f.env.DB),ADMIN_SECRET:ADMIN};
+  assert.equal((await (await worker.fetch(new Request('https://sync.example.invalid/health'),replacement)).json()).upload_min_interval_days,7);
+  for(const row of quota)assert.equal(f.env.DB.sqlite.prepare('SELECT used FROM upload_limits WHERE key=?').get(row.key).used,row.used+1);
+});
+
+test('提交事务重新判断窗口，旧客户端与过期的预检查不消耗重复记录日额度',async t=>{
+  const f=fixture(t,14);await f.trusted();const b=await f.trusted(TOKEN2,OTHER);
+  const summary={version:3,records:[{gid:1,checked_at:now-90}]};
+  const check=await f.call('/v3/upload-check',{method:'POST',token:TOKEN2,data:summary});assert.equal(check.result.records[0].skip,false);
+  const original=f.env.DB.batch.bind(f.env.DB);let inserted=false;
+  f.env.DB.batch=async statements=>{
+    if(!inserted){inserted=true;const snapshot=item(1);f.env.DB.sqlite.prepare("INSERT INTO cloud_public(gid,payload,checked_at,source_id,action,received_at) VALUES(?,?,?,?,'snapshot',?)")
+      .run(1,JSON.stringify(snapshot),snapshot.checked_at,b.source_id,now);}
+    return original(statements);
+  };
+  const result=await f.upload([item(1,110,now-90)],TOKEN2);
+  assert.equal(result.status,200,JSON.stringify(result.result));assert.deepEqual([result.result.accepted,result.result.pending,result.result.kept],[0,0,1]);
+  assert.equal(f.env.DB.sqlite.prepare("SELECT count(*) AS n FROM upload_limits WHERE key LIKE 'upload:%:day%'").get().n,0);
+  assert.equal(f.env.DB.sqlite.prepare('SELECT count(*) AS n FROM cloud_history').get().n,1);
+  f.env.DB.batch=original;
+  f.env.DB.sqlite.prepare('INSERT INTO upload_limits VALUES(?,?,?)').run('upload:global:day',Math.floor(now/86400)*86400,50001);
+  assert.equal((await f.upload([item(1,110,now-90)],TOKEN2)).status,200);
+  assert.equal(f.env.DB.sqlite.prepare('SELECT used FROM upload_limits WHERE key=?').get('upload:global:day').used,50001);
+});
+
+test('旧额度表自动补充 14 天字段，保留已配置额度、用量、公共数据与来源',async t=>{
+  const f=fixture(t);await f.trusted();await f.upload([item(1)]);
+  f.env.DB.sqlite.exec('DROP TABLE upload_policy; CREATE TABLE upload_policy(id INTEGER PRIMARY KEY,trusted_daily_records INTEGER NOT NULL,ip_daily_records INTEGER NOT NULL,global_daily_records INTEGER NOT NULL); INSERT INTO upload_policy VALUES(1,20000,30000,100000)');
+  const before=f.env.DB.sqlite.prepare("SELECT key,used FROM upload_limits WHERE key LIKE 'upload:%:day%' ORDER BY key").all();
+  const replacement={DB:Object.create(f.env.DB),ADMIN_SECRET:ADMIN};
+  const health=await worker.fetch(new Request('https://sync.example.invalid/health'),replacement);
+  assert.equal(health.status,200);assert.equal((await health.json()).upload_min_interval_days,14);
+  const policy=f.env.DB.sqlite.prepare('SELECT * FROM upload_policy').get();
+  assert.deepEqual([policy.trusted_daily_records,policy.ip_daily_records,policy.global_daily_records,policy.upload_min_interval_days],[20000,30000,100000,14]);
+  assert.deepEqual(f.env.DB.sqlite.prepare("SELECT key,used FROM upload_limits WHERE key LIKE 'upload:%:day%' ORDER BY key").all(),before);
+  assert.equal(f.env.DB.sqlite.prepare('SELECT count(*) AS n FROM cloud_public').get().n,1);
+  assert.equal(f.env.DB.sqlite.prepare('SELECT status FROM upload_sources').get().status,'trusted');
 });
 test('公共校验返回纠正事件与换库状态，撤回后的旧快照回到待审而不自动重发公开',async t=>{
   const f=fixture(t);await f.trusted();await f.upload([item(1)]);
@@ -254,6 +325,8 @@ test('每日额度持久配置、鉴权与审计，不重置已用量，新来�
   const denied=await upload([item(3),item(4)],TOKEN2);assert.equal(denied.status,429);
   assert.equal(denied.headers.get('X-Upload-Limit-Scope'),'day');assert.equal(denied.headers.get('X-Upload-Remaining'),'1');
   assert.ok(Number(denied.headers.get('Retry-After'))>0&&Number(denied.headers.get('Retry-After'))<=86400);
+  assert.equal(env.DB.sqlite.prepare('SELECT used FROM upload_limits WHERE key=?').get('upload:source:day:'+review.source_id).used,499);
+  assert.equal(env.DB.sqlite.prepare('SELECT used FROM upload_limits WHERE key=?').get('upload:global:day').used,2);
   assert.equal((await upload([item(3)],TOKEN2)).status,200);
   env.DB.failBatch=true;
   assert.equal((await manage('policy',{...policy,trusted_daily_records:30000})).status,503);
@@ -495,7 +568,7 @@ test('IP、来源和全站额度分别生效；IP 不落库',async t=>{
   assert.equal((await upload([item(2)])).status,429);assert.equal((await manage('status')).result.public_count,1);
   env.DB.sqlite.exec('DELETE FROM upload_limits');
   // 已生成的 IP 日计数键来自真实生产配额逻辑；提升使用量后验证 IP 上限。
-  await upload([item()]);const key=env.DB.sqlite.prepare("SELECT key FROM upload_limits WHERE key LIKE 'upload:ip:day:%'").get().key;
+  await upload([item(3)]);const key=env.DB.sqlite.prepare("SELECT key FROM upload_limits WHERE key LIKE 'upload:ip:day:%'").get().key;
   env.DB.sqlite.prepare('UPDATE upload_limits SET used=10000 WHERE key=?').run(key);assert.equal((await upload([item(2)])).status,429);
 });
 test('匿名登记配额和待审每日额度生效',async t=>{
@@ -508,8 +581,10 @@ test('匿名登记配额和待审每日额度生效',async t=>{
 test('事务失败与候选容量满不会部分写入或确认上传',async t=>{
   const {env,register,upload,changes}=fixture(t);await register();env.DB.failBatch=true;
   assert.equal((await upload([item(),item(2)])).status,503);assert.equal(env.DB.sqlite.prepare('SELECT count(*) n FROM cloud_pending').get().n,0);
+  assert.equal(env.DB.sqlite.prepare("SELECT count(*) n FROM upload_limits WHERE key LIKE 'upload:%:day%'").get().n,0);
   env.DB.failBatch=false;env.DB.sqlite.exec('UPDATE upload_controls SET pending_count=20000');
   assert.equal((await upload([item()])).status,503);assert.equal((await changes()).result.records.length,0);
+  assert.equal(env.DB.sqlite.prepare("SELECT count(*) n FROM upload_limits WHERE key LIKE 'upload:%:day%'").get().n,0);
 });
 test('历史恢复和撤回生成新修订，保留较旧时间并防止并发误覆盖',async t=>{
   const {trusted,upload,manage,changes}=fixture(t);await trusted();await upload([item()]);await upload([item(1,110,now-90)]);

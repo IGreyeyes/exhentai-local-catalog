@@ -22,11 +22,12 @@ class ReleaseHistoryTests(unittest.TestCase):
         self.assertIn(APP_VERSION,sections)
         self.assertNotIn("历史更新概览",body)
         self.assertEqual(set(sections),{APP_VERSION})
-        self.assertIn("默认 14 天",sections[APP_VERSION])
-        self.assertIn("提交时再次检查",sections[APP_VERSION])
-        previous=next(item for item in bundled_history() if item["version"]=="1.1.26")
-        self.assertEqual(previous["date"],"2026-10-11T13:06:02Z")
-        self.assertIn("按来源批量审核",previous["notes"])
+        self.assertIn("网络响应中断",sections[APP_VERSION])
+        self.assertIn("最多尝试 3 次",sections[APP_VERSION])
+        previous=next(item for item in bundled_history() if item["version"]=="1.1.27")
+        self.assertEqual(previous["date"],"2026-10-11T15:36:49Z")
+        self.assertFalse(previous["prerelease"])
+        self.assertIn("默认 14 天",previous["notes"])
         self.assertIn("1.1.11",{item["version"] for item in bundled_history()})
 
     def test_announcements_exclude_history_and_keep_only_actual_merged_sections(self):
@@ -96,6 +97,7 @@ class ReleaseHistoryTests(unittest.TestCase):
             self.assertIn("## v"+APP_VERSION,updater.info()["notes"])
             self.assertNotIn("## v1.1.25",updater.info()["notes"])
             self.assertNotIn("## v1.1.26",updater.info()["notes"])
+            self.assertNotIn("## v1.1.27",updater.info()["notes"])
             updater.acknowledge()
             self.assertFalse(updater.info()["show_notes"])
 

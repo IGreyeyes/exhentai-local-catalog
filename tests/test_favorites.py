@@ -1,7 +1,10 @@
 from pathlib import Path
+from http.client import BadStatusLine, HTTPResponse, IncompleteRead
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import json
+import io
 import sqlite3
 import tempfile
 import threading
@@ -9,7 +12,52 @@ import time
 import unittest
 
 from app import Catalog, Server
-from favorites import CollectionPaused, Collector, GalleryUnavailable, SameGalleryRedirect, parse_favorite_count
+from favorites import CollectionPaused, Collector, GalleryUnavailable, RetryableFetch, SameGalleryRedirect, collection_error_details, fetch_favorites, parse_favorite_count
+
+
+def http_response(payload):
+    class FakeSocket:
+        def makefile(self, *args):
+            return io.BytesIO(payload)
+    response = HTTPResponse(FakeSocket())
+    response.begin()
+    return response
+
+
+class FavoriteNetworkTests(unittest.TestCase):
+    def test_broken_http_responses_become_retryable_and_discard_partial_counts(self):
+        body = b'<span id="favcount">999</span>'
+        responses = (
+            b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 1000\r\n\r\n' + body,
+            b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n1000\r\n' + body,
+            b'test invalid status line\r\n\r\n',
+        )
+        for raw in responses:
+            with self.subTest(raw=raw[:30]), patch('favorites.build_opener') as opener:
+                opener.return_value.open.side_effect = lambda *args, **kwargs: http_response(raw)
+                with self.assertRaises(RetryableFetch):
+                    fetch_favorites({'host':'e-hentai.org'},1,'abcdef0123')
+
+    def test_http_exception_details_are_not_exposed(self):
+        for error in (IncompleteRead(b'test-cookie=private-test-value',10), BadStatusLine('private-test-value')):
+            with self.subTest(kind=type(error).__name__), patch('favorites.build_opener') as opener:
+                opener.return_value.open.side_effect = error
+                with self.assertRaises(RetryableFetch) as caught:
+                    fetch_favorites({'host':'e-hentai.org'},1,'abcdef0123')
+                self.assertNotIn('private-test-value',str(caught.exception))
+
+    def test_database_error_hints_use_fixed_labels_without_private_exception_text(self):
+        for code, label, advice in ((sqlite3.SQLITE_BUSY,'SQLITE_BUSY','占用'),
+                                   (sqlite3.SQLITE_READONLY | (1 << 8),'SQLITE_READONLY','写入权限'),
+                                   (sqlite3.SQLITE_FULL,'SQLITE_FULL','空间不足'),
+                                   (sqlite3.SQLITE_CORRUPT,'SQLITE_CORRUPT','备份')):
+            with self.subTest(code=label):
+                error=sqlite3.OperationalError('private-test-value')
+                error.sqlite_errorcode=code
+                kind, actual, hint=collection_error_details(error)
+                self.assertEqual((kind,actual),('OperationalError',label))
+                self.assertIn(advice,hint)
+                self.assertNotIn('private-test-value',hint)
 
 
 class FavoriteParsingTests(unittest.TestCase):
@@ -23,6 +71,13 @@ class FavoriteParsingTests(unittest.TestCase):
                 parse_favorite_count(f'<span id="favcount">{content}</span>')
         with self.assertRaises(CollectionPaused):
             parse_favorite_count('<html>Sign in</html>')
+
+    def test_out_of_range_counts_pause_before_database_write(self):
+        self.assertEqual(parse_favorite_count(f'<span id="favcount">{2**63-1}</span>'),2**63-1)
+        self.assertEqual(parse_favorite_count('<span id="favcount">'+'0'*5000+'12</span>'),12)
+        for value in (str(2**63),'9'*5000):
+            with self.subTest(length=len(value)), self.assertRaisesRegex(CollectionPaused,'超出可保存范围'):
+                parse_favorite_count(f'<span id="favcount">{value}</span>')
 
     def test_gallery_identity_and_block_pages(self):
         with self.assertRaises(CollectionPaused):
@@ -184,6 +239,102 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.collector.fetcher=self.fetch
         self.resume(retry_failed=True);self.finish()
         self.assertEqual(self.collector.status()['job']['state'],'completed')
+
+    def collect_broken_responses(self, permanent=False):
+        self.ready()
+        self.catalog.favorites.save(3,300,'exhentai.org',30)
+        with self.catalog.favorites.connection() as db:
+            db.execute('UPDATE favorites SET checked_at=1 WHERE gid=3')
+        attempts=[]
+        def open_response(request, **kwargs):
+            gid=int(request.full_url.split('/g/')[1].split('/')[0])
+            attempts.append(gid)
+            if gid==3 and (permanent or attempts.count(3)==1):
+                return http_response(b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n1000\r\n<span id="favcount">999</span>')
+            body=f'<span id="favcount">{gid*10}</span>'.encode()
+            return http_response(b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body)
+        self.collector.fetcher=fetch_favorites
+        wait=self.collector.interrupt.wait
+        with patch('favorites.build_opener') as opener, patch.object(self.collector.interrupt,'wait',side_effect=lambda seconds:wait(min(seconds,.001))):
+            opener.return_value.open.side_effect=open_response
+            self.start();self.finish()
+        return attempts
+
+    def test_interrupted_response_retries_and_continues_original_queue(self):
+        attempts=self.collect_broken_responses()
+        job=self.collector.store.latest()
+        self.assertEqual((job['state'],job['failed'],job['succeeded']),('completed',0,3))
+        self.assertEqual(attempts,[3,3,2,1])
+        with self.catalog.favorites.connection() as db:
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=3').fetchone()[0],30)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM collection_failures').fetchone()[0],0)
+
+    def test_persistent_interruption_fails_only_one_item_and_keeps_old_count(self):
+        attempts=self.collect_broken_responses(permanent=True)
+        job=self.collector.store.latest()
+        self.assertEqual((job['state'],job['failed'],job['succeeded']),('completed_with_errors',1,2))
+        self.assertEqual(attempts,[3,3,3,2,1])
+        with self.catalog.favorites.connection() as db:
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=3').fetchone()[0],300)
+            self.assertEqual(db.execute('SELECT rating_count FROM rating_counts WHERE gid=3').fetchone()[0],30)
+            failure=db.execute('SELECT error,attempts FROM collection_failures WHERE gid=3').fetchone()
+            self.assertEqual(failure['attempts'],3)
+            self.assertNotIn('999',failure['error'])
+        self.collector.fetcher=self.fetch
+        self.resume(retry_failed=True);self.finish()
+        self.assertEqual(self.collector.store.latest()['state'],'completed')
+
+    def test_verification_interruption_is_readable_and_keeps_saved_count(self):
+        self.ready()
+        self.catalog.favorites.save(3,300,'exhentai.org')
+        with self.catalog.favorites.connection() as db:
+            db.execute('UPDATE favorites SET checked_at=1 WHERE gid=3')
+        self.collector.fetcher=fetch_favorites
+        self.collector.last_request=0
+        with patch('favorites.build_opener') as opener:
+            opener.return_value.open.side_effect=IncompleteRead(b'private-test-value',100)
+            with self.assertRaisesRegex(ValueError,'网络响应中断'):
+                self.collector.verify(self.query)
+        self.assertFalse(self.collector.verified)
+        with self.catalog.favorites.connection() as db:
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=3').fetchone()[0],300)
+
+    def test_unexpected_error_has_safe_diagnostics_and_resumable_queue(self):
+        self.ready()
+        def fail(*args):
+            raise RuntimeError('private-test-value https://example.invalid/personal-record')
+        self.collector.fetcher=fail
+        with self.assertLogs('favorites',level='ERROR') as logged:
+            self.start();self.finish()
+        job=self.collector.store.latest()
+        self.assertEqual((job['state'],job['pending']),('paused',3))
+        self.assertIn('RuntimeError',job['message'])
+        self.assertIn('读取网页',job['message'])
+        self.assertNotIn('private-test-value',job['message']+' '.join(logged.output))
+        self.assertNotIn('example.invalid',job['message']+' '.join(logged.output))
+        self.assertRegex(' '.join(logged.output),r'line=[1-9][0-9]*')
+        self.collector.fetcher=self.fetch
+        self.resume();self.finish()
+        self.assertEqual(self.collector.store.latest()['state'],'completed')
+
+    def test_failed_database_write_rolls_back_counts_and_preserves_pending_task(self):
+        self.ready()
+        with self.catalog.favorites.connection() as db:
+            db.execute("CREATE TRIGGER test_save_failure BEFORE INSERT ON cloud_self_snapshots WHEN NEW.gid=3 BEGIN SELECT RAISE(ABORT,'private-test-value'); END")
+        with self.assertLogs('favorites',level='ERROR') as logged:
+            self.start();self.finish()
+        job=self.collector.store.latest()
+        self.assertEqual((job['state'],job['pending']),('paused',3))
+        self.assertIn('IntegrityError',job['message'])
+        self.assertIn('保存收藏数',job['message'])
+        self.assertNotIn('private-test-value',job['message']+' '.join(logged.output))
+        with self.catalog.favorites.connection() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM favorites WHERE gid=3').fetchone())
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=4').fetchone()[0],40)
+            self.assertEqual(db.execute('SELECT state FROM tasks WHERE gid=3').fetchone()[0],'pending')
+            db.execute('DROP TRIGGER test_save_failure')
+        self.resume();self.finish()
+        self.assertEqual(self.collector.store.latest()['state'],'completed')
 
     def test_verification_skips_unavailable_gallery_and_preserves_old_count(self):
         self.catalog.favorites.save(4,400,'exhentai.org')

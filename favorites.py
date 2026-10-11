@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from collections import deque
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from http.client import HTTPException
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -12,6 +13,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from uuid import uuid4
 import json
 import hashlib
+import logging
 import math
 import re
 import secrets
@@ -108,7 +110,10 @@ def parse_favorite_count(html, expected_gid=None):
     match = re.fullmatch(r"(\d+|\d{1,3}(?:,\d{3})+)(?:\s+times?)?", value, re.I)
     if not match:
         raise CollectionPaused("收藏数字段格式无法识别，已暂停；没有把未知值记为零。")
-    return int(match[1].replace(",", ""))
+    digits = match[1].replace(",", "").lstrip("0") or "0"
+    if len(digits) > 19 or int(digits) > 2**63 - 1:
+        raise CollectionPaused("收藏数超出可保存范围，已暂停；没有覆盖已有收藏数。")
+    return int(digits)
 
 
 def parse_gallery_counts(html, expected_gid=None):
@@ -152,6 +157,9 @@ def fetch_favorites(settings, gid, token):
             content = response.read(4 * 1024 * 1024 + 1)
             if len(content) > 4 * 1024 * 1024:
                 raise CollectionPaused("作品页面大小异常，已暂停。")
+            remaining = getattr(response, "length", None)
+            if type(remaining) is int and remaining > 0:
+                raise RetryableFetch("作品网页未完整接收，请检查网络或代理后重试。")
         return parse_gallery_counts(content.decode("utf-8", errors="replace"), gid)
     except HTTPError as error:
         code = error.code
@@ -173,8 +181,29 @@ def fetch_favorites(settings, gid, token):
         if code >= 500:
             raise RetryableFetch(f"源站暂时不可用（HTTP {code}）。") from None
         raise CollectionPaused(f"源站返回 HTTP {code}，已暂停。") from None
+    except HTTPException:
+        raise RetryableFetch("网络响应中断或格式异常，请检查网络或代理后重试。") from None
     except (URLError, TimeoutError, ConnectionError, OSError):
         raise RetryableFetch("网络连接失败或超时，请检查系统代理或网络。") from None
+
+
+def collection_error_details(error):
+    """Only expose fixed error labels, never exception text or traceback locals."""
+    error_type = type(error)
+    kind = error_type.__name__ if error_type.__module__ in {"builtins", "sqlite3", "http.client"} else "Exception"
+    code = getattr(error, "sqlite_errorcode", None)
+    sqlite_codes = {
+        sqlite3.SQLITE_BUSY: ("SQLITE_BUSY", "资料库暂时被占用，请等待当前资料库操作结束后再继续。"),
+        sqlite3.SQLITE_LOCKED: ("SQLITE_LOCKED", "资料库暂时被锁定，请等待当前资料库操作结束后再继续。"),
+        sqlite3.SQLITE_FULL: ("SQLITE_FULL", "资料库所在磁盘空间不足，请释放空间后再继续。"),
+        sqlite3.SQLITE_READONLY: ("SQLITE_READONLY", "资料库无法写入，请检查文件夹的写入权限。"),
+        sqlite3.SQLITE_IOERR: ("SQLITE_IOERR", "资料库读写失败，请检查磁盘状态与写入权限。"),
+        sqlite3.SQLITE_CORRUPT: ("SQLITE_CORRUPT", "资料库可能损坏，请保留现有文件并核对备份。"),
+        sqlite3.SQLITE_NOTADB: ("SQLITE_NOTADB", "资料库格式异常，请保留现有文件并核对备份。"),
+    }
+    label, advice = sqlite_codes.get(code & 0xff if type(code) is int else None,
+                                    ("", "可预估后继续；若重复出现，请反馈此提示中的错误类型与阶段。"))
+    return kind, label, advice
 
 
 class FavoriteStore:
@@ -894,6 +923,7 @@ class Collector:
         return self.status()
 
     def _run(self, job_id, settings):
+        phase = "读取任务"
         try:
             with self.store.connection() as db:
                 job=db.execute("SELECT * FROM jobs WHERE id=?",(job_id,)).fetchone()
@@ -901,6 +931,7 @@ class Collector:
                 rounds=selection.get("collection_mode")=="rounds"
                 round_limit=job["current_round"] if rounds else 1
             while not self.interrupt.is_set():
+                phase = "读取队列"
                 with self.store.connection() as db:
                     row = db.execute("SELECT * FROM tasks WHERE job_id=? AND state='pending' AND round_no<=? ORDER BY priority ASC,gid DESC LIMIT 1", (job_id,round_limit)).fetchone()
                     if row is None:
@@ -920,12 +951,15 @@ class Collector:
                 if self.interrupt.wait(delay):
                     return
                 try:
+                    phase = "读取网页"
                     count = self._fetch(settings, row["gid"], row["token"])
+                    phase = "保存收藏数"
                     with self.store.connection() as db:
                         self.store._save(db,row["gid"],count.favorite_count,settings["host"],count.rating_count)
                         db.execute("UPDATE tasks SET state='done',attempts=attempts+1,error='' WHERE job_id=? AND gid=?", (job_id,row["gid"]))
                         db.execute("UPDATE jobs SET updated_at=? WHERE id=?", (int(time.time()),job_id))
                 except CollectionPaused as error:
+                    phase = "保存暂停状态"
                     with self.lock:
                         self.cooldown_until = int(time.time()+error.cooldown)
                         self.store.remember_cooldown(self.cooldown_until)
@@ -933,6 +967,7 @@ class Collector:
                             db.execute("UPDATE jobs SET state='paused',message=?,cooldown_until=?,updated_at=? WHERE id=? AND state='running'", (str(error),self.cooldown_until,int(time.time()),job_id))
                     return
                 except (RetryableFetch, GalleryUnavailable) as error:
+                    phase = "保存失败记录"
                     attempts = row["attempts"]+1
                     terminal = isinstance(error, GalleryUnavailable) or attempts >= 3
                     with self.store.connection() as db:
@@ -943,9 +978,23 @@ class Collector:
                         return
                 finally:
                     self.last_request = time.monotonic()
-        except Exception:
-            with self.store.connection() as db:
-                db.execute("UPDATE jobs SET state='paused',message='采集遇到内部错误，已暂停；已有收藏数保留。',updated_at=? WHERE id=? AND state='running'", (int(time.time()),job_id))
+        except Exception as error:
+            kind, code, advice = collection_error_details(error)
+            # Do not log exception messages, response bodies, URLs, credentials or paths.
+            line = 0
+            trace = error.__traceback__
+            while trace:
+                if Path(trace.tb_frame.f_code.co_filename).name == Path(__file__).name:
+                    line = trace.tb_lineno
+                trace = trace.tb_next
+            logging.getLogger(__name__).error("Collector paused: type=%s phase=%s sqlite=%s line=%s", kind, phase, code or "none", line)
+            message = f"采集遇到错误（{code or kind}；阶段：{phase}），已暂停；已有收藏数和队列保留。{advice}"
+            try:
+                with self.store.connection() as db:
+                    db.execute("UPDATE jobs SET state='paused',message=?,updated_at=? WHERE id=? AND state='running'", (message,int(time.time()),job_id))
+            except sqlite3.Error as pause_error:
+                kind, code, _ = collection_error_details(pause_error)
+                logging.getLogger(__name__).error("Collector pause state could not be saved: type=%s sqlite=%s", kind, code or "none")
 
     def close(self):
         self.pause()

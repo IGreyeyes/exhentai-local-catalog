@@ -81,6 +81,23 @@ def checkpoint(path):
             raise ValueError("数据库仍被其他程序占用，暂时无法切换目录。")
 
 
+def finish_backup_directory(temporary, progress):
+    """Retry a Windows directory lock without recopying the verified backup."""
+    final = temporary.with_name(temporary.name.removesuffix(".partial"))
+    delays = (0.2, 0.4, 0.8, 1.6, 2.0)
+    for attempt in range(len(delays) + 1):
+        try:
+            temporary.rename(final)
+            return final
+        except OSError as error:
+            if getattr(error, "winerror", None) not in {5, 32, 33}:
+                raise
+            if attempt == len(delays):
+                raise ValueError("备份文件夹无法完成改名。请检查备份位置的写入和修改权限，关闭可能正在占用备份的程序后重试；未完成备份保留为 .partial，未计为成功备份。") from None
+            progress(f"Windows 暂时拒绝备份文件夹改名，正在重试（{attempt+1}/{len(delays)}）…")
+            time.sleep(delays[attempt])
+
+
 def recover_import(catalog_path):
     """Recover an interrupted replacement before opening any catalog connections."""
     catalog_path = Path(catalog_path).resolve()
@@ -364,8 +381,8 @@ class LibraryMaintenance:
         }
         manifest["size_bytes"] = sum(item["size"] for item in manifest["files"])
         save_json(temporary/"manifest.json",manifest)
-        final = temporary.with_name(temporary.name.removesuffix(".partial"))
-        temporary.rename(final)
+        progress("正在完成备份…")
+        final = finish_backup_directory(temporary, progress)
         return {"path":str(final),"name":final.name,**{key:manifest[key] for key in ("created_at","include_catalog","reason","size_bytes")}}
 
     def backup_inventory(self):

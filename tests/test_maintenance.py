@@ -8,6 +8,7 @@ import io
 import json
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -15,7 +16,7 @@ import unittest
 
 from app import Catalog, Server
 from initialize_catalog import initialize
-from maintenance import LibraryMaintenance, MaintenanceManager, checkpoint, contained, digest_file, read_json, recover_import, save_json
+from maintenance import LibraryMaintenance, MaintenanceManager, checkpoint, contained, digest_file, read_json, recover_import, save_json, sqlite_backup
 
 
 class MaintenanceTests(unittest.TestCase):
@@ -85,6 +86,78 @@ class MaintenanceTests(unittest.TestCase):
         self.assertFalse((path/'data'/'covers.sqlite3').exists())
         self.assertTrue((path/'app.py').exists())
         self.assertTrue((path/'static'/'app.js').exists())
+
+    def test_backup_retries_windows_directory_locks_without_recopying(self):
+        rename = Path.rename
+        for winerror in (5, 32, 33):
+            with self.subTest(winerror=winerror):
+                completed = self.engine.backup_inventory()['backup_summary']['total']
+                error = PermissionError("simulated backup directory lock")
+                error.winerror = winerror
+                attempts, messages = [], []
+                def locked_then_ready(source, destination):
+                    attempts.append((source, destination))
+                    self.assertEqual(self.engine.backup_inventory()['backup_summary']['total'], completed)
+                    if len(attempts) < 3:
+                        raise error
+                    return rename(source, destination)
+                with patch.object(Path, 'rename', locked_then_ready), patch('maintenance.time.sleep') as sleep, patch('maintenance.sqlite_backup', wraps=sqlite_backup) as copy:
+                    result = self.engine.backup(progress=messages.append)
+                self.assertEqual(len(attempts), 3)
+                self.assertEqual(len(set(attempts)), 1)
+                self.assertEqual(sleep.call_count, 2)
+                self.assertEqual(copy.call_count, 1)
+                self.assertTrue(any('正在重试' in message for message in messages))
+                folder = Path(result['path'])
+                self.assertFalse(attempts[0][0].exists())
+                for item in read_json(folder/'manifest.json')['files']:
+                    self.assertEqual(digest_file(folder/item['path']), item['sha256'])
+
+    @unittest.skipUnless(sys.platform == 'win32', 'requires a real Windows file handle')
+    def test_backup_recovers_from_real_windows_file_lock(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        create = kernel.CreateFileW
+        create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        create.restype = wintypes.HANDLE
+        close = kernel.CloseHandle
+        close.argtypes = (wintypes.HANDLE,)
+        close.restype = wintypes.BOOL
+        handle = None
+        messages = []
+        def progress(message):
+            nonlocal handle
+            messages.append(message)
+            if message == '正在完成备份…':
+                folder = next(self.engine.backups.glob('*.partial'))
+                # Share reads and writes but deny deletion/rename, like a scanner.
+                handle = create(str(folder/'data/favorites.sqlite3'), 0x80000000, 3, None, 3, 0, None)
+                if handle == ctypes.c_void_p(-1).value:
+                    raise ctypes.WinError(ctypes.get_last_error())
+            elif '正在重试' in message and handle is not None:
+                self.assertTrue(close(handle))
+                handle = None
+        try:
+            with patch('maintenance.time.sleep') as sleep:
+                result = self.engine.backup(progress=progress)
+            sleep.assert_called_once()
+            self.assertTrue(any('正在重试' in message for message in messages))
+            self.assertTrue(Path(result['path']).is_dir())
+            self.assertEqual(self.engine.backup_inventory()['backup_summary']['total'], 1)
+        finally:
+            if handle is not None and handle != ctypes.c_void_p(-1).value:
+                close(handle)
+
+    def test_backup_does_not_retry_unrelated_rename_errors(self):
+        for error in (FileNotFoundError('missing backup'), PermissionError('non-Windows permission failure'), OSError('simulated full disk')):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(Path, 'rename', side_effect=error) as rename, patch('maintenance.time.sleep') as sleep:
+                    with self.assertRaises(type(error)):
+                        self.engine.backup()
+                rename.assert_called_once()
+                sleep.assert_not_called()
+        self.assertEqual(self.engine.backup_inventory()['backup_summary']['total'], 0)
 
     def test_full_backup_has_catalog_and_independent_database_files(self):
         result=self.engine.backup(True)

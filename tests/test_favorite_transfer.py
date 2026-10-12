@@ -269,6 +269,57 @@ class FavoriteTransferTests(unittest.TestCase):
                 self.engine.import_favorites(ready["id"])
         self.assertEqual(self.rows(), {})
 
+    def test_backup_rename_lock_blocks_merge_until_retry_succeeds(self):
+        self.save(1, 10, 100)
+        before = self.rows()
+        ready = self.prepare(self.raw([self.item(1, 20, 200)]))
+        error = PermissionError('simulated Windows access denied')
+        error.winerror = 5
+        rename = Path.rename
+        attempts = []
+        def locked_then_ready(source, destination):
+            attempts.append(source)
+            self.assertEqual(self.rows(), before)
+            if len(attempts) == 1:
+                raise error
+            return rename(source, destination)
+        with patch.object(Path, 'rename', locked_then_ready), patch('maintenance.time.sleep') as sleep:
+            result = self.engine.import_favorites(ready['id'])
+        sleep.assert_called_once()
+        self.assertEqual(attempts, [attempts[0], attempts[0]])
+        self.assertEqual(result['summary']['updated'], 1)
+        self.assertEqual(self.rows()[1]['favorite_count'], 20)
+        with closing(sqlite3.connect(Path(result['backup']['path'])/'data/favorites.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=1').fetchone()[0], 10)
+
+    def test_persistent_backup_rename_denial_keeps_import_retryable(self):
+        self.save(1, 10, 100)
+        before = self.rows()
+        ready = self.prepare(self.raw([self.item(1, 20, 200)]))
+        error = PermissionError('simulated Windows access denied')
+        error.winerror = 5
+        with patch.object(Path, 'rename', side_effect=error) as rename, patch('maintenance.time.sleep') as sleep:
+            with self.assertRaisesRegex(ValueError, '备份文件夹无法完成改名') as failure:
+                self.engine.import_favorites(ready['id'])
+        self.assertEqual(rename.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 5)
+        self.assertIn('权限', str(failure.exception))
+        self.assertIn('.partial', str(failure.exception))
+        self.assertNotIn(str(self.root), str(failure.exception))
+        self.assertEqual(self.rows(), before)
+        self.assertEqual(self.engine.prepared_favorites()['id'], ready['id'])
+        self.assertEqual(self.engine.backup_inventory()['backup_summary']['total'], 0)
+        unfinished = list(self.engine.backups.glob('*.partial'))
+        self.assertEqual(len(unfinished), 1)
+        with self.assertRaisesRegex(ValueError, '尚未完成'):
+            self.engine.prepare_restore(str(unfinished[0]))
+        result = self.engine.import_favorites(ready['id'])
+        self.assertEqual(result['summary']['updated'], 1)
+        self.assertTrue(unfinished[0].is_dir())
+        self.assertEqual(self.engine.backup_inventory()['backup_summary']['total'], 1)
+        self.assertIsNone(self.engine.prepared_favorites())
+
     def test_own_other_unknown_merge_matrix_and_preview_match(self):
         own_id = self.store.collector_identity()["collector_id"]
         other_id = str(uuid4())

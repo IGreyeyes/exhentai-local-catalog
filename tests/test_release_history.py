@@ -8,7 +8,7 @@ import threading
 import unittest
 
 from app import Catalog, Server
-from client_version import APP_VERSION, REPOSITORY
+from client_version import APP_VERSION, RELEASE_NOTES, REPOSITORY
 from desktop_updates import ClientUpdater
 from release_history import ReleaseHistory, announcement_notes, bundled_history, upgrade_notes, version_key, version_sections
 from test_desktop import make_library
@@ -22,12 +22,13 @@ class ReleaseHistoryTests(unittest.TestCase):
         self.assertIn(APP_VERSION,sections)
         self.assertNotIn("历史更新概览",body)
         self.assertEqual(set(sections),{APP_VERSION})
-        self.assertIn("网络响应中断",sections[APP_VERSION])
-        self.assertIn("最多尝试 3 次",sections[APP_VERSION])
-        previous=next(item for item in bundled_history() if item["version"]=="1.1.27")
-        self.assertEqual(previous["date"],"2026-10-11T15:36:49Z")
+        self.assertEqual(body.strip(), RELEASE_NOTES.strip())
+        self.assertIn("短暂占用自动重试",sections[APP_VERSION])
+        self.assertIn("最多自动重试 5 次",sections[APP_VERSION])
+        previous=next(item for item in bundled_history() if item["version"]=="1.1.28")
+        self.assertEqual(previous["date"],"2026-10-11T17:47:01Z")
         self.assertFalse(previous["prerelease"])
-        self.assertIn("默认 14 天",previous["notes"])
+        self.assertIn("网络响应中断",previous["notes"])
         self.assertIn("1.1.11",{item["version"] for item in bundled_history()})
 
     def test_announcements_exclude_history_and_keep_only_actual_merged_sections(self):

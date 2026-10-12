@@ -18,6 +18,7 @@ import time
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 from test_desktop import make_library
+from client_version import APP_VERSION
 
 
 def verify(program_directory=None):
@@ -114,6 +115,8 @@ def verify(program_directory=None):
                 if b'id="history-list"' not in history_page or b'/release-notes.js' not in history_page:
                     raise AssertionError("Packaged complete release history page is missing")
             history=get('/api/release-history')
+            if history['current_version'] != APP_VERSION:
+                raise AssertionError('Packaged client version does not match this release')
             if not any(item['version']=='1.1.10' for item in history['entries']) or not any(item['version']==history['current_version'] for item in history['entries']):
                 raise AssertionError("Packaged offline history is incomplete")
             with opener.open(base+"/qq-group-qr.png",timeout=10) as response:
@@ -157,6 +160,19 @@ def verify(program_directory=None):
                 last=next(task for task in reversed(state['catalog_tasks']) if task['kind']=='apply')
                 if not state['result']['same_archive'] or last['result']['backup']!=saved:
                     raise AssertionError('Recheck lost the packaged application result')
+            snapshot = post('/api/maintenance/favorites-export', {}, token)
+            snapshot['records'].append({'gid':999, 'favorite_count':456, 'checked_at':1712345678, 'source':'e-hentai.org', 'collector_id':'', 'collector_name':''})
+            request = Request(base+'/api/maintenance/favorites-prepare', data=json.dumps(snapshot).encode(), headers={'Content-Type':'application/octet-stream', 'X-Catalog-Token':token}, method='POST')
+            with opener.open(request, timeout=10) as response:
+                task = json.load(response)
+            state = wait_task(task)
+            state = wait_task(post('/api/maintenance/favorites-import', {'prepared_id':state['prepared_favorites']['id']}, token))
+            imported = state['result']
+            if imported['summary']['added'] != 1 or imported['backup']['include_catalog']:
+                raise AssertionError('Packaged favorites import did not create a light protection backup')
+            with closing(sqlite3.connect(Path(imported['backup']['path'])/'data/favorites.sqlite3')) as db:
+                if db.execute('SELECT COUNT(*) FROM favorites WHERE gid=999').fetchone()[0] != 0 or db.execute('SELECT favorite_count FROM favorites WHERE gid=1').fetchone()[0] != 123:
+                    raise AssertionError('Import backup must contain the original favorites before merging')
             stop = Request(base + "/api/shutdown", data=b"", headers={"X-Local-Token":runtime["token"]}, method="POST")
             with opener.open(stop, timeout=10) as response:
                 json.load(response)
@@ -168,7 +184,9 @@ def verify(program_directory=None):
             with closing(sqlite3.connect(root / "data" / "favorites.sqlite3")) as db:
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok" or db.execute("SELECT favorite_count FROM favorites WHERE gid=1").fetchone()[0] != 123 or db.execute("SELECT state FROM record_status WHERE gid=1").fetchone()[0] != "watched":
                     raise AssertionError("Personal records changed")
-            report["packaged_service"] = "search, runtime backup, direct and full-backup catalog updates, inventory, recheck results, graceful shutdown and record preservation passed"
+                if db.execute('SELECT favorite_count,checked_at FROM favorites WHERE gid=999').fetchone() != (456,1712345678):
+                    raise AssertionError('Packaged favorites import did not persist the new count and original timestamp')
+            report["packaged_service"] = "version, search, runtime backup, direct and full-backup catalog updates, inventory, recheck results, favorites import with protection backup, graceful shutdown and record preservation passed"
             report["python_on_path"] = False
             report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         finally:

@@ -785,7 +785,7 @@ class Handler(BaseHTTPRequestHandler):
                         query=parse_qs(query_text,max_num_fields=40)
                         if self.path.endswith("verify"):
                             if not isinstance(payload.get("use_job",False),bool):raise ValueError("任务验证选项须为开关值。")
-                            result=collector.verify(None if payload.get("use_job") else query)
+                            result=collector.verify(None if payload.get("use_job") else query,payload.get("retry_unavailable",False))
                         elif self.path.endswith("preview"):result=collector.preview(query,payload.get("operation","start"))
                         else:result=collector.start(query,payload.get("preview_id"))
                     elif self.path.endswith("/pause"):result=collector.pause()

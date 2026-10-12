@@ -529,6 +529,7 @@ class Collector:
         self.interrupt = threading.Event()
         self.settings = None
         self.verified = False
+        self.verification_unavailable = set()
         self.last_request = 0.0
         self.response_times = deque(maxlen=20)
         self.preview_data = None
@@ -546,6 +547,7 @@ class Collector:
             settings = self.settings or (job.get("selection",{}) if job else {})
             return {
                 "configured": bool(self.settings), "verified": self.verified,
+                "verification_unavailable": len(self.verification_unavailable),
                 "has_credentials": bool(settings.get("cookies")),
                 "host": settings.get("host","exhentai.org"), "interval": (self.settings or {}).get("interval",4),
                 "proxy": settings.get("proxy",""), "refresh_days": settings.get("refresh_days",7),
@@ -614,6 +616,7 @@ class Collector:
             self.preview_data = None
             if not same_access:
                 self.response_times.clear()
+                self.verification_unavailable.clear()
         return self.status()
 
     def _fetch(self, settings, gid, token):
@@ -668,7 +671,7 @@ class Collector:
 
     def _verification_candidate(self, query, cutoff, excluded):
         eligible, eligibility_params = self._eligibility(cutoff)
-        placeholders=",".join("?" for _ in excluded)
+        excluded_params=(json.dumps(sorted(excluded)),) if excluded else ()
         if query is None:
             job=self.store.latest()
             if not job or job["state"] not in {"paused","awaiting_next","completed_with_errors"}:
@@ -676,14 +679,14 @@ class Collector:
             if job["host"]!=self.settings["host"]:
                 raise ValueError("请切换回创建任务时使用的源站。")
             target=job["current_round"]+(job["state"]=="awaiting_next")
-            skip=" AND t.gid NOT IN ("+placeholders+")" if excluded else ""
+            skip=" AND t.gid NOT IN (SELECT value FROM json_each(?))" if excluded else ""
             with self.store.connection() as db:
-                row=db.execute("SELECT t.gid,t.token FROM tasks AS t LEFT JOIN favorites AS f ON f.gid=t.gid WHERE t.job_id=? AND t.round_no<=? AND t.state IN ('pending','failed') AND "+eligible+skip+" ORDER BY (t.state='failed'),t.priority,t.gid DESC LIMIT 1",(job["id"],target,*eligibility_params,*excluded)).fetchone()
+                row=db.execute("SELECT t.gid,t.token FROM tasks AS t LEFT JOIN favorites AS f ON f.gid=t.gid WHERE t.job_id=? AND t.round_no<=? AND t.state IN ('pending','failed') AND "+eligible+skip+" ORDER BY (t.state='failed'),t.priority,t.gid DESC LIMIT 1",(job["id"],target,*eligibility_params,*excluded_params)).fetchone()
             return row,job["id"]
         _,where,params=self.catalog.collection_plan(query)
         if excluded:
-            where="("+where+") AND g.gid NOT IN ("+placeholders+")"
-            params=(*params,*excluded)
+            where="("+where+") AND g.gid NOT IN (SELECT value FROM json_each(?))"
+            params=(*params,*excluded_params)
         if self.settings.get("collection_mode") in {"rounds","batch"}:
             with self.store.connection() as db:
                 db.execute("ATTACH DATABASE ? AS catalog",(self.catalog.path.as_uri()+"?mode=ro",))
@@ -695,18 +698,24 @@ class Collector:
                 row=db.execute("SELECT g.gid,g.token FROM gallery AS g"+JOIN_FAVORITES+"WHERE ("+where+") AND "+eligible+" ORDER BY "+order+" LIMIT 1",(*params,*eligibility_params)).fetchone()
         return row,0
 
-    def verify(self, query):
+    def verify(self, query, retry_unavailable=False):
         with self.lock:
+            if not isinstance(retry_unavailable,bool):
+                raise ValueError("重新验证失败作品选项须为开关值。")
             self._require_ready(verification=True)
             if self.thread and self.thread.is_alive():
                 raise ValueError("采集任务尚未停止，请等待当前请求结束。")
+            if retry_unavailable:
+                self.verification_unavailable.clear()
             self.preview_data=None
             cutoff=int(time.time())-self.settings["refresh_days"]*86400
             unavailable=[]
             for attempt in range(3):
-                row,job_id=self._verification_candidate(query,cutoff,[item["gid"] for item in unavailable])
+                row,job_id=self._verification_candidate(query,cutoff,self.verification_unavailable)
                 if row is None:
                     if unavailable:break
+                    if self.verification_unavailable and self._verification_candidate(query,cutoff,())[0] is not None:
+                        raise ValueError("当前范围内的待验证作品已全部尝试，没有其他可验证作品；本次未向源站发送请求。请先在浏览器核对失败作品的访问情况，处理后点击“重新验证失败作品”。这不表示源站登录失效；原队列和已成功数据保留。")
                     return {"verified":self.verified,"no_request":True,"message":"当前条件没有需要抓取的作品，未向源站发送请求。可先预估查看跳过数量。"}
                 delay=max(0,self.settings["interval"]-(time.monotonic()-self.last_request))
                 if not attempt and delay:
@@ -727,6 +736,7 @@ class Collector:
                         if job_id:
                             db.execute("UPDATE tasks SET state='failed',attempts=?,error=? WHERE job_id=? AND gid=?",(attempts,str(error),job_id,row["gid"]))
                         self.store._save_failure(db,row["gid"],row["token"],self.settings["host"],error,attempts,job_id)
+                    self.verification_unavailable.add(row["gid"])
                     unavailable.append({"gid":row["gid"],"url":gallery_url(self.settings["host"],row["gid"],row["token"]),"error":str(error)})
                     continue
                 except RetryableFetch as error:
@@ -737,7 +747,9 @@ class Collector:
                 self.verified=True
                 return {"verified":True,"gid":row["gid"],"favorite_count":count.favorite_count,"rating_count":count.rating_count,"unavailable":unavailable}
             last=unavailable[-1]
-            raise ValueError(f"本次验证的 {len(unavailable)} 条作品均不可访问，已记录到失败列表；这不表示源站登录失效。请核对具体作品，或再次验证其他待处理作品：{last['url']}")
+            has_more=self._verification_candidate(query,cutoff,self.verification_unavailable)[0] is not None
+            next_step="再次点击验证将尝试其他待处理作品，不会重复本次失败作品。" if has_more else "当前范围没有其他可验证作品；请先在浏览器核对失败作品，处理后点击“重新验证失败作品”。"
+            raise ValueError(f"本次验证的 {len(unavailable)} 条作品均不可访问，已记录到失败列表；这不表示源站登录失效。{next_step}最后一条作品：{last['url']}")
 
     def _plan(self, query, operation, cutoff):
         if not self.settings:

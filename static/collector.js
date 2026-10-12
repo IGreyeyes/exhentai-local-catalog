@@ -105,6 +105,8 @@
     ui("collector-batch-hint").textContent=roundMode?"确认时保存全部待抓取作品及其顺序，按设定数量分轮。每轮结束自动停止；修改此处的数量仅影响新计划，已保存计划继续使用原来的每轮数量。":batchMode?(ratingPriority?"从全历史匹配记录中直接选择评分最高的本批候选，不再平均分配年份。分批结果仍不代表完整收藏榜。":"从全历史匹配记录中按发布年份轮流挑选，年份内评分高的优先；先补未记录、未尝试的作品。分批排名不代表完整收藏榜。"):(ratingPriority?"全量采集所有待处理作品，并按平均评分从高到低排列队列。":"全量采集所有符合缓存规则的待处理作品；数量较大时可能需要较长时间。");
     ui("collector-policy-hint").textContent=skip?"只补缺失的收藏数；已成功采集的作品即使过期也跳过，缓存天数此时不生效。失败或未知项仍可抓取。":"超过缓存天数后，再次创建任务时才会刷新；不会自动重新抓取。";
     ui("collector-verify").disabled=busy||cooling||settingsDirty||!state?.configured||(!hasSearch&&!savedTask());
+    ui("collector-reverify").hidden=!state?.verification_unavailable;
+    ui("collector-reverify").disabled=ui("collector-verify").disabled;
     ui("collector-verify").textContent=savedTask()?"验证原任务的源站访问":"验证并读取一条";
     ui("collector-start").disabled=busy||settingsDirty||!state?.configured||!hasSearch||["paused","running","preparing","awaiting_next"].includes(job?.state);
     ui("collector-pause").disabled=actionBusy||job?.state!=="running";
@@ -262,6 +264,7 @@
   ui("credential-import").onclick=()=>ui("credential-file").click();
   ui("credential-file").onchange=event=>importCredentials(event.target.files?.[0]);
   ui("collector-verify").onclick=()=>action("verify",savedTask()?{use_job:true}:{query:submittedFilters.toString()});
+  ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),retry_unavailable:true});
   ui("collector-start").onclick=()=>action("preview",{query:submittedFilters.toString(),operation:"start"});
   ["pause","cancel"].forEach(name=>ui(`collector-${name}`).onclick=()=>action(name));
   ["resume","retry"].forEach(name=>ui(`collector-${name}`).onclick=()=>action("preview",{operation:name}));

@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import closing
 from http.client import BadStatusLine, HTTPResponse, IncompleteRead
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -412,6 +413,126 @@ class FavoriteCollectionTests(unittest.TestCase):
         job=self.collector.store.latest()
         self.assertEqual(job['state'],'completed_with_errors')
         self.assertEqual((job['failed'],job['succeeded']),(1,2))
+
+    def test_repeated_verification_moves_past_first_three_failures_in_all_modes(self):
+        for mode in ('full','batch','rounds'):
+            with self.subTest(mode=mode):
+                self.collector.close()
+                self.collector=Collector(self.catalog,self.fetch)
+                with self.catalog.favorites.connection() as db:
+                    db.execute('DELETE FROM favorites')
+                self.calls=[]
+                self.collector.configure({'host':'e-hentai.org','collection_mode':mode})
+                self.collector.settings['interval']=0.00001
+                def fetch(settings,gid,token):
+                    self.calls.append(gid)
+                    if gid>1:raise GalleryUnavailable('test unavailable')
+                    return 10
+                self.collector.fetcher=fetch
+                with self.assertRaisesRegex(ValueError,'再次点击验证将尝试其他'):
+                    self.collector.verify(self.query)
+                self.collector.last_request=0
+                result=self.collector.verify(self.query)
+                self.assertTrue(result['verified'])
+                self.assertEqual(self.calls,[4,3,2,1])
+                self.assertIsNone(self.collector.store.latest())
+
+    def test_exhausted_verification_stops_requests_until_explicit_retry(self):
+        self.collector.configure({'host':'e-hentai.org'})
+        self.collector.settings['interval']=0.00001
+        def unavailable(settings,gid,token):
+            self.calls.append(gid)
+            raise GalleryUnavailable('test unavailable')
+        self.collector.fetcher=unavailable
+        with self.assertRaisesRegex(ValueError,'3 条作品均不可访问'):
+            self.collector.verify(self.query)
+        self.collector.last_request=0
+        with self.assertRaisesRegex(ValueError,'没有其他可验证作品'):
+            self.collector.verify(self.query)
+        before=list(self.calls)
+        with self.assertRaisesRegex(ValueError,'本次未向源站发送请求'):
+            self.collector.verify(self.query)
+        self.assertEqual(self.calls,before)
+        self.assertFalse(self.collector.verified)
+        self.collector.fetcher=self.fetch;self.collector.last_request=0
+        result=self.collector.verify(self.query,retry_unavailable=True)
+        self.assertEqual((result['verified'],result['gid']),(True,4))
+        self.assertEqual(self.calls,[4,3,2,1,4])
+        with self.catalog.favorites.connection() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM collection_failures WHERE gid=4').fetchone())
+
+    def test_saved_task_verification_does_not_repeat_failures_or_replace_queue(self):
+        with closing(sqlite3.connect(self.catalog.path)) as db, db:
+            for gid in range(5,8):
+                db.execute("INSERT INTO gallery VALUES (?,'abcdef0123','Test book','','Non-H',?,10,'4.0',0,0,0)",(gid,gid))
+                db.execute('INSERT INTO gid_tid VALUES (?,1)',(gid,))
+        self.ready()
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('pause'))
+        self.start();self.finish()
+        job=self.collector.store.latest();self.calls=[]
+        def fetch(settings,gid,token):
+            self.calls.append(gid)
+            if gid>=4:raise GalleryUnavailable('test unavailable')
+            return gid*10
+        self.collector.fetcher=fetch;self.collector.last_request=0
+        with self.assertRaisesRegex(ValueError,'3 条作品均不可访问'):
+            self.collector.verify(None)
+        self.collector.last_request=0
+        result=self.collector.verify(None)
+        self.assertEqual((result['verified'],self.calls),(True,[6,5,4,3]))
+        updated=self.collector.store.latest()
+        self.assertEqual((updated['id'],updated['state'],updated['total']),(job['id'],'paused',7))
+        self.assertEqual(updated['failed'],3)
+        self.resume();self.finish()
+        self.assertEqual(self.collector.store.latest()['state'],'completed_with_errors')
+        with self.catalog.favorites.connection() as db:
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=7').fetchone()[0],70)
+
+    def test_only_access_changes_reset_verification_failures(self):
+        self.collector.configure({'host':'e-hentai.org'})
+        self.collector.settings['interval']=0.00001
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(GalleryUnavailable('test unavailable'))
+        with self.assertRaises(ValueError):self.collector.verify(self.query)
+        self.collector.configure({'host':'e-hentai.org','interval':5,'collection_mode':'rounds','skip_existing':True})
+        self.assertEqual(self.collector.status()['verification_unavailable'],3)
+        self.collector.settings['interval']=0.00001
+        self.collector.fetcher=self.fetch;self.collector.last_request=0
+        self.assertEqual(self.collector.verify(self.query)['gid'],1)
+        self.collector.configure({'host':'e-hentai.org','proxy':'http://127.0.0.1:7890'})
+        self.assertEqual(self.collector.status()['verification_unavailable'],0)
+        self.collector.last_request=0
+        self.assertEqual(self.collector.verify(self.query)['gid'],4)
+
+    def test_retry_option_validation_does_not_clear_failures(self):
+        self.collector.configure({'host':'e-hentai.org'})
+        self.collector.verification_unavailable.add(4)
+        with self.assertRaisesRegex(ValueError,'开关值'):
+            self.collector.verify(self.query,retry_unavailable='false')
+        self.assertEqual(self.collector.verification_unavailable,{4})
+        self.assertEqual(self.calls,[])
+
+    def test_many_previous_verification_failures_do_not_hit_sql_parameter_limit(self):
+        self.collector.configure({'host':'e-hentai.org'})
+        self.collector.verification_unavailable.update(range(4,40005))
+        self.assertEqual(self.collector.verify(self.query)['gid'],3)
+
+    def test_saved_round_verification_exhaustion_does_not_open_future_rounds(self):
+        self.collector.configure({'host':'e-hentai.org','collection_mode':'rounds','batch_size':1})
+        self.collector.verified=True;self.collector.settings['interval']=0.00001
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('pause'))
+        self.start();self.finish()
+        job=self.collector.store.latest();self.calls=[]
+        def unavailable(settings,gid,token):
+            self.calls.append(gid)
+            raise GalleryUnavailable('test unavailable')
+        self.collector.fetcher=unavailable;self.collector.last_request=0
+        with self.assertRaisesRegex(ValueError,'没有其他可验证作品'):
+            self.collector.verify(None)
+        with self.assertRaisesRegex(ValueError,'本次未向源站发送请求'):
+            self.collector.verify(None)
+        self.assertEqual(self.calls,[4])
+        updated=self.collector.store.latest()
+        self.assertEqual((updated['id'],updated['current_round'],updated['pending']),(job['id'],1,3))
 
     def test_throttling_pauses_and_survives_restart(self):
         self.ready()

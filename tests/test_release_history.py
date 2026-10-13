@@ -23,12 +23,13 @@ class ReleaseHistoryTests(unittest.TestCase):
         self.assertNotIn("历史更新概览",body)
         self.assertEqual(set(sections),{APP_VERSION})
         self.assertEqual(body.strip(), RELEASE_NOTES.strip())
-        self.assertIn("连续验证会换作品",sections[APP_VERSION])
-        self.assertIn("重新验证失败作品",sections[APP_VERSION])
-        previous=next(item for item in bundled_history() if item["version"]=="1.1.29")
-        self.assertEqual(previous["date"],"2026-10-12T12:52:59Z")
+        self.assertIn("正常作品页不再被误判",sections[APP_VERSION])
+        self.assertIn("访问提示不等于作品删除",sections[APP_VERSION])
+        self.assertIn("验证直接显示具体原因",sections[APP_VERSION])
+        previous=next(item for item in bundled_history() if item["version"]=="1.1.30")
+        self.assertEqual(previous["date"],"2026-10-12T18:41:31Z")
         self.assertFalse(previous["prerelease"])
-        self.assertIn("短暂占用自动重试",previous["notes"])
+        self.assertIn("连续验证会换作品",previous["notes"])
         self.assertIn("1.1.11",{item["version"] for item in bundled_history()})
 
     def test_announcements_exclude_history_and_keep_only_actual_merged_sections(self):

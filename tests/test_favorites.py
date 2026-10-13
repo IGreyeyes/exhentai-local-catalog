@@ -26,6 +26,46 @@ def http_response(payload):
 
 
 class FavoriteNetworkTests(unittest.TestCase):
+    def test_http_not_found_requires_an_explicit_gallery_notice(self):
+        for code in (404,410):
+            for body, expected in (
+                (b'',CollectionPaused),
+                (b'<html>Proxy route unavailable</html>',CollectionPaused),
+                (b'<h1>Gallery Not Available</h1>',CollectionPaused),
+                (b'<html>Please log in. Gallery not found.</html>',CollectionPaused),
+                (b'<span id="favcount">12</span>',CollectionPaused),
+                (b'<span id="favcount">12</span><p>This gallery has been removed.</p>',CollectionPaused),
+                (b'<!-- Gallery not found. --><script>"This gallery has been removed"</script>',CollectionPaused),
+                (b'<h1>Gallery not found.</h1>',GalleryUnavailable),
+                (b'<p>This gallery has been removed.</p>',GalleryUnavailable),
+            ):
+                with self.subTest(code=code,body=body),patch('favorites.build_opener') as opener:
+                    stream=io.BytesIO(body)
+                    opener.return_value.open.side_effect=HTTPError('https://exhentai.org/g/1/abcdef0123/',code,'test error',{},stream)
+                    with self.assertRaises(expected) as caught:
+                        fetch_favorites({'host':'exhentai.org','cookies':'test-cookie=test-value'},1,'abcdef0123')
+                    self.assertIn(f'HTTP {code}',str(caught.exception))
+                    self.assertTrue(stream.closed)
+                    self.assertNotIn('Proxy route unavailable',str(caught.exception))
+                    self.assertNotIn('test-value',str(caught.exception))
+
+    def test_http_not_found_preserves_limit_and_challenge_handling(self):
+        for body, cooldown in ((b'Too many requests',3600),(b'Just a moment...',0)):
+            with self.subTest(body=body),patch('favorites.build_opener') as opener:
+                opener.return_value.open.side_effect=HTTPError('https://exhentai.org/g/1/abcdef0123/',404,'test',{},io.BytesIO(body))
+                with self.assertRaises(CollectionPaused) as caught:
+                    fetch_favorites({'host':'exhentai.org'},1,'abcdef0123')
+                self.assertEqual(caught.exception.cooldown,cooldown)
+
+    def test_truncated_http_error_body_is_retryable(self):
+        body=b'<p>Gallery not found.</p>'
+        with patch('favorites.build_opener') as opener:
+            response=http_response(b'HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 1000\r\n\r\n'+body)
+            opener.return_value.open.side_effect=HTTPError('https://exhentai.org/g/1/abcdef0123/',404,'test',response.headers,response)
+            with self.assertRaises(RetryableFetch):
+                fetch_favorites({'host':'exhentai.org'},1,'abcdef0123')
+            self.assertTrue(response.closed)
+
     def test_broken_http_responses_become_retryable_and_discard_partial_counts(self):
         body = b'<span id="favcount">999</span>'
         responses = (
@@ -87,17 +127,43 @@ class FavoriteParsingTests(unittest.TestCase):
             parse_favorite_count('Your IP address has been banned.')
         with self.assertRaises(CollectionPaused):
             parse_favorite_count('Just a moment...')
-        with self.assertRaises(GalleryUnavailable):
+        with self.assertRaises(CollectionPaused):
             parse_favorite_count('Gallery Not Available')
 
     def test_not_found_and_other_unavailable_notices_are_gallery_failures(self):
         for notice in (
             'Gallery not found. If you just added this gallery, you may have to wait a short while before it becomes available. It might also have been reverted to its previous version.',
-            'This gallery is not available.',
+            'This gallery has been removed.',
             'This gallery is pining for the fjords.',
         ):
             with self.subTest(notice=notice),self.assertRaises(GalleryUnavailable):
                 parse_favorite_count(notice)
+
+    def test_valid_gallery_counts_are_not_overridden_by_notice_text(self):
+        for content in (
+            '<script>var message="This gallery is not available";</script>',
+            '<!-- Gallery not found. -->',
+            '<style>/* Gallery Not Available */</style>',
+            '<script>"Too many requests"</script><!-- Just a moment... -->',
+            '<p>A user comment: This gallery is pining for the fjords.</p>',
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(parse_favorite_count('<script>var gid=1;</script><td id="favcount">12 times</td>'+content,1),12)
+
+    def test_limit_and_challenge_notices_still_pause_with_a_count_field(self):
+        for content in ('<p>Too many requests</p>','<p>Just a moment...</p>','<div class="cf-chl-test">Check</div>'):
+            with self.subTest(content=content),self.assertRaises(CollectionPaused):
+                parse_favorite_count('<td id="favcount">12</td>'+content)
+
+    def test_unavailable_without_gallery_fields_pauses_for_access_check(self):
+        for content in ('Gallery Not Available','This gallery is unavailable.','This gallery is not available.'):
+            with self.subTest(content=content),self.assertRaisesRegex(CollectionPaused,'Cookie'):
+                parse_favorite_count(content)
+
+    def test_script_and_comment_text_do_not_confirm_a_deleted_gallery(self):
+        for content in ('<script>"Gallery not found"</script>','<!-- This gallery has been removed. -->','<template>Gallery not found</template>'):
+            with self.subTest(content=content),self.assertRaises(CollectionPaused):
+                parse_favorite_count(content)
 
     def test_redirect_cannot_leak_cookie_or_change_gallery(self):
         request=Request('https://exhentai.org/g/1/abcdef0123/',headers={'Cookie':'test-cookie=secret'})
@@ -140,6 +206,50 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.collector.verify(self.query)
         # Only mocked requests use this tiny interval; the public API enforces >=1s.
         self.collector.settings['interval']=0.001
+
+    def test_ambiguous_unavailable_page_preserves_saved_queue_and_successful_data(self):
+        self.ready()
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('test pause'))
+        self.start();self.finish()
+        job=self.collector.store.latest()
+        with self.collector.store.connection() as db:
+            before=[tuple(row) for row in db.execute('SELECT gid,state,attempts,error FROM tasks ORDER BY gid')]
+            counts=[tuple(row) for row in db.execute('SELECT * FROM favorites')]
+        self.calls=[]
+        self.collector.last_request=0
+        def unavailable(settings,gid,token):
+            self.calls.append(gid)
+            return parse_favorite_count('<h1>Gallery Not Available</h1>')
+        self.collector.fetcher=unavailable
+        with self.assertRaisesRegex(ValueError,'Cookie') as caught:
+            self.collector.verify(None)
+        self.assertIn('作品链接：https://exhentai.org/g/',str(caught.exception))
+        self.assertEqual(len(self.calls),1)
+        self.assertFalse(self.collector.verified)
+        self.assertFalse(self.collector.verification_unavailable)
+        self.assertEqual(self.collector.store.latest()['id'],job['id'])
+        with self.collector.store.connection() as db:
+            self.assertEqual(before,[tuple(row) for row in db.execute('SELECT gid,state,attempts,error FROM tasks ORDER BY gid')])
+            self.assertEqual(counts,[tuple(row) for row in db.execute('SELECT * FROM favorites')])
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM collection_failures').fetchone()[0],0)
+
+    def test_ambiguous_unavailable_page_pauses_background_task_at_first_item(self):
+        self.ready()
+        self.calls=[]
+        def unavailable(settings,gid,token):
+            self.calls.append(gid)
+            return parse_favorite_count('This gallery is not available.')
+        self.collector.fetcher=unavailable
+        self.start();self.finish()
+        job=self.collector.store.latest()
+        self.assertEqual(job['state'],'paused')
+        self.assertIn('Cookie',job['message'])
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(job['failed'],0)
+        with self.collector.store.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM collection_failures').fetchone()[0],0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks WHERE state='pending' AND attempts=0").fetchone()[0],3)
+            self.assertEqual(db.execute('SELECT gid,favorite_count FROM favorites').fetchone()[:],(4,40))
 
     def test_request_intervals_and_restart_default(self):
         for seconds in (4,3.5,3,2.5,2,1.5,1,60):

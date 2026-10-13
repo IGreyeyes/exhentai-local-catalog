@@ -27,3 +27,4 @@ main{margin-left:226px;min-width:0;flex:1}.topbar{height:73px;border-bottom:1px 
 @media(max-width:760px){.sidebar .nav-contact{display:inline-flex;margin-top:14px;padding:8px 12px;font-size:12px;background:#e5eddf}.sidebar .nav-contact>span:first-child{font-size:18px}}
 
 @media(max-width:760px){.sidebar .nav-changelog{display:inline-flex;margin-top:14px;padding:8px 12px;font-size:12px;background:#e5eddf}.sidebar .nav-changelog>span:first-child{font-size:18px}}
+.collector-feedback{white-space:pre-line;overflow-wrap:anywhere}

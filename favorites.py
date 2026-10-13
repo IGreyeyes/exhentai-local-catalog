@@ -84,22 +84,63 @@ class FavoriteParser(HTMLParser):
             self.current.append(text)
 
 
-def parse_favorite_count(html, expected_gid=None):
-    lower = html.lower()
+class SourceNoticeParser(HTMLParser):
+    """Read page notices without matching JavaScript, CSS or HTML comments."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hidden = []
+        self.text = []
+
+    def handle_starttag(self, tag, attributes):
+        if tag in {"script", "style", "template"}:
+            self.hidden.append(tag)
+
+    def handle_endtag(self, tag):
+        if self.hidden and tag == self.hidden[-1]:
+            self.hidden.pop()
+
+    def handle_data(self, text):
+        if not self.hidden:
+            self.text.append(text)
+
+
+def source_page_notice(html, gallery_fields=None):
+    if gallery_fields is None:
+        fields = FavoriteParser()
+        fields.feed(html)
+        gallery_fields = len(fields.values) == 1
+    parser = SourceNoticeParser()
+    parser.feed(html)
+    lower = re.sub(r"\s+", " ", " ".join(parser.text)).lower()
     if any(text in lower for text in ("ip address has been", "temporarily banned", "excessive pageloads", "too many requests")):
-        raise CollectionPaused("源站提示请求受限，已暂停。请稍后在浏览器确认可正常访问，再继续。", 3600)
-    if any(text in lower for text in ("cf-chl-", "just a moment...", "verify you are human", "checking your browser")):
-        raise CollectionPaused("源站要求浏览器验证，已暂停。请在源站完成验证；程序不会自动处理验证页。")
+        return CollectionPaused("源站提示请求受限，已暂停。请稍后在浏览器确认可正常访问，再继续。", 3600)
+    if any(text in lower for text in ("just a moment...", "verify you are human", "checking your browser")) or "cf-chl-" in html.lower():
+        return CollectionPaused("源站要求浏览器验证，已暂停。请在源站完成验证；程序不会自动处理验证页。")
+    if gallery_fields:
+        return None
+    if any(text in lower for text in ("please log in", "please login", "not logged in", "must be logged in", "must log in")):
+        return CollectionPaused("源站要求登录，已暂停。请从浏览器中同一源站的作品页重新填写 Cookie，并核对客户端 HTTP 代理。")
     if "gallery not found" in lower:
-        raise GalleryUnavailable("源站未找到这部作品，可能已删除或回退到旧版本。")
-    if any(text in lower for text in ("gallery not available", "this gallery has been removed", "this gallery is unavailable", "this gallery is not available", "this gallery is pining for the fjords")):
-        raise GalleryUnavailable("源站作品已不可访问。")
+        return GalleryUnavailable("源站提示 Gallery not found：未找到这部作品，可能已删除或回退到旧版本。")
+    if "this gallery has been removed" in lower:
+        return GalleryUnavailable("源站明确提示 This gallery has been removed：这部作品已移除。")
+    if "this gallery is pining for the fjords" in lower:
+        return GalleryUnavailable("源站提示 This gallery is pining for the fjords：这部作品已下架。")
+    if any(text in lower for text in ("gallery not available", "this gallery is unavailable", "this gallery is not available")):
+        return CollectionPaused("源站返回 Gallery Not Available / 作品不可用提示，且没有收藏数字段；尚不能确认作品已删除。若浏览器可打开同一链接，请从该源站重新填写三项 Cookie 的 Value，并核对客户端 HTTP 代理与浏览器使用相同的出口，再应用设置并验证原任务。")
+    return None
+
+
+def parse_favorite_count(html, expected_gid=None):
     if expected_gid is not None:
         identity = re.search(r"\b(?:var|let|const)\s+gid\s*=\s*(\d+)", html)
         if identity and int(identity[1]) != int(expected_gid):
             raise CollectionPaused("返回了其他作品的页面，已暂停以避免写错收藏数。")
     parser = FavoriteParser()
     parser.feed(html)
+    notice = source_page_notice(html, gallery_fields=len(parser.values) == 1)
+    if notice:
+        raise notice
     if len(parser.values) != 1:
         raise CollectionPaused("未找到可靠的收藏数字段，可能是登录失效、提示页或页面格式变化。请检查源站访问。")
     value = parser.values[0].strip()
@@ -164,9 +205,23 @@ def fetch_favorites(settings, gid, token):
     except HTTPError as error:
         code = error.code
         retry_after = error.headers.get("Retry-After", "")
-        error.close()
         if code in {404, 410}:
-            raise GalleryUnavailable(f"作品不可访问（HTTP {code}）。") from None
+            try:
+                content = error.read(4 * 1024 * 1024 + 1)
+                remaining = getattr(error.fp, "length", None)
+                if type(remaining) is int and remaining > 0:
+                    raise RetryableFetch("源站错误响应未完整接收，请检查网络或代理后重试。")
+                notice = source_page_notice(content.decode("utf-8", errors="replace")) if len(content) <= 4 * 1024 * 1024 else None
+            except (HTTPException, URLError, TimeoutError, ConnectionError, OSError):
+                raise RetryableFetch("源站错误响应接收中断，请检查网络或代理后重试。") from None
+            finally:
+                error.close()
+            if notice:
+                if isinstance(notice, GalleryUnavailable):
+                    raise GalleryUnavailable(f"{notice}（HTTP {code}）") from None
+                raise CollectionPaused(f"{notice}（HTTP {code}）", notice.cooldown) from None
+            raise CollectionPaused(f"源站返回 HTTP {code}，但未确认作品已删除；已暂停，未将本条记为作品失败。若浏览器可打开同一链接，请重新核对 Cookie、账号权限及客户端 HTTP 代理，再应用设置并验证原任务。") from None
+        error.close()
         if code == 429:
             if retry_after.isdigit():
                 cooldown = max(60,int(retry_after))
@@ -728,7 +783,7 @@ class Collector:
                 except CollectionPaused as error:
                     self.cooldown_until=time.time()+error.cooldown
                     self.store.remember_cooldown(self.cooldown_until)
-                    raise ValueError(str(error)) from None
+                    raise ValueError(f"验证已停止：{error}\n作品链接：{gallery_url(self.settings['host'],row['gid'],row['token'])}") from None
                 except GalleryUnavailable as error:
                     with self.store.connection() as db:
                         task=db.execute("SELECT attempts FROM tasks WHERE job_id=? AND gid=?",(job_id,row["gid"])).fetchone() if job_id else None
@@ -749,7 +804,8 @@ class Collector:
             last=unavailable[-1]
             has_more=self._verification_candidate(query,cutoff,self.verification_unavailable)[0] is not None
             next_step="再次点击验证将尝试其他待处理作品，不会重复本次失败作品。" if has_more else "当前范围没有其他可验证作品；请先在浏览器核对失败作品，处理后点击“重新验证失败作品”。"
-            raise ValueError(f"本次验证的 {len(unavailable)} 条作品均不可访问，已记录到失败列表；这不表示源站登录失效。{next_step}最后一条作品：{last['url']}")
+            reasons="\n".join(f"作品 ID {item['gid']}：{item['error']}" for item in unavailable)
+            raise ValueError(f"本次验证的 {len(unavailable)} 条作品均不可访问，已记录到失败列表。{next_step}\n{reasons}\n最后一条作品：{last['url']}")
 
     def _plan(self, query, operation, cutoff):
         if not self.settings:

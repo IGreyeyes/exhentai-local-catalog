@@ -216,7 +216,7 @@
       if(path==="preview"){
         if(revision===previewRevision&&key===scopeKey()){renderPreview(data,key,payload.query||"");feedback("预估已生成，确认后才会进行批量抓取。");}
         else feedback("搜索或设置已变化，请重新预估。",true);
-      }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。`:""}验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。现在请预估耗时，再确认采集。`);
+      }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。\n${data.unavailable.map(item=>`作品 ID ${item.gid}：${item.error}`).join("\n")}\n`:""}验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。现在请预估耗时，再确认采集。`);
       else feedback({settings:"设置已应用。可先预估耗时，再确认采集。",start:data.job?.state==="completed"?data.job.message:"计划已保存，本轮已开始采集，可随时暂停。",next_round:"下一轮已开始。本轮结束后会再次自动停止。",next_batch:data.job?.state==="completed"?data.job.message:"下一批已开始采集，沿用上一批的搜索条件。",pause:"已请求暂停，正在发出的请求会等待结束。",resume:"已按预估继续采集。",retry:"已按预估重试失败项。",cancel:"任务已结束，已采集的收藏数保留。"}[path]||"操作完成。");
       if(path==="settings") {settingsDirty=false;["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");}
       if(path!=="preview"&&path!=="verify"){

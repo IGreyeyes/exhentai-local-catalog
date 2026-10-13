@@ -1082,6 +1082,21 @@ class Collector:
                         self.store._save(db,row["gid"],count.favorite_count,settings["host"],count.rating_count)
                         db.execute("UPDATE tasks SET state='done',attempts=attempts+1,error='' WHERE job_id=? AND gid=?", (job_id,row["gid"]))
                         db.execute("UPDATE jobs SET updated_at=? WHERE id=?", (int(time.time()),job_id))
+                    with self.lock:
+                        self.verification_issues.pop(row["gid"],None)
+                except (RetryableFetch, GalleryUnavailable, GalleryAccessUncertain) as error:
+                    phase = "保存失败记录"
+                    attempts = row["attempts"]+1
+                    terminal = isinstance(error, (GalleryUnavailable, GalleryAccessUncertain)) or attempts >= 3
+                    with self.store.connection() as db:
+                        db.execute("UPDATE tasks SET state=?,attempts=?,error=? WHERE job_id=? AND gid=?", ("failed" if terminal else "pending",attempts,str(error),job_id,row["gid"]))
+                        if terminal:self.store._save_failure(db,row["gid"],row["token"],settings["host"],error,attempts,job_id)
+                        db.execute("UPDATE jobs SET message=?,updated_at=? WHERE id=? AND state='running'", (str(error) + (" 已记录失败项，继续后续队列。" if terminal else " 正在等待后重试。"),int(time.time()),job_id))
+                    if terminal:
+                        with self.lock:
+                            self.verification_issues.pop(row["gid"],None)
+                    if not terminal and self.interrupt.wait(max(settings["interval"],10*attempts)):
+                        return
                 except CollectionPaused as error:
                     phase = "保存暂停状态"
                     with self.lock:
@@ -1090,16 +1105,6 @@ class Collector:
                         with self.store.connection() as db:
                             db.execute("UPDATE jobs SET state='paused',message=?,cooldown_until=?,updated_at=? WHERE id=? AND state='running'", (str(error),self.cooldown_until,int(time.time()),job_id))
                     return
-                except (RetryableFetch, GalleryUnavailable) as error:
-                    phase = "保存失败记录"
-                    attempts = row["attempts"]+1
-                    terminal = isinstance(error, GalleryUnavailable) or attempts >= 3
-                    with self.store.connection() as db:
-                        db.execute("UPDATE tasks SET state=?,attempts=?,error=? WHERE job_id=? AND gid=?", ("failed" if terminal else "pending",attempts,str(error),job_id,row["gid"]))
-                        if terminal:self.store._save_failure(db,row["gid"],row["token"],settings["host"],error,attempts,job_id)
-                        db.execute("UPDATE jobs SET message=?,updated_at=? WHERE id=? AND state='running'", (str(error) + (" 已记录失败项。" if terminal else " 正在等待后重试。"),int(time.time()),job_id))
-                    if not terminal and self.interrupt.wait(max(settings["interval"],10*attempts)):
-                        return
                 finally:
                     self.last_request = time.monotonic()
         except Exception as error:

@@ -233,23 +233,81 @@ class FavoriteCollectionTests(unittest.TestCase):
             self.assertEqual(counts,[tuple(row) for row in db.execute('SELECT * FROM favorites')])
             self.assertEqual(db.execute('SELECT COUNT(*) FROM collection_failures').fetchone()[0],0)
 
-    def test_ambiguous_unavailable_page_pauses_background_task_at_first_item(self):
+    def test_ambiguous_unavailable_page_is_failed_without_stopping_background_task(self):
         self.ready()
+        self.collector.store.save(3,12,'exhentai.org',7)
+        with self.collector.store.connection() as db:
+            db.execute('UPDATE favorites SET checked_at=1 WHERE gid=3')
         self.calls=[]
         def unavailable(settings,gid,token):
             self.calls.append(gid)
-            return parse_favorite_count('This gallery is not available.')
+            if gid==3:return parse_favorite_count('This gallery is not available.')
+            return gid*10
         self.collector.fetcher=unavailable
         self.start();self.finish()
         job=self.collector.store.latest()
-        self.assertEqual(job['state'],'paused')
-        self.assertIn('Cookie',job['message'])
-        self.assertEqual(len(self.calls),1)
-        self.assertEqual(job['failed'],0)
+        self.assertEqual(job['state'],'completed_with_errors')
+        self.assertEqual(self.calls,[3,2,1])
+        self.assertEqual(job['failed'],1)
         with self.collector.store.connection() as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM collection_failures').fetchone()[0],0)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks WHERE state='pending' AND attempts=0").fetchone()[0],3)
-            self.assertEqual(db.execute('SELECT gid,favorite_count FROM favorites').fetchone()[:],(4,40))
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM collection_failures').fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT state,attempts FROM tasks WHERE gid=3").fetchone()[:],('failed',1))
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=3').fetchone()[0],12)
+            self.assertEqual(db.execute('SELECT rating_count FROM rating_counts WHERE gid=3').fetchone()[0],7)
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=4').fetchone()[0],40)
+
+    def test_batch_collection_skips_unavailable_http_responses_in_all_modes(self):
+        for mode in ('full','rounds','batch'):
+            for code,body in ((404,b'<h1>Gallery Not Available</h1>'),(410,b''),(200,b'This gallery is not available.')):
+                with self.subTest(mode=mode,code=code):
+                    self.collector.close()
+                    self.collector=Collector(self.catalog,self.fetch)
+                    with self.collector.store.connection() as db:
+                        db.execute('DELETE FROM jobs');db.execute('DELETE FROM tasks')
+                        db.execute('DELETE FROM collection_failures');db.execute('DELETE FROM favorites')
+                    self.calls=[]
+                    self.collector.configure({'host':'e-hentai.org','collection_mode':mode,'batch_size':100})
+                    self.collector.verify(self.query)
+                    self.collector.settings['interval']=0.00001
+                    def fetch(settings,gid,token):
+                        self.calls.append(gid)
+                        if gid==3:
+                            if code==200:return parse_favorite_count(body.decode())
+                            with patch('favorites.build_opener') as opener:
+                                opener.return_value.open.side_effect=HTTPError('https://e-hentai.org/g/3/abcdef0123/',code,'test unavailable',{},io.BytesIO(body))
+                                return fetch_favorites(settings,gid,token)
+                        return gid*10
+                    self.collector.fetcher=fetch
+                    self.start();self.finish()
+                    job=self.collector.store.latest()
+                    self.assertEqual(self.calls,[4,3,2,1])
+                    self.assertEqual((job['state'],job['failed'],job['pending']),('completed_with_errors',1,0))
+                    with self.collector.store.connection() as db:
+                        self.assertEqual(db.execute('SELECT gid,attempts FROM collection_failures').fetchone()[:],(3,1))
+                        self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=2').fetchone()[0],20)
+
+    def test_background_login_and_challenge_responses_still_pause_without_failed_items(self):
+        for code,body in ((404,b'Please log in'),(404,b'Just a moment...'),(200,b'Unrecognized test page'),(403,b'')):
+            with self.subTest(code=code,body=body):
+                self.collector.close()
+                self.collector=Collector(self.catalog,self.fetch)
+                with self.collector.store.connection() as db:
+                    db.execute('DELETE FROM jobs');db.execute('DELETE FROM tasks');db.execute('DELETE FROM favorites')
+                self.calls=[]
+                self.collector.configure({'host':'e-hentai.org'})
+                self.collector.verify(self.query)
+                self.collector.settings['interval']=0.00001
+                def fetch(settings,gid,token):
+                    self.calls.append(gid)
+                    if code==200:return parse_favorite_count(body.decode())
+                    with patch('favorites.build_opener') as opener:
+                        opener.return_value.open.side_effect=HTTPError('https://e-hentai.org/g/3/abcdef0123/',code,'test response',{},io.BytesIO(body))
+                        return fetch_favorites(settings,gid,token)
+                self.collector.fetcher=fetch
+                self.start();self.finish()
+                job=self.collector.store.latest()
+                self.assertEqual(self.calls,[4,3])
+                self.assertEqual((job['state'],job['failed'],job['pending']),('paused',0,3))
 
     def test_uncertain_access_rotates_verification_in_all_modes_without_recording_failure(self):
         for mode in ('full','rounds','batch'):
@@ -306,8 +364,9 @@ class FavoriteCollectionTests(unittest.TestCase):
         def unavailable(settings,gid,token):
             self.calls.append(gid)
             raise GalleryAccessUncertain('test unavailable (HTTP 404)')
-        self.collector.fetcher=unavailable
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('test initial pause'))
         self.start();self.finish()
+        self.collector.fetcher=unavailable
         job=self.collector.store.latest()
         self.collector.last_request=0
         with self.assertRaises(ValueError):self.collector.verify(None)
@@ -427,8 +486,9 @@ class FavoriteCollectionTests(unittest.TestCase):
         def unavailable(settings,gid,token):
             self.calls.append(gid)
             return parse_favorite_count('Gallery Not Available')
-        self.collector.fetcher=unavailable
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('test initial pause'))
         self.start();self.finish()
+        self.collector.fetcher=unavailable
         job=self.collector.store.latest()
         self.collector.last_request=0
         with self.assertRaises(ValueError):self.collector.verify(None)

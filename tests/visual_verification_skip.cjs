@@ -3,6 +3,7 @@ const path=require('path'),fs=require('fs'),os=require('os'),readline=require('r
 const {spawn}=require('child_process');
 const {chromium}=require(require.resolve('playwright',{paths:[path.resolve(path.dirname(process.execPath),'..')]}));
 const project=path.resolve(__dirname,'..'),fixture=fs.mkdtempSync(path.join(os.tmpdir(),'excatalog-verification-skip-'));
+const automaticBatch=process.argv.includes('--automatic-batch');
 let server,browser,base;
 (async()=>{
   server=spawn('py',['-3.14','-X','utf8','-u',path.join(__dirname,'visual_verification_skip_server.py'),fixture],{windowsHide:true});
@@ -37,27 +38,32 @@ let server,browser,base;
   assert.deepStrictEqual(status.fixture_requests,[4,3]);
   assert.strictEqual(status.verification_issue.gid,4);
   assert.strictEqual(status.job.failed,0);
-  await page.locator('#collector-skip-unavailable').click();
-  await page.waitForFunction(()=>document.querySelector('#collector-feedback').textContent.includes('已确认作品 ID 4'));
-  status=await state();
-  assert.deepStrictEqual(status.fixture_requests,[4,3]);
-  assert.strictEqual(status.job.failed,1);
-  assert.strictEqual(status.job.current_round,1);
-  assert.strictEqual(status.verification_issue,null);
-  assert(status.verified,'Confirmation discarded successful source verification');
+  if(!automaticBatch){
+    await page.locator('#collector-skip-unavailable').click();
+    await page.waitForFunction(()=>document.querySelector('#collector-feedback').textContent.includes('已确认作品 ID 4'));
+    status=await state();
+    assert.deepStrictEqual(status.fixture_requests,[4,3]);
+    assert.strictEqual(status.job.failed,1);
+    assert.strictEqual(status.job.current_round,1);
+    assert.strictEqual(status.verification_issue,null);
+    assert(status.verified,'Confirmation discarded successful source verification');
+  }
   await page.locator('#collector-resume').click();
   await page.waitForFunction(()=>!document.querySelector('#collector-estimate').hidden);
-  assert.strictEqual((await page.locator('#estimate-pending').textContent()).trim(),'1 条');
+  assert.strictEqual((await page.locator('#estimate-pending').textContent()).trim(),automaticBatch?'2 条':'1 条');
   await page.locator('#collector-confirm').click();
   await page.waitForFunction(()=>document.querySelector('#collector-job-state').textContent.includes('有失败项'));
   status=await state();
-  assert.deepStrictEqual(status.fixture_requests,[4,3,2]);
+  assert.deepStrictEqual(status.fixture_requests,automaticBatch?[4,3,4,2]:[4,3,2]);
   assert.strictEqual(status.job.state,'completed_with_errors');
   assert.strictEqual(status.job.failed,1);
+  assert.strictEqual(status.verification_issue,null,'Finished source response left a stale confirmation prompt');
+  assert.strictEqual(status.verification_deferred,0);
+  if(automaticBatch)await page.screenshot({path:path.join(project,'logs/batch-automatic-skip.png')});
   const records=await(await page.request.get(base+'/api/records?collection=failed')).json();
   assert.strictEqual(records.total,1);
   assert.strictEqual(errors.length,0,'UI errors: '+errors.join('; '));
-  console.log(JSON.stringify({passed:true,nextVerificationUsesAnotherGallery:true,confirmationSendsNoRequest:true,originalQueueContinues:true,noAutomaticNextRound:true,failureCanBeRetried:true,smallViewport:true}));
+  console.log(JSON.stringify({passed:true,nextVerificationUsesAnotherGallery:true,manualConfirmation:!automaticBatch,automaticBatchSkipsUnavailable:automaticBatch,originalQueueContinues:true,noAutomaticNextRound:true,failureCanBeRetried:true,smallViewport:true}));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{
   if(browser)await browser.close();
   if(server){const ended=new Promise(resolve=>{if(server.exitCode!==null)resolve();else server.once('exit',resolve);});if(base){const status=await(await fetch(base+'/api/status')).json();await fetch(base+'/api/maintenance/stop',{method:'POST',headers:{'Content-Type':'application/json','X-Catalog-Token':status.action_token},body:'{}'});}else server.kill();await ended;}

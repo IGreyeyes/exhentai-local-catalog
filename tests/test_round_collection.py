@@ -1,3 +1,4 @@
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 from urllib.error import HTTPError
@@ -14,6 +15,8 @@ from favorites import Collector, GalleryUnavailable
 
 class RoundCollectionTests(unittest.TestCase):
     def setUp(self):
+        sampler=patch('favorites.secrets.randbelow',return_value=0)
+        sampler.start();self.addCleanup(sampler.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.path = Path(self.directory.name) / 'catalog.sqlite3'
         with closing(sqlite3.connect(self.path)) as db:
@@ -107,12 +110,13 @@ class RoundCollectionTests(unittest.TestCase):
         self.collector.verified = False
         result = self.collector.verify(None)
         self.assertTrue(result['verified'])
-        self.assertEqual(result['gid'],3)
+        self.assertEqual(result['gid'],23)
+        self.assertTrue(result['verification_only'])
         preview = self.next_round()
-        self.assertEqual((preview['batch_size'],preview['total'],preview['pending'],preview['skipped']),(10,3,2,1))
+        self.assertEqual((preview['batch_size'],preview['total'],preview['pending'],preview['skipped']),(10,3,3,0))
         final = self.collector.store.latest()
-        self.assertEqual((final['state'],final['succeeded'],final['cached']),('completed',22,1))
-        self.assertEqual(self.calls,list(range(23,0,-1)))
+        self.assertEqual((final['state'],final['succeeded'],final['cached']),('completed',23,0))
+        self.assertEqual(self.calls,list(range(23,3,-1))+[23,3,2,1])
 
     def test_mid_round_pause_and_restart_resumes_only_that_round(self):
         entered,release = threading.Event(),threading.Event()

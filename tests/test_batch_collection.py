@@ -1,3 +1,4 @@
+from unittest.mock import patch
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,8 @@ from favorites import Collector, FavoriteStore, GalleryUnavailable
 
 class BatchCollectionTests(unittest.TestCase):
     def setUp(self):
+        sampler=patch('favorites.secrets.randbelow',return_value=0)
+        sampler.start();self.addCleanup(sampler.stop)
         self.directory=tempfile.TemporaryDirectory()
         self.path=Path(self.directory.name)/'catalog.sqlite3'
         with closing(sqlite3.connect(self.path)) as db:
@@ -187,12 +190,13 @@ class BatchCollectionTests(unittest.TestCase):
         self.collector.configure({'host':'e-hentai.org','collection_mode':'batch','batch_size':1000,'skip_existing':True})
         self.ready()
         resumed=self.collector.preview({},'resume')
+        worker_calls_start=len(self.calls)
         self.assertEqual(resumed['batch_size'],100)
         self.assertEqual(resumed['scope_total'],360)
         self.assertLessEqual(resumed['pending'],99)
         self.collector.resume(preview_id=resumed['preview_id']);self.finish()
         self.assertEqual(self.collector.status()['job']['total'],100)
-        self.assertTrue(set(self.calls[1:]).issubset(original))
+        self.assertTrue(set(self.calls[worker_calls_start:]).issubset(original))
 
     def test_migration_preserves_old_job_and_queue(self):
         path=Path(self.directory.name)/'legacy.sqlite3'

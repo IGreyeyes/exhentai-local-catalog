@@ -107,10 +107,10 @@
     ui("collector-verify").disabled=busy||cooling||settingsDirty||!state?.configured||(!hasSearch&&!savedTask());
     ui("collector-reverify").hidden=!(state?.verification_unavailable||state?.verification_deferred);
     ui("collector-reverify").disabled=ui("collector-verify").disabled;
-    ui("collector-verify").textContent=savedTask()?"验证原任务的源站访问":"验证并读取一条";
+    ui("collector-verify").textContent=savedTask()?"验证原任务的源站访问":"随机验证源站访问";
     const issue=state?.verification_issue;
     ui("collector-access-issue").hidden=!issue;
-    ui("collector-access-issue-note").textContent=issue?`待确认访问异常 ${number(state.verification_deferred)} 条。本次确认的是作品 ID ${issue.gid}。普通验证会临时换其他候选；这条仍在采集队列中。仅在浏览器也无法打开此链接时，点击下方按钮将它记录为失败并跳过，以后可单独重试。`:"";
+    ui("collector-access-issue-note").textContent=issue?`待确认访问异常 ${number(state.verification_deferred)} 条。本次确认的是作品 ID ${issue.gid}。再次验证会随机换其他候选；${issue.in_queue===false?"这是已有记录的访问样本，确认仅保存失败记录，原队列和已有收藏数保留。":"这条仍在采集队列中，确认后会记录失败并跳过。"}仅在浏览器也无法打开此链接时点击确认，以后可单独重试。`:"";
     const issueURL=issue&&failureURL(issue.url);
     ui("collector-access-issue-link").hidden=!issueURL;
     if(issueURL){ui("collector-access-issue-link").href=issueURL;ui("collector-access-issue-link").textContent=issueURL;}
@@ -215,7 +215,7 @@
     let focusProgress=false;
     invalidatePreview();
     const revision=previewRevision,key=scopeKey();
-    actionBusy=true;updateControls();feedback(path==="preview"?"正在统计待抓取数量和预计耗时，不访问源站…":path==="verify"?"正在读取一条需要抓取的作品，请稍候…":"正在处理…");
+    actionBusy=true;updateControls();feedback(path==="preview"?"正在统计待抓取数量和预计耗时，不访问源站…":path==="verify"?"正在随机取样并验证源站访问，请稍候…":"正在处理…");
     try{
       const response=await fetch(`/api/collector/${path}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify(payload)});
       const data=await response.json();
@@ -223,7 +223,7 @@
       if(path==="preview"){
         if(revision===previewRevision&&key===scopeKey()){renderPreview(data,key,payload.query||"");feedback("预估已生成，确认后才会进行批量抓取。");}
         else feedback("搜索或设置已变化，请重新预估。",true);
-      }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。\n${data.unavailable.map(item=>`作品 ID ${item.gid}：${item.error}`).join("\n")}\n`:""}验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。现在请预估耗时，再确认采集。`);
+      }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。\n${data.unavailable.map(item=>`作品 ID ${item.gid}：${item.error}`).join("\n")}\n`:""}随机验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。${data.verification_only?"本条仅用于访问验证，已有收藏数、来源和采集时间未改写。":"本条读取结果已保存。"}现在请预估耗时，再确认采集。`);
       else feedback({settings:"设置已应用。可先预估耗时，再确认采集。",start:data.job?.state==="completed"?data.job.message:"计划已保存，本轮已开始采集，可随时暂停。",next_round:"下一轮已开始。本轮结束后会再次自动停止。",next_batch:data.job?.state==="completed"?data.job.message:"下一批已开始采集，沿用上一批的搜索条件。",pause:"已请求暂停，正在发出的请求会等待结束。",resume:"已按预估继续采集。",retry:"已按预估重试失败项。",cancel:"任务已结束，已采集的收藏数保留。"}[path]||"操作完成。");
       if(path==="settings") {settingsDirty=false;["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");}
       if(path==="skip_unavailable")feedback(data.message);
@@ -260,7 +260,7 @@
       const data=await response.json();if(!response.ok)throw new Error(data.error||"登录文件导入失败。");
       state=data;settingsDirty=false;ui("collector-host").value=data.host;ui("collector-proxy").value=data.proxy;
       ["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");
-      invalidatePreview();render();feedback("加密登录信息已载入内存。请先验证并读取一条，再开始采集。");
+      invalidatePreview();render();feedback("加密登录信息已载入内存。请先随机验证源站访问，再开始采集。");
     }catch(error){feedback(error.message==="Failed to fetch"?"无法连接本地服务，登录文件没有导入。":error.message,true);}
     finally{ui("credential-file").value="";actionBusy=false;await refresh();updateControls();}
   }

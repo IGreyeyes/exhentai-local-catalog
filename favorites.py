@@ -611,7 +611,7 @@ class Collector:
                 "configured": bool(self.settings), "verified": self.verified,
                 "verification_unavailable": len(self.verification_unavailable),
                 "verification_deferred": len(self.verification_issues),
-                "verification_issue": {key:issue[key] for key in ("id","gid","url","error")} if issue else None,
+                "verification_issue": {key:issue[key] for key in ("id","gid","url","error","in_queue")} if issue else None,
                 "has_credentials": bool(settings.get("cookies")),
                 "host": settings.get("host","exhentai.org"), "interval": (self.settings or {}).get("interval",4),
                 "proxy": settings.get("proxy",""), "refresh_days": settings.get("refresh_days",7),
@@ -730,13 +730,14 @@ class Collector:
         if not self.settings:
             raise ValueError("请先配置源站与登录信息。")
         if not verification and not self.verified:
-            raise ValueError("请先点击“验证并读取一条”，确认可以读取收藏数。")
+            raise ValueError("请先点击“随机验证源站访问”或“验证原任务的源站访问”，确认可以读取收藏数。")
         if time.time() < self.cooldown_until:
             raise ValueError("源站冷却时间尚未结束，请稍后再试。")
 
     def _verification_candidate(self, query, cutoff, excluded):
         eligible, eligibility_params = self._eligibility(cutoff)
         excluded_params=(json.dumps(sorted(excluded)),) if excluded else ()
+        job=None
         if query is None:
             job=self.store.latest()
             if not job or job["state"] not in {"paused","awaiting_next","completed_with_errors"}:
@@ -744,24 +745,32 @@ class Collector:
             if job["host"]!=self.settings["host"]:
                 raise ValueError("请切换回创建任务时使用的源站。")
             target=job["current_round"]+(job["state"]=="awaiting_next")
-            skip=" AND t.gid NOT IN (SELECT value FROM json_each(?))" if excluded else ""
-            with self.store.connection() as db:
-                row=db.execute("SELECT t.gid,t.token FROM tasks AS t LEFT JOIN favorites AS f ON f.gid=t.gid WHERE t.job_id=? AND t.round_no<=? AND t.state IN ('pending','failed') AND "+eligible+skip+" ORDER BY (t.state='failed'),t.priority,t.gid DESC LIMIT 1",(job["id"],target,*eligibility_params,*excluded_params)).fetchone()
-            return row,job["id"]
-        _,where,params=self.catalog.collection_plan(query)
-        if excluded:
-            where="("+where+") AND g.gid NOT IN (SELECT value FROM json_each(?))"
-            params=(*params,*excluded_params)
-        if self.settings.get("collection_mode") in {"rounds","batch"}:
-            with self.store.connection() as db:
-                db.execute("ATTACH DATABASE ? AS catalog",(self.catalog.path.as_uri()+"?mode=ro",))
-                candidates=self._batch_candidates(db,where,params,eligible,eligibility_params,1,self.settings.get("rating_priority",False))
-                row=candidates[0] if candidates else None
+            _,where,params=self.catalog.collection_plan(job["query"])
+            scope="SELECT t.gid,t.token,CASE WHEN t.state IN ('pending','failed') AND "+eligible+" THEN 1 ELSE 0 END AS needs_collection,t.job_id,t.state AS task_state FROM tasks AS t LEFT JOIN favorites AS f ON f.gid=t.gid WHERE t.job_id=? AND t.round_no<=? UNION ALL SELECT g.gid,g.token,0 AS needs_collection,0 AS job_id,'' AS task_state FROM catalog.gallery AS g JOIN main.favorites AS f ON f.gid=g.gid WHERE ("+where+") AND NOT EXISTS(SELECT 1 FROM tasks AS queued WHERE queued.job_id=? AND queued.gid=g.gid)"
+            scope_params=(*eligibility_params,job["id"],target,*params,job["id"])
         else:
-            with self.catalog.connection() as db:
-                order="CAST(g.rating AS REAL) DESC,g.gid DESC" if self.settings.get("rating_priority") else "g.gid DESC"
-                row=db.execute("SELECT g.gid,g.token FROM gallery AS g"+JOIN_FAVORITES+"WHERE ("+where+") AND "+eligible+" ORDER BY "+order+" LIMIT 1",(*params,*eligibility_params)).fetchone()
-        return row,0
+            _,where,params=self.catalog.collection_plan(query)
+            scope="SELECT g.gid,g.token,("+eligible+") AS needs_collection,0 AS job_id,'' AS task_state FROM catalog.gallery AS g LEFT JOIN main.favorites AS f ON f.gid=g.gid WHERE ("+where+")"
+            scope_params=(*eligibility_params,*params)
+        skip="gid NOT IN (SELECT value FROM json_each(?))" if excluded else "1=1"
+        with self.store.connection() as db:
+            db.execute("ATTACH DATABASE ? AS catalog",(self.catalog.path.as_uri()+"?mode=ro",))
+            # Keep the count and selected offset in the same read snapshot while
+            # cloud sync or an import may update favorite records.
+            db.execute("BEGIN")
+            # A zero-work plan still avoids source requests. Cache samples are used
+            # only to establish access when actual queued work remains.
+            work=db.execute("SELECT COALESCE(SUM(needs_collection),0) FROM ("+scope+")",scope_params).fetchone()[0]
+            if not work:return None,job["id"] if job else 0
+            counts=db.execute("SELECT COUNT(*),COALESCE(SUM(needs_collection=0),0) FROM ("+scope+") WHERE "+skip,(*scope_params,*excluded_params)).fetchone()
+            size=counts[1] or counts[0]
+            if not size:return None,job["id"] if job else 0
+            prefer_cache=" AND needs_collection=0" if counts[1] else ""
+            # Count plus a uniform random offset avoids sorting a large catalog by
+            # RANDOM(), and never changes the persistent collection priority.
+            row=db.execute("SELECT * FROM ("+scope+") WHERE "+skip+prefer_cache+" ORDER BY gid DESC LIMIT 1 OFFSET ?",(*scope_params,*excluded_params,secrets.randbelow(size))).fetchone()
+            row=dict(row)
+        return row,row["job_id"] if row["needs_collection"] and row["task_state"] in {"pending","failed"} else 0
 
     def verify(self, query, retry_unavailable=False):
         with self.lock:
@@ -793,7 +802,7 @@ class Collector:
                 try:
                     count=self._fetch(self.settings.copy(),row["gid"],row["token"])
                 except GalleryAccessUncertain as error:
-                    self.verification_issues[row["gid"]]={"id":secrets.token_urlsafe(24),"gid":row["gid"],"token":row["token"],"job_id":job_id,"host":self.settings["host"],"url":gallery_url(self.settings["host"],row["gid"],row["token"]),"error":str(error)}
+                    self.verification_issues[row["gid"]]={"id":secrets.token_urlsafe(24),"gid":row["gid"],"token":row["token"],"job_id":job_id,"host":self.settings["host"],"url":gallery_url(self.settings["host"],row["gid"],row["token"]),"error":str(error),"in_queue":bool(row["needs_collection"])}
                     raise ValueError(f"验证已停止：{error}\n作品链接：{gallery_url(self.settings['host'],row['gid'],row['token'])}\n再次点击验证会尝试其他候选，本条暂未记为失败；若已在浏览器确认打不开，请点击“确认不可访问并跳过”。") from None
                 except CollectionPaused as error:
                     self.cooldown_until=time.time()+error.cooldown
@@ -813,9 +822,10 @@ class Collector:
                     raise ValueError(str(error)) from None
                 finally:
                     self.last_request=time.monotonic()
-                self.store.save(row["gid"],count.favorite_count,self.settings["host"],count.rating_count)
+                if row["needs_collection"]:
+                    self.store.save(row["gid"],count.favorite_count,self.settings["host"],count.rating_count)
                 self.verified=True
-                return {"verified":True,"gid":row["gid"],"favorite_count":count.favorite_count,"rating_count":count.rating_count,"unavailable":unavailable}
+                return {"verified":True,"gid":row["gid"],"favorite_count":count.favorite_count,"rating_count":count.rating_count,"unavailable":unavailable,"verification_only":not bool(row["needs_collection"])}
             last=unavailable[-1]
             has_more=self._verification_candidate(query,cutoff,self.verification_unavailable | self.verification_issues.keys())[0] is not None
             next_step="再次点击验证将尝试其他待处理作品，不会重复本次失败作品。" if has_more else "当前范围没有其他可验证作品；请先在浏览器核对失败作品，处理后点击“重新验证失败作品”。"
@@ -849,7 +859,8 @@ class Collector:
             self.verification_unavailable.add(issue["gid"])
             del self.verification_issues[issue["gid"]]
             self.preview_data=None
-            return {**self.status(),"message":f"已确认作品 ID {issue['gid']} 不可访问并记录失败，本次未向源站发送请求。它将从待采集队列跳过；请继续验证其他作品，再预估并继续原任务。以后可单独预估重试失败项。"}
+            consequence="它将从待采集队列跳过；" if issue["in_queue"] else "这是已有记录的访问样本，原任务队列和已有收藏数保留；"
+            return {**self.status(),"message":f"已确认作品 ID {issue['gid']} 不可访问并记录失败，本次未向源站发送请求。{consequence}请继续验证其他作品，再预估并继续原任务。以后可单独预估重试失败项。"}
 
     def _plan(self, query, operation, cutoff):
         if not self.settings:

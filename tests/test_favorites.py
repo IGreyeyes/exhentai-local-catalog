@@ -13,6 +13,7 @@ import time
 import unittest
 
 from app import Catalog, Server
+from favorite_transfer import merge_snapshot
 from favorites import CollectionPaused, Collector, GalleryAccessUncertain, GalleryUnavailable, RetryableFetch, SameGalleryRedirect, collection_error_details, fetch_favorites, parse_favorite_count
 
 
@@ -175,6 +176,8 @@ class FavoriteParsingTests(unittest.TestCase):
 
 class FavoriteCollectionTests(unittest.TestCase):
     def setUp(self):
+        sampler=patch('favorites.secrets.randbelow',return_value=0)
+        sampler.start();self.addCleanup(sampler.stop)
         self.directory=tempfile.TemporaryDirectory()
         path=Path(self.directory.name)/'catalog.sqlite3'
         db=sqlite3.connect(path)
@@ -335,6 +338,123 @@ class FavoriteCollectionTests(unittest.TestCase):
                 with self.collector.store.connection() as db:
                     self.assertEqual(db.execute('SELECT COUNT(*) FROM collection_failures').fetchone()[0],0)
 
+    def test_random_sample_can_select_the_last_gallery_instead_of_priority_head(self):
+        self.collector.configure({'host':'e-hentai.org','rating_priority':True})
+        with patch('favorites.secrets.randbelow',return_value=3) as sampler:
+            result=self.collector.verify(self.query)
+        sampler.assert_called_once_with(4)
+        self.assertEqual(self.calls,[1])
+        self.assertFalse(result['verification_only'])
+
+    def test_imported_cached_sample_verifies_access_without_rewriting_snapshot(self):
+        now=int(time.time())
+        merge_snapshot(self.collector.store.path,[{'gid':2,'favorite_count':777,'checked_at':now,'source':'e-hentai.org'}])
+        self.collector.configure({'host':'e-hentai.org','skip_existing':True})
+        self.collector.fetcher=lambda settings,gid,token:self.calls.append(gid) or 0
+        with self.collector.store.connection() as db:
+            before=tuple(db.execute('SELECT * FROM favorites WHERE gid=2').fetchone())
+        with patch('favorites.secrets.randbelow',return_value=0) as sampler:
+            result=self.collector.verify(self.query)
+        sampler.assert_called_once_with(1)
+        self.assertEqual(self.calls,[2])
+        self.assertTrue(result['verification_only'])
+        self.assertEqual(result['favorite_count'],0)
+        with self.collector.store.connection() as db:
+            self.assertEqual(tuple(db.execute('SELECT * FROM favorites WHERE gid=2').fetchone()),before)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0],0)
+
+    def test_multiple_cached_records_are_randomly_sampled_within_the_cached_group(self):
+        self.collector.store.save(2,20,'e-hentai.org')
+        self.collector.store.save(4,40,'e-hentai.org')
+        self.collector.configure({'host':'e-hentai.org'})
+        with patch('favorites.secrets.randbelow',return_value=1) as sampler:
+            result=self.collector.verify(self.query)
+        sampler.assert_called_once_with(2)
+        self.assertEqual(result['gid'],2)
+        self.assertTrue(result['verification_only'])
+
+    def test_random_cached_sampling_stays_within_the_requested_tag_scope(self):
+        with closing(sqlite3.connect(self.catalog.path)) as db,db:
+            db.execute("INSERT INTO gallery VALUES (5,'abcdef0123','Other tag','','Non-H',5,10,'5.0',0,0,0)")
+            db.execute("INSERT INTO tag VALUES(2,'language:chinese')")
+            db.execute('INSERT INTO gid_tid VALUES(5,2)')
+        self.collector.store.save(5,500,'e-hentai.org')
+        self.collector.configure({'host':'e-hentai.org'})
+        with patch('favorites.secrets.randbelow',return_value=3) as sampler:
+            result=self.collector.verify(self.query)
+        sampler.assert_called_once_with(4)
+        self.assertEqual(self.calls,[1])
+        self.assertNotEqual(result['gid'],5)
+
+    def test_random_offset_uses_one_snapshot_during_a_concurrent_favorite_update(self):
+        self.collector.store.save(1,10,'e-hentai.org')
+        self.collector.store.save(3,30,'e-hentai.org')
+        self.collector.configure({'host':'e-hentai.org'})
+        def change_favorites(size):
+            self.assertEqual(size,2)
+            with self.collector.store.connection() as db:
+                db.execute('DELETE FROM favorites WHERE gid=1')
+            return 1
+        with patch('favorites.secrets.randbelow',side_effect=change_favorites):
+            result=self.collector.verify(self.query)
+        self.assertEqual(result['gid'],1)
+        self.assertTrue(result['verification_only'])
+        with self.collector.store.connection() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM favorites WHERE gid=1').fetchone())
+
+    def test_saved_task_uses_cached_sample_when_remaining_gallery_is_unavailable(self):
+        self.ready()
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('test pause'))
+        self.start();self.finish()
+        self.calls=[]
+        def fetch(settings,gid,token):
+            self.calls.append(gid)
+            if gid!=4:raise GalleryAccessUncertain('test unavailable')
+            return 999
+        self.collector.fetcher=fetch;self.collector.last_request=0
+        with self.collector.store.connection() as db:
+            queue=[tuple(row) for row in db.execute('SELECT * FROM tasks ORDER BY gid')]
+            snapshot=tuple(db.execute('SELECT * FROM favorites WHERE gid=4').fetchone())
+        job=self.collector.store.latest()
+        result=self.collector.verify(None)
+        self.assertTrue(result['verification_only'])
+        self.assertEqual(self.calls,[4])
+        current=self.collector.store.latest()
+        self.assertEqual((current['id'],current['state'],current['pending'],current['current_round']),(job['id'],'paused',3,job['current_round']))
+        with self.collector.store.connection() as db:
+            self.assertEqual(queue,[tuple(row) for row in db.execute('SELECT * FROM tasks ORDER BY gid')])
+            self.assertEqual(snapshot,tuple(db.execute('SELECT * FROM favorites WHERE gid=4').fetchone()))
+
+    def test_cached_access_failure_confirmation_does_not_mutate_frozen_queue(self):
+        self.ready()
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('test pause'))
+        self.start();self.finish()
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(GalleryAccessUncertain('test unavailable'))
+        self.collector.last_request=0
+        with self.assertRaises(ValueError):self.collector.verify(None)
+        issue=self.collector.status()['verification_issue']
+        self.assertFalse(issue['in_queue'])
+        result=self.collector.skip_unavailable(issue['id'])
+        self.assertEqual((result['job']['failed'],result['job']['pending']),(0,3))
+        with self.collector.store.connection() as db:
+            self.assertEqual(db.execute('SELECT favorite_count FROM favorites WHERE gid=4').fetchone()[0],40)
+            self.assertEqual(db.execute('SELECT job_id FROM collection_failures WHERE gid=4').fetchone()[0],0)
+
+    def test_future_round_cached_work_is_not_sampled_before_that_round(self):
+        self.ready()
+        self.collector.configure({'collection_mode':'rounds','batch_size':1})
+        self.collector.settings['interval']=0.00001
+        self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('test pause'))
+        self.start();self.finish()
+        self.collector.store.save(2,20,'exhentai.org')
+        self.collector.fetcher=self.fetch;self.collector.last_request=0
+        with patch('favorites.secrets.randbelow',return_value=0) as sampler:
+            result=self.collector.verify(None)
+        sampler.assert_called_once_with(1)
+        self.assertEqual(result['gid'],4)
+        self.assertTrue(result['verification_only'])
+        self.assertEqual((self.collector.store.latest()['state'],self.collector.store.latest()['current_round']),('paused',1))
+
     def test_uncertain_verification_exhaustion_sends_no_more_requests_and_can_retry(self):
         self.collector.configure({'host':'e-hentai.org'})
         self.collector.settings['interval']=0.00001
@@ -368,6 +488,8 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.start();self.finish()
         self.collector.fetcher=unavailable
         job=self.collector.store.latest()
+        # Isolate the queued confirmation case from the cached access sample.
+        self.collector.verification_unavailable.add(4)
         self.collector.last_request=0
         with self.assertRaises(ValueError):self.collector.verify(None)
         issue=self.collector.status()['verification_issue']
@@ -490,6 +612,7 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.start();self.finish()
         self.collector.fetcher=unavailable
         job=self.collector.store.latest()
+        self.collector.verification_unavailable.add(4)
         self.collector.last_request=0
         with self.assertRaises(ValueError):self.collector.verify(None)
         before=list(self.calls)
@@ -721,6 +844,7 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.collector.fetcher=lambda *args:(_ for _ in ()).throw(CollectionPaused('pause'))
         self.start();self.finish()
         job=self.collector.store.latest()
+        self.collector.verification_unavailable.add(4)
         self.calls=[]
         def fetch(settings,gid,token):
             self.calls.append(gid)
@@ -839,7 +963,7 @@ class FavoriteCollectionTests(unittest.TestCase):
             self.collector.verify(None)
         self.collector.last_request=0
         result=self.collector.verify(None)
-        self.assertEqual((result['verified'],self.calls),(True,[6,5,4,3]))
+        self.assertEqual((result['verified'],self.calls),(True,[7,6,5,4,3]))
         updated=self.collector.store.latest()
         self.assertEqual((updated['id'],updated['state'],updated['total']),(job['id'],'paused',7))
         self.assertEqual(updated['failed'],3)
@@ -861,7 +985,9 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.collector.configure({'host':'e-hentai.org','proxy':'http://127.0.0.1:7890'})
         self.assertEqual(self.collector.status()['verification_unavailable'],0)
         self.collector.last_request=0
-        self.assertEqual(self.collector.verify(self.query)['gid'],4)
+        result=self.collector.verify(self.query)
+        self.assertEqual(result['gid'],1)
+        self.assertTrue(result['verification_only'])
 
     def test_retry_option_validation_does_not_clear_failures(self):
         self.collector.configure({'host':'e-hentai.org'})

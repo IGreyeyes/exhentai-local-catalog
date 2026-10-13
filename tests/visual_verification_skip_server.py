@@ -29,7 +29,13 @@ class FixtureCollector(Collector):
         return parse_gallery_counts(f'<script>var gid={gid};var notice="This gallery is not available";</script><td id="favcount">120 times</td><span id="rating_count">30</span>',gid)
 
     def status(self):
-        return {**super().status(),'fixture_requests':list(self.requests)}
+        with self.store.connection() as db:
+            cached=dict(db.execute('SELECT * FROM favorites WHERE gid=1').fetchone())
+        return {**super().status(),'fixture_requests':list(self.requests),'fixture_cached_snapshot':cached}
+
+    def _verification_candidate(self,query,cutoff,excluded):
+        with patch('favorites.secrets.randbelow',return_value=0):
+            return super()._verification_candidate(query,cutoff,excluded)
 
     def _launch(self,job_id):
         self.interrupt.clear()
@@ -40,6 +46,8 @@ class FixtureCollector(Collector):
 def main():
     catalog=Catalog(make_library(Path(sys.argv[1])))
     with sqlite3.connect(catalog.path) as db:
+        if '--cached-sample' not in sys.argv:
+            db.execute('DELETE FROM gid_tid WHERE gid=1')
         for gid in (2,3,4):
             db.execute("INSERT INTO gallery VALUES(?,'abcdef0123','验证跳过示例','','Non-H',?,10,'4.0',0,0,0)",(gid,gid))
             db.execute('INSERT INTO gid_tid VALUES(?,1)',(gid,))

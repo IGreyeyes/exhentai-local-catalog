@@ -779,6 +779,8 @@ class Handler(BaseHTTPRequestHandler):
                     collector=self.server.collector
                     if self.path == "/api/collector/settings":
                         result=collector.configure(payload)
+                    elif self.path == "/api/collector/skip_unavailable":
+                        result=collector.skip_unavailable(payload.get("issue_id"))
                     elif self.path in {"/api/collector/verify","/api/collector/start","/api/collector/preview"}:
                         query_text=payload.get("query","")
                         if not isinstance(query_text,str) or len(query_text)>12000:raise ValueError("搜索条件不正确。")

@@ -105,9 +105,16 @@
     ui("collector-batch-hint").textContent=roundMode?"确认时保存全部待抓取作品及其顺序，按设定数量分轮。每轮结束自动停止；修改此处的数量仅影响新计划，已保存计划继续使用原来的每轮数量。":batchMode?(ratingPriority?"从全历史匹配记录中直接选择评分最高的本批候选，不再平均分配年份。分批结果仍不代表完整收藏榜。":"从全历史匹配记录中按发布年份轮流挑选，年份内评分高的优先；先补未记录、未尝试的作品。分批排名不代表完整收藏榜。"):(ratingPriority?"全量采集所有待处理作品，并按平均评分从高到低排列队列。":"全量采集所有符合缓存规则的待处理作品；数量较大时可能需要较长时间。");
     ui("collector-policy-hint").textContent=skip?"只补缺失的收藏数；已成功采集的作品即使过期也跳过，缓存天数此时不生效。失败或未知项仍可抓取。":"超过缓存天数后，再次创建任务时才会刷新；不会自动重新抓取。";
     ui("collector-verify").disabled=busy||cooling||settingsDirty||!state?.configured||(!hasSearch&&!savedTask());
-    ui("collector-reverify").hidden=!state?.verification_unavailable;
+    ui("collector-reverify").hidden=!(state?.verification_unavailable||state?.verification_deferred);
     ui("collector-reverify").disabled=ui("collector-verify").disabled;
     ui("collector-verify").textContent=savedTask()?"验证原任务的源站访问":"验证并读取一条";
+    const issue=state?.verification_issue;
+    ui("collector-access-issue").hidden=!issue;
+    ui("collector-access-issue-note").textContent=issue?`待确认访问异常 ${number(state.verification_deferred)} 条。本次确认的是作品 ID ${issue.gid}。普通验证会临时换其他候选；这条仍在采集队列中。仅在浏览器也无法打开此链接时，点击下方按钮将它记录为失败并跳过，以后可单独重试。`:"";
+    const issueURL=issue&&failureURL(issue.url);
+    ui("collector-access-issue-link").hidden=!issueURL;
+    if(issueURL){ui("collector-access-issue-link").href=issueURL;ui("collector-access-issue-link").textContent=issueURL;}
+    ui("collector-skip-unavailable").disabled=busy||cooling||settingsDirty||!state?.configured||!issue;
     ui("collector-start").disabled=busy||settingsDirty||!state?.configured||!hasSearch||["paused","running","preparing","awaiting_next"].includes(job?.state);
     ui("collector-pause").disabled=actionBusy||job?.state!=="running";
     ui("collector-resume").disabled=busy||settingsDirty||!state?.configured||job?.state!=="paused";
@@ -219,6 +226,7 @@
       }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。\n${data.unavailable.map(item=>`作品 ID ${item.gid}：${item.error}`).join("\n")}\n`:""}验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。现在请预估耗时，再确认采集。`);
       else feedback({settings:"设置已应用。可先预估耗时，再确认采集。",start:data.job?.state==="completed"?data.job.message:"计划已保存，本轮已开始采集，可随时暂停。",next_round:"下一轮已开始。本轮结束后会再次自动停止。",next_batch:data.job?.state==="completed"?data.job.message:"下一批已开始采集，沿用上一批的搜索条件。",pause:"已请求暂停，正在发出的请求会等待结束。",resume:"已按预估继续采集。",retry:"已按预估重试失败项。",cancel:"任务已结束，已采集的收藏数保留。"}[path]||"操作完成。");
       if(path==="settings") {settingsDirty=false;["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");}
+      if(path==="skip_unavailable")feedback(data.message);
       if(path!=="preview"&&path!=="verify"){
         acceptState(data);
         focusProgress=["start","next_round","next_batch","resume","retry"].includes(path);
@@ -265,6 +273,7 @@
   ui("credential-file").onchange=event=>importCredentials(event.target.files?.[0]);
   ui("collector-verify").onclick=()=>action("verify",savedTask()?{use_job:true}:{query:submittedFilters.toString()});
   ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),retry_unavailable:true});
+  ui("collector-skip-unavailable").onclick=()=>{if(state?.verification_issue)action("skip_unavailable",{issue_id:state.verification_issue.id});};
   ui("collector-start").onclick=()=>action("preview",{query:submittedFilters.toString(),operation:"start"});
   ["pause","cancel"].forEach(name=>ui(`collector-${name}`).onclick=()=>action(name));
   ["resume","retry"].forEach(name=>ui(`collector-${name}`).onclick=()=>action("preview",{operation:name}));

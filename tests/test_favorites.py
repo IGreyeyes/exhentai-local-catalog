@@ -58,6 +58,13 @@ class FavoriteNetworkTests(unittest.TestCase):
                     fetch_favorites({'host':'exhentai.org'},1,'abcdef0123')
                 self.assertEqual(caught.exception.cooldown,cooldown)
 
+    def test_http_429_still_pauses_even_with_a_gallery_count(self):
+        with patch('favorites.build_opener') as opener:
+            opener.return_value.open.side_effect=HTTPError('https://e-hentai.org/g/1/abcdef0123/',429,'test',{'Retry-After':'120'},io.BytesIO(b'<span id="favcount">12</span>'))
+            with self.assertRaises(CollectionPaused) as caught:
+                fetch_favorites({'host':'e-hentai.org'},1,'abcdef0123')
+            self.assertEqual(caught.exception.cooldown,120)
+
     def test_truncated_http_error_body_is_retryable(self):
         body=b'<p>Gallery not found.</p>'
         with patch('favorites.build_opener') as opener:
@@ -151,10 +158,14 @@ class FavoriteParsingTests(unittest.TestCase):
             with self.subTest(content=content):
                 self.assertEqual(parse_favorite_count('<script>var gid=1;</script><td id="favcount">12 times</td>'+content,1),12)
 
-    def test_limit_and_challenge_notices_still_pause_with_a_count_field(self):
-        for content in ('<p>Too many requests</p>','<p>Just a moment...</p>','<div class="cf-chl-test">Check</div>'):
-            with self.subTest(content=content),self.assertRaises(CollectionPaused):
-                parse_favorite_count('<td id="favcount">12</td>'+content)
+    def test_gallery_comments_cannot_trigger_rate_limit_cooldown(self):
+        for content in ('Too many requests','Your IP address has been banned.','temporarily banned','excessive pageloads','Just a moment...','verify you are human','checking your browser'):
+            with self.subTest(content=content):
+                self.assertEqual(parse_favorite_count('<td id="favcount">12</td><p>'+content+'</p>'),12)
+                with self.assertRaises(CollectionPaused):
+                    parse_favorite_count('<p>'+content+'</p>')
+        with self.assertRaises(CollectionPaused):
+            parse_favorite_count('<td id="favcount">12</td><div class="cf-chl-test">Check</div>')
 
     def test_unavailable_without_gallery_fields_pauses_for_access_check(self):
         for content in ('Gallery Not Available','This gallery is unavailable.','This gallery is not available.'):
@@ -529,7 +540,7 @@ class FavoriteCollectionTests(unittest.TestCase):
         with patch.object(self.collector,'thread') as thread:
             thread.is_alive.return_value=True
             with self.assertRaisesRegex(ValueError,'先暂停采集'):self.collector.skip_unavailable(issue['id'])
-        self.collector.configure({'host':'e-hentai.org','interval':5})
+        self.collector.configure({'host':'e-hentai.org','interval':2.5})
         self.assertEqual(self.collector.status()['verification_issue']['id'],issue['id'])
         self.collector.configure({'host':'e-hentai.org','proxy':'http://127.0.0.1:7890'})
         self.assertEqual(self.collector.status()['verification_deferred'],0)
@@ -624,15 +635,31 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.assertEqual((result['id'],result['state'],result['current_round']),(job['id'],'paused',1))
         self.assertFalse(self.collector.thread.is_alive())
 
-    def test_request_intervals_and_restart_default(self):
-        for seconds in (4,3.5,3,2.5,2,1.5,1,60):
+    def test_request_intervals_persist_after_restart_and_rejected_settings(self):
+        self.assertEqual(self.collector.status()['interval'],3)
+        for seconds in (1,1.5,2,2.5,3,1.5):
             status = self.collector.configure({'host':'e-hentai.org','interval':seconds})
             self.assertEqual(status['interval'],seconds)
-        for seconds in (0.5,61,True,float('nan'),float('inf')):
+            restarted = Collector(Catalog(self.catalog.path),self.fetch)
+            self.assertEqual(restarted.status()['interval'],seconds)
+            self.assertFalse(restarted.status()['configured'])
+            self.assertEqual(restarted.configure({'host':'e-hentai.org'})['interval'],seconds)
+        for seconds in (0.5,3.5,4,5,60,61,True,float('nan'),float('inf')):
             with self.subTest(seconds=seconds),self.assertRaises(ValueError):
                 self.collector.configure({'host':'e-hentai.org','interval':seconds})
+        with self.assertRaises(ValueError):
+            self.collector.configure({'host':'e-hentai.org','interval':2.5,'refresh_days':0})
         restarted = Collector(self.catalog,self.fetch)
-        self.assertEqual(restarted.status()['interval'],4)
+        self.assertEqual(restarted.status()['interval'],1.5)
+
+    def test_upgrade_uses_last_job_interval_when_no_preference_exists(self):
+        now=int(time.time())
+        with self.catalog.favorites.connection() as db:
+            db.execute("INSERT INTO jobs(query_json,host,state,created_at,updated_at,selection_json) VALUES('{}','e-hentai.org','completed',?,?,?)",(now,now,json.dumps({'interval':2.5})))
+        self.assertEqual(Collector(self.catalog,self.fetch).status()['interval'],2.5)
+        with self.catalog.favorites.connection() as db:
+            db.execute("UPDATE jobs SET selection_json=?",(json.dumps({'interval':4}),))
+        self.assertEqual(Collector(self.catalog,self.fetch).status()['interval'],3)
 
     def finish(self):
         if self.collector.thread:
@@ -977,7 +1004,7 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.collector.settings['interval']=0.00001
         self.collector.fetcher=lambda *args:(_ for _ in ()).throw(GalleryUnavailable('test unavailable'))
         with self.assertRaises(ValueError):self.collector.verify(self.query)
-        self.collector.configure({'host':'e-hentai.org','interval':5,'collection_mode':'rounds','skip_existing':True})
+        self.collector.configure({'host':'e-hentai.org','interval':2.5,'collection_mode':'rounds','skip_existing':True})
         self.assertEqual(self.collector.status()['verification_unavailable'],3)
         self.collector.settings['interval']=0.00001
         self.collector.fetcher=self.fetch;self.collector.last_request=0
@@ -1031,12 +1058,77 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.collector=Collector(self.catalog,self.fetch)
         self.assertGreater(self.collector.status()['cooldown_until'],time.time())
 
+    def test_cooldown_recovery_clears_persistent_limits_without_resuming_queue(self):
+        self.ready()
+        def limited(*args):raise CollectionPaused('Test rate limit',3600)
+        self.collector.fetcher=limited
+        self.start();self.finish()
+        self.assertFalse(self.collector.verified)
+        self.collector.fetcher=self.fetch
+        before=self.collector.store.latest()
+        self.collector.last_request=0
+        with self.assertRaisesRegex(ValueError,'冷却'):
+            self.collector.verify(None)
+        result=self.collector.verify(None,recover_cooldown=True)
+        self.assertTrue(result['cooldown_cleared'])
+        self.assertTrue(result['verification_only'])
+        after=self.collector.store.latest()
+        self.assertEqual((after['id'],after['pending'],after['state']),(before['id'],before['pending'],'paused'))
+        self.assertEqual(after['cooldown_until'],0)
+        self.assertIn('冷却已解除',after['message'])
+        self.collector.close()
+        self.collector=Collector(self.catalog,self.fetch)
+        self.assertEqual(self.collector.status()['cooldown_until'],0)
+        self.assertEqual(self.collector.status()['cooldown_probe_after'],0)
+
+    def test_failed_recovery_is_one_request_preserves_cooldown_and_throttles_after_restart(self):
+        self.collector.configure({'host':'e-hentai.org'})
+        until=int(time.time()+3600)
+        for error in (CollectionPaused('test login'),CollectionPaused('test 429',60),GalleryUnavailable('test removed'),GalleryAccessUncertain('test unavailable'),RetryableFetch('test network')):
+            with self.subTest(error=type(error).__name__):
+                self.collector.cooldown_until=until
+                self.collector.cooldown_probe_after=0
+                self.collector.last_request=0
+                self.collector.verification_unavailable.clear()
+                self.collector.verification_issues.clear()
+                self.calls=[]
+                def fail(*args):
+                    self.calls.append(args[1])
+                    raise error
+                self.collector.fetcher=fail
+                with self.assertRaises(ValueError):self.collector.verify(self.query,recover_cooldown=True)
+                self.assertEqual(len(self.calls),1)
+                self.assertGreaterEqual(self.collector.cooldown_until,until)
+                self.assertFalse(self.collector.verified)
+                with self.assertRaisesRegex(ValueError,'每分钟'):
+                    self.collector.verify(self.query,recover_cooldown=True)
+                self.assertEqual(len(self.calls),1)
+                self.collector.store.remember_cooldown(until)
+                self.collector.close()
+                self.collector=Collector(self.catalog,self.fetch)
+                self.collector.configure({'host':'e-hentai.org'})
+                with self.assertRaisesRegex(ValueError,'每分钟'):
+                    self.collector.verify(self.query,recover_cooldown=True)
+                self.assertEqual(len(self.calls),1)
+
+    def test_recovery_without_work_or_invalid_flag_never_clears_cooldown(self):
+        self.collector.configure({'host':'e-hentai.org'})
+        self.collector.cooldown_until=int(time.time()+3600)
+        with self.assertRaisesRegex(ValueError,'开关'):
+            self.collector.verify(self.query,recover_cooldown='true')
+        for gid in range(1,5):self.collector.store.save(gid,10,'e-hentai.org')
+        result=self.collector.verify(self.query,recover_cooldown=True)
+        self.assertTrue(result['no_request'])
+        self.assertFalse(result['verified'])
+        self.assertEqual(self.calls,[])
+        self.assertGreater(self.collector.cooldown_until,time.time())
+
     def test_cookie_stays_in_memory_and_settings_validation(self):
         self.ready()
         status=json.dumps(self.collector.status())
         self.assertNotIn('test-secret-hash',status)
         self.assertNotIn('test-igneous',status)
-        self.collector.configure({'host':'exhentai.org','interval':5})
+        self.collector.configure({'host':'exhentai.org','interval':2.5})
         self.assertIn('test-secret-hash',self.collector.settings['cookies'])
         for values in ({'host':'invalid.example'},{'host':'e-hentai.org','interval':0},{'host':'e-hentai.org','proxy':'socks5://127.0.0.1:7890'},{'host':'e-hentai.org','ipb_pass_hash':'x\r\nInjected:1'}):
             with self.assertRaises(ValueError):self.collector.configure(values)

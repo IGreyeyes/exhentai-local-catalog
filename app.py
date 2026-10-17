@@ -257,7 +257,7 @@ class Catalog:
     def recorded(self, query):
         """List one record per collected work, retaining failures and earlier successful counts."""
         started=time.monotonic()
-        selection=self.selection({"tag":query.get("tag",[])},allow_empty=True,apply_blacklist=False)
+        selection=self.selection({"tag":query.get("tag",[]),"category":query.get("category",[""])},allow_empty=True,apply_blacklist=False)
         tags=selection.tags
         text=query.get("q",[""])[0].strip()
         source=query.get("source",[""])[0]
@@ -300,7 +300,7 @@ class Catalog:
                     SUM(COALESCE(rs.opened_count,0)>0),
                     SUM(COALESCE(rs.state,'none')='none'),SUM(rs.state='planned'),SUM(rs.state='reading'),SUM(rs.state='watched'),SUM(rs.state='ignored'),
                     SUM(f.collection_status='success'),SUM(f.collection_status='failed'),MAX(f.recorded_at)"""+joined,(now-7*86400,)).fetchone()
-                where,values=self.build_filter(db,tags,"",True,"")
+                where,values=self.build_filter(db,tags,"",True,selection.category)
                 clauses=[where];params=list(values)
                 if text:
                     pattern="%"+like_literal(text)+"%"
@@ -338,7 +338,7 @@ class Catalog:
                     items.append(item)
         finally:self.slots.release()
         return {
-            "items":items,"total":total,"page":page,"pages":pages,"limit":limit,"tags":list(tags),"sort":sort,"collection":collection,"job_id":job_id,
+            "items":items,"total":total,"page":page,"pages":pages,"limit":limit,"tags":list(tags),"category":selection.category,"sort":sort,"collection":collection,"job_id":job_id,
             "collector_identity":self.favorites.collector_identity(),
             "summary":{"total":summary_row[0],"recent_7_days":summary_row[1] or 0,"last_checked_at":summary_row[2],"missing_metadata":summary_row[3] or 0,"opened":summary_row[4] or 0,
                        "states":{"none":summary_row[5] or 0,"planned":summary_row[6] or 0,"reading":summary_row[7] or 0,"watched":summary_row[8] or 0,"ignored":summary_row[9] or 0},
@@ -787,7 +787,7 @@ class Handler(BaseHTTPRequestHandler):
                         query=parse_qs(query_text,max_num_fields=40)
                         if self.path.endswith("verify"):
                             if not isinstance(payload.get("use_job",False),bool):raise ValueError("任务验证选项须为开关值。")
-                            result=collector.verify(None if payload.get("use_job") else query,payload.get("retry_unavailable",False))
+                            result=collector.verify(None if payload.get("use_job") else query,payload.get("retry_unavailable",False),payload.get("recover_cooldown",False))
                         elif self.path.endswith("preview"):result=collector.preview(query,payload.get("operation","start"))
                         else:result=collector.start(query,payload.get("preview_id"))
                     elif self.path.endswith("/pause"):result=collector.pause()

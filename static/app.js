@@ -6,6 +6,7 @@ let searchRequest, responseData, submittedFilters;
 let catalogActionToken = "", blacklistBusy = false;
 const searchViews=["minimal","compact","extended","thumbnails"];
 let searchView="extended";
+window.galleryCards.fillCategoryFilter($("search-category"));
 const initialResult = $("results").cloneNode(true);
 const tagLabels = new Map();
 
@@ -176,6 +177,7 @@ $("save-excluded-blacklist").onclick=()=>updateBlacklist([...new Set([...blackli
 $("use-tag-blacklist").onchange=()=>{window.collectorUI?.invalidatePreview();};
 
 function filters() {
+  $("search-category").value=$("category").value;
   const params = new URLSearchParams();
   tags.forEach(tag => params.append("tag", tag));
   excludeTags.forEach(tag => params.append("exclude_tag", tag));
@@ -291,6 +293,14 @@ $("next").onclick = () => goPage(responseData.page+1);
 $("jump-page").onclick = () => goPage($("page-input").value);
 $("page-input").onkeydown = event => { if(event.key === "Enter") { event.preventDefault(); goPage(event.target.value); } };
 $("link-target").onchange = () => renderResults();
+$("category").onchange=()=>{$("search-category").value=$("category").value;window.collectorUI?.invalidatePreview();};
+$("search-category").onchange=()=>{
+  const category=$("search-category").value;$("category").value=category;
+  window.collectorUI?.invalidatePreview();
+  if(!submittedFilters)return;
+  if(category)submittedFilters.set("category",category);else submittedFilters.delete("category");
+  search(1,false);
+};
 $("search-view").onchange=async()=>{
   searchView=$("search-view").value;renderResults();$("search-view").disabled=true;
   try{
@@ -303,7 +313,7 @@ $("search-view").onchange=async()=>{
 function resetForm() {
   searchRequest?.abort(); suggestionRequest?.abort(); clearTimeout(suggestionTimer);
   searchRequest = null; tags=[];excludeTags=[]; responseData=null; submittedFilters=null;
-  $("search-form").reset();renderTags();hideSuggestions();message();
+  $("search-form").reset();$("search-category").value="";renderTags();hideSuggestions();message();
   $("results").replaceChildren(...[...initialResult.cloneNode(true).children]);
   $("results-summary").textContent="准备好后，开始你的第一次搜索。";
   $("pagination").hidden=true;setBusy(false);
@@ -319,6 +329,7 @@ function restoreURL() {
   $("sort").value=params.get("sort")||"newest";
   if(!$("sort").value) $("sort").value="newest";
   $("category").value=params.get("category")||"";
+  $("search-category").value=$("category").value;
   $("include-inactive").checked=params.get("include_inactive")==="1";
   $("use-tag-blacklist").checked=params.get("use_blacklist")!=="0";
   if(tags.length||$("title-input").value) search(Number(params.get("page"))||1,true,false);

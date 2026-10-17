@@ -1,6 +1,7 @@
 "use strict";
 (() => {
   const $=id=>document.getElementById(id);
+  window.galleryCards.fillCategoryFilter($("record-category"));
   const number=value=>Number(value||0).toLocaleString("zh-CN");
   const views=["minimal","compact","extended","thumbnails"];
   let view="extended",legacyView=null,viewSaveQueue=Promise.resolve(),viewSaveRevision=0;
@@ -78,6 +79,7 @@
     params.set("state",$("record-state").value);params.set("opened",$("record-opened").value);
     params.set("collection",collection);if(jobFilter)params.set("job_id",jobFilter);
     if($("record-source").value)params.set("source",$("record-source").value);
+    if($("record-category").value)params.set("category",$("record-category").value);
     return params;
   }
   async function post(path,payload){
@@ -168,18 +170,24 @@
       error(failure.message==="Failed to fetch"?"无法连接本地服务。请双击“启动搜索.cmd”，然后刷新页面。":failure.message);
     }finally{if(request===active)busy(false);}
   }
-  function clearFilters(){tags=[];collection="all";jobFilter="";selected.clear();$("records-form").reset();renderTags();hideSuggestions();load(1,true);}
+  function clearFilters(){tags=[];collection="all";jobFilter="";selected.clear();$("records-form").reset();$("record-category").value="";renderTags();hideSuggestions();load(1,true);}
   function pageTo(value){load(value,false);$("records-heading").scrollIntoView({block:"start"});}
   function restore(){
     $("records-form").reset();clearTimeout(suggestionTimer);suggestionRequest?.abort();hideSuggestions();
     const params=new URLSearchParams(location.search);tags=params.getAll("tag").slice(0,12);renderTags();
     collection=["all","success","failed"].includes(params.get("collection"))?params.get("collection"):"all";jobFilter=params.get("job_id")||"";
     $("record-query").value=params.get("q")||"";
+    $("record-category").value=params.get("category")||"";
     selected.clear();
     for(const [id,key,fallback] of [["record-sort","sort",collection==="failed"?"recorded_desc":"favorites_desc"],["record-source","source",""],["record-age","age","all"],["record-state","state","all"],["record-opened","opened","all"]]){$(id).value=params.get(key)||fallback;if(!$(id).value&&fallback)$(id).value=fallback;}
     load(Number(params.get("page"))||1,true,false);
   }
   $("records-form").onsubmit=event=>{event.preventDefault();load();};
+  $("record-category").onchange=()=>{
+    const category=$("record-category").value;
+    if(category)applied.set("category",category);else applied.delete("category");
+    selected.clear();load(1,false);
+  };
   $("clear-record-filters").onclick=clearFilters;
   $("clear-record-job").onclick=()=>{jobFilter="";load();};
   $("refresh-records").onclick=()=>load(current?.page||1,false,false);

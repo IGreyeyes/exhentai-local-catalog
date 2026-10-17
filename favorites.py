@@ -24,6 +24,8 @@ import time
 from collector_identity import read_identity, validate_collector
 
 HOSTS = {"exhentai.org", "e-hentai.org"}
+REQUEST_INTERVALS = (1, 1.5, 2, 2.5, 3)
+DEFAULT_REQUEST_INTERVAL = 3
 JOIN_FAVORITES = " LEFT JOIN collected.favorites AS f ON f.gid = g.gid "
 JOIN_RATINGS = " LEFT JOIN collected.rating_counts AS rc ON rc.gid = g.gid "
 READING_STATES = {"none", "planned", "reading", "watched", "ignored"}
@@ -114,15 +116,19 @@ def source_page_notice(html, gallery_fields=None):
         fields = FavoriteParser()
         fields.feed(html)
         gallery_fields = len(fields.values) == 1
+    if "cf-chl-" in html.lower():
+        return CollectionPaused("源站要求浏览器验证，已暂停。请在源站完成验证；程序不会自动处理验证页。")
+    # A real gallery can quote access notices in its comments or description.
+    # HTTP errors and structural challenge markers are checked independently.
+    if gallery_fields:
+        return None
     parser = SourceNoticeParser()
     parser.feed(html)
     lower = re.sub(r"\s+", " ", " ".join(parser.text)).lower()
     if any(text in lower for text in ("ip address has been", "temporarily banned", "excessive pageloads", "too many requests")):
-        return CollectionPaused("源站提示请求受限，已暂停。请稍后在浏览器确认可正常访问，再继续。", 3600)
-    if any(text in lower for text in ("just a moment...", "verify you are human", "checking your browser")) or "cf-chl-" in html.lower():
+        return CollectionPaused("源站返回请求受限提示，已暂停并设置保护冷却。浏览器可打开同一作品后，可点击“浏览器已恢复，单次验证”检查客户端访问；请同时核对 Cookie 和代理。", 3600)
+    if any(text in lower for text in ("just a moment...", "verify you are human", "checking your browser")):
         return CollectionPaused("源站要求浏览器验证，已暂停。请在源站完成验证；程序不会自动处理验证页。")
-    if gallery_fields:
-        return None
     if any(text in lower for text in ("please log in", "please login", "not logged in", "must be logged in", "must log in")):
         return CollectionPaused("源站要求登录，已暂停。请从浏览器中同一源站的作品页重新填写 Cookie，并核对客户端 HTTP 代理。")
     if "gallery not found" in lower:
@@ -545,6 +551,15 @@ class FavoriteStore:
         with self.connection() as db:
             db.execute("INSERT INTO collector_state VALUES ('cooldown_until',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (int(until),))
 
+    def remember_cooldown_probe(self, until):
+        with self.connection() as db:
+            db.execute("INSERT INTO collector_state VALUES ('cooldown_probe_after',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (int(until),))
+
+    def clear_cooldown(self):
+        with self.connection() as db:
+            db.execute("UPDATE collector_state SET value=0 WHERE key IN ('cooldown_until','cooldown_probe_after')")
+            db.execute("UPDATE jobs SET cooldown_until=0,message=CASE WHEN state='paused' THEN '源站访问验证成功，冷却已解除。原任务保持暂停，请重新预估并确认继续。' ELSE message END WHERE cooldown_until>0")
+
     def latest(self):
         with self.connection() as db:
             row = db.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
@@ -595,12 +610,22 @@ class Collector:
         self.response_times = deque(maxlen=20)
         self.preview_data = None
         self.cooldown_until = 0
+        self.cooldown_probe_after = 0
         with self.store.connection() as db:
+            saved = db.execute("SELECT value FROM app_settings WHERE key='collector_interval'").fetchone()
+            if saved is None:
+                previous = db.execute("SELECT selection_json FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+                raw_interval = json.loads(previous[0]).get("interval") if previous else None
+            else:
+                raw_interval = json.loads(saved[0])
+            self.saved_interval = raw_interval if not isinstance(raw_interval, bool) and raw_interval in REQUEST_INTERVALS else DEFAULT_REQUEST_INTERVAL
             db.execute("UPDATE jobs SET state='paused',message='服务重启后已暂停。请重新配置并验证登录信息，再继续。' WHERE state IN ('running','preparing')")
             row = db.execute("SELECT MAX(cooldown_until) FROM jobs").fetchone()
             self.cooldown_until = row[0] or 0
             stored = db.execute("SELECT value FROM collector_state WHERE key='cooldown_until'").fetchone()
             self.cooldown_until = max(self.cooldown_until,stored[0] if stored else 0)
+            stored = db.execute("SELECT value FROM collector_state WHERE key='cooldown_probe_after'").fetchone()
+            self.cooldown_probe_after = stored[0] if stored else 0
 
     def status(self):
         with self.lock:
@@ -613,14 +638,14 @@ class Collector:
                 "verification_deferred": len(self.verification_issues),
                 "verification_issue": {key:issue[key] for key in ("id","gid","url","error","in_queue")} if issue else None,
                 "has_credentials": bool(settings.get("cookies")),
-                "host": settings.get("host","exhentai.org"), "interval": (self.settings or {}).get("interval",4),
+                "host": settings.get("host","exhentai.org"), "interval": (self.settings or {}).get("interval",self.saved_interval),
                 "proxy": settings.get("proxy",""), "refresh_days": settings.get("refresh_days",7),
                 "skip_existing": settings.get("skip_existing",False),
                 "collection_mode": settings.get("collection_mode","rounds"),
                 "batch_size": settings.get("batch_size",1000),
                 "rating_priority": settings.get("rating_priority",False),
                 "busy": bool(self.thread and self.thread.is_alive()),
-                "cooldown_until": self.cooldown_until, "job": job,
+                "cooldown_until": self.cooldown_until, "cooldown_probe_after": self.cooldown_probe_after, "job": job,
             }
 
     def configure(self, values):
@@ -651,16 +676,18 @@ class Collector:
                     parsed.port
                 except ValueError:
                     raise ValueError("代理端口不正确。") from None
-            raw_interval = values.get("interval",4)
+            raw_interval = values.get("interval",self.saved_interval)
             if isinstance(raw_interval, bool):
-                raise ValueError("请求间隔须为 1～60 秒。")
+                raise ValueError("请求间隔请选择 1、1.5、2、2.5 或 3 秒。")
             interval = float(raw_interval)
             raw_days = values.get("refresh_days",7)
             if isinstance(raw_days,bool) or not re.fullmatch(r"[0-9]+",str(raw_days)):
                 raise ValueError("缓存刷新天数须为整数。")
             days = int(raw_days)
-            if not math.isfinite(interval) or not 1 <= interval <= 60 or not 1 <= days <= 3650:
-                raise ValueError("请求间隔须为 1～60 秒，刷新周期须为 1～3650 天。")
+            if interval not in REQUEST_INTERVALS:
+                raise ValueError("请求间隔请选择 1、1.5、2、2.5 或 3 秒。")
+            if not 1 <= days <= 3650:
+                raise ValueError("刷新周期须为 1～3650 天。")
             skip_existing = values.get("skip_existing",False)
             if not isinstance(skip_existing,bool):
                 raise ValueError("跳过已采集选项须为开关值。")
@@ -675,6 +702,9 @@ class Collector:
                 raise ValueError("评分优先选项须为开关值。")
             cookie_header = self.settings["cookies"] if reuse else "; ".join(cookies)
             same_access = self.settings and all(self.settings.get(key)==value for key,value in (("host",host),("cookies",cookie_header),("proxy",proxy)))
+            with self.store.connection() as db:
+                db.execute("INSERT INTO app_settings(key,value) VALUES('collector_interval',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(interval),))
+            self.saved_interval = interval
             self.settings = {"host":host,"cookies":cookie_header,"proxy":proxy,"interval":interval,"refresh_days":days,"skip_existing":skip_existing,"collection_mode":mode,"batch_size":batch_size,"rating_priority":rating_priority}
             self.verified = bool(self.verified and same_access)
             self.preview_data = None
@@ -726,12 +756,12 @@ class Collector:
         value=json.dumps([(item["gid"],item["token"],item["year"],item["known"]) for item in items],separators=(",",":"))
         return hashlib.sha256(value.encode()).hexdigest()
 
-    def _require_ready(self, verification=False):
+    def _require_ready(self, verification=False, recover_cooldown=False):
         if not self.settings:
             raise ValueError("请先配置源站与登录信息。")
         if not verification and not self.verified:
             raise ValueError("请先点击“随机验证源站访问”或“验证原任务的源站访问”，确认可以读取收藏数。")
-        if time.time() < self.cooldown_until:
+        if time.time() < self.cooldown_until and not (verification and recover_cooldown):
             raise ValueError("源站冷却时间尚未结束，请稍后再试。")
 
     def _verification_candidate(self, query, cutoff, excluded):
@@ -772,20 +802,25 @@ class Collector:
             row=dict(row)
         return row,row["job_id"] if row["needs_collection"] and row["task_state"] in {"pending","failed"} else 0
 
-    def verify(self, query, retry_unavailable=False):
+    def verify(self, query, retry_unavailable=False, recover_cooldown=False):
         with self.lock:
             if not isinstance(retry_unavailable,bool):
                 raise ValueError("重新验证失败作品选项须为开关值。")
-            self._require_ready(verification=True)
+            if not isinstance(recover_cooldown,bool):
+                raise ValueError("冷却恢复验证选项须为开关值。")
+            self._require_ready(verification=True,recover_cooldown=recover_cooldown)
             if self.thread and self.thread.is_alive():
                 raise ValueError("采集任务尚未停止，请等待当前请求结束。")
+            recovering = self.cooldown_until > time.time()
+            if recovering and time.time() < self.cooldown_probe_after:
+                raise ValueError("恢复验证每分钟最多一次，请稍后再试；原冷却仍保留。")
             if retry_unavailable:
                 self.verification_unavailable.clear()
                 self.verification_issues.clear()
             self.preview_data=None
             cutoff=int(time.time())-self.settings["refresh_days"]*86400
             unavailable=[]
-            for attempt in range(3):
+            for attempt in range(1 if recovering else 3):
                 excluded=self.verification_unavailable | self.verification_issues.keys()
                 row,job_id=self._verification_candidate(query,cutoff,excluded)
                 if row is None:
@@ -797,6 +832,9 @@ class Collector:
                 if not attempt and delay:
                     raise ValueError("距离上次请求太近，请稍后再验证。")
                 if delay:time.sleep(delay)
+                if recovering:
+                    self.cooldown_probe_after=math.ceil(time.time()+60)
+                    self.store.remember_cooldown_probe(self.cooldown_probe_after)
                 self.last_request=time.monotonic()
                 self.verified=False
                 try:
@@ -805,7 +843,7 @@ class Collector:
                     self.verification_issues[row["gid"]]={"id":secrets.token_urlsafe(24),"gid":row["gid"],"token":row["token"],"job_id":job_id,"host":self.settings["host"],"url":gallery_url(self.settings["host"],row["gid"],row["token"]),"error":str(error),"in_queue":bool(row["needs_collection"])}
                     raise ValueError(f"验证已停止：{error}\n作品链接：{gallery_url(self.settings['host'],row['gid'],row['token'])}\n再次点击验证会尝试其他候选，本条暂未记为失败；若已在浏览器确认打不开，请点击“确认不可访问并跳过”。") from None
                 except CollectionPaused as error:
-                    self.cooldown_until=time.time()+error.cooldown
+                    self.cooldown_until=max(self.cooldown_until,time.time()+error.cooldown)
                     self.store.remember_cooldown(self.cooldown_until)
                     raise ValueError(f"验证已停止：{error}\n作品链接：{gallery_url(self.settings['host'],row['gid'],row['token'])}") from None
                 except GalleryUnavailable as error:
@@ -824,12 +862,18 @@ class Collector:
                     self.last_request=time.monotonic()
                 if row["needs_collection"]:
                     self.store.save(row["gid"],count.favorite_count,self.settings["host"],count.rating_count)
+                if self.cooldown_until:
+                    self.store.clear_cooldown()
+                    self.cooldown_until=0
+                    self.cooldown_probe_after=0
                 self.verified=True
-                return {"verified":True,"gid":row["gid"],"favorite_count":count.favorite_count,"rating_count":count.rating_count,"unavailable":unavailable,"verification_only":not bool(row["needs_collection"])}
+                return {"verified":True,"gid":row["gid"],"favorite_count":count.favorite_count,"rating_count":count.rating_count,"unavailable":unavailable,"verification_only":not bool(row["needs_collection"]),"cooldown_cleared":recovering}
             last=unavailable[-1]
             has_more=self._verification_candidate(query,cutoff,self.verification_unavailable | self.verification_issues.keys())[0] is not None
             next_step="再次点击验证将尝试其他待处理作品，不会重复本次失败作品。" if has_more else "当前范围没有其他可验证作品；请先在浏览器核对失败作品，处理后点击“重新验证失败作品”。"
             reasons="\n".join(f"作品 ID {item['gid']}：{item['error']}" for item in unavailable)
+            if recovering:
+                next_step="原冷却仍保留；恢复验证每分钟最多一次。请先核对 Cookie、代理和作品链接，再手动验证。"
             raise ValueError(f"本次验证的 {len(unavailable)} 条作品均不可访问，已记录到失败列表。{next_step}\n{reasons}\n最后一条作品：{last['url']}")
 
     def skip_unavailable(self, issue_id):
@@ -1111,7 +1155,10 @@ class Collector:
                 except CollectionPaused as error:
                     phase = "保存暂停状态"
                     with self.lock:
-                        self.cooldown_until = int(time.time()+error.cooldown)
+                        if error.cooldown:
+                            self.verified = False
+                        self.preview_data = None
+                        self.cooldown_until = max(self.cooldown_until,int(time.time()+error.cooldown))
                         self.store.remember_cooldown(self.cooldown_until)
                         with self.store.connection() as db:
                             db.execute("UPDATE jobs SET state='paused',message=?,cooldown_until=?,updated_at=? WHERE id=? AND state='running'", (str(error),self.cooldown_until,int(time.time()),job_id))

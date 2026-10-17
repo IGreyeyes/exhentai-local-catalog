@@ -112,6 +112,23 @@ class RecordedWorksTests(unittest.TestCase):
         self.assertEqual(self.query(age='older30')['total'],2)
         self.assertEqual(self.query(q='book',source='e-hentai.org',age='7d')['total'],1)
 
+    def test_category_combines_with_tags_and_filters_before_pagination(self):
+        result=self.query(category='Non-H',limit='1',page='2')
+        self.assertEqual((result['total'],result['pages'],result['page']),(3,3,2))
+        self.assertEqual(result['category'],'Non-H')
+        self.assertEqual([item['gid'] for item in result['items']],[2])
+        self.assertEqual(result['summary']['total'],5)
+        self.assertEqual(self.query(category='Manga')['items'][0]['gid'],4)
+        combined=self.query(tag=['英语','合集'],category='Non-H')
+        self.assertEqual({item['gid'] for item in combined['items']},{1,3})
+        self.assertEqual(self.query(tag='language:english',category='Manga')['total'],0)
+        self.assertEqual(self.query(category='Non-H',source='e-hentai.org')['items'][0]['gid'],2)
+        self.catalog.favorites.set_reading_state([2],'watched')
+        self.assertEqual(self.query(category='Non-H',state='watched')['items'][0]['gid'],2)
+        self.assertEqual(self.query(category='Artist CG')['total'],0)
+        self.assertEqual(self.query(category='')['total'],5)
+        with self.assertRaises(ValueError):self.query(category='x'*41)
+
     def test_no_records_and_no_filter_matches_are_distinct(self):
         filtered=self.query(q='not present')
         self.assertEqual(filtered['total'],0)

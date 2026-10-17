@@ -4,12 +4,9 @@
   let preview=null,previewRevision=0,initialStatus=true,errorRowsKey="";
   const ui=id=>document.getElementById(id);
   function acceptState(data){
-    if(state?.job?.state==="running"&&data.job?.state!=="running"&&Number(ui("collector-interval").value)!==4){ui("collector-interval").value="4";settingsDirty=true;invalidatePreview();}
     state=data;render();
   }
   ui("collector-interval").onchange=()=>{
-    const seconds=Number(ui("collector-interval").value);
-    if(seconds<4&&!window.confirm(`你选择了 ${seconds} 秒请求间隔。\n\n抓取过快可能不符合源站规定，导致限流、账号或 IP 被封禁。4 秒默认值也不保证不会受限，请遵守网站规则。\n\n是否仍使用这个速度？`))ui("collector-interval").value="4";
     settingsDirty=true;invalidatePreview();render();
   };
   const labels={running:"采集中",paused:"已暂停",awaiting_next:"本轮已结束 · 等待继续",completed:"采集完成",completed_with_errors:"已处理完 · 有失败项",cancelled:"任务已结束",preparing:"正在准备"};
@@ -108,6 +105,13 @@
     ui("collector-reverify").hidden=!(state?.verification_unavailable||state?.verification_deferred);
     ui("collector-reverify").disabled=ui("collector-verify").disabled;
     ui("collector-verify").textContent=savedTask()?"验证原任务的源站访问":"随机验证源站访问";
+    ui("collector-recover").hidden=!cooling;
+    const probeWait=Math.max(0,Math.ceil((state?.cooldown_probe_after||0)-Date.now()/1000));
+    ui("collector-recover").disabled=busy||settingsDirty||!state?.configured||(!hasSearch&&!savedTask())||probeWait>0;
+    ui("collector-recover").textContent=probeWait?`恢复验证请等 ${probeWait} 秒`:"浏览器已恢复，单次验证";
+    if(cooling)ui("collector-reverify").disabled=ui("collector-recover").disabled;
+    ui("collector-cooldown-note").hidden=!cooling;
+    ui("collector-cooldown-note").textContent=cooling?`保护冷却剩余约 ${Math.ceil((state.cooldown_until-Date.now()/1000)/60)} 分钟。若浏览器已能打开同一作品，请核对客户端 Cookie、代理并应用设置，再点击“浏览器已恢复，单次验证”。每分钟最多请求 1 条，成功后解除冷却，继续采集仍需重新预估和确认。`:"";
     const issue=state?.verification_issue;
     ui("collector-access-issue").hidden=!issue;
     ui("collector-access-issue-note").textContent=issue?`待确认访问异常 ${number(state.verification_deferred)} 条。本次确认的是作品 ID ${issue.gid}。再次验证会随机换其他候选；${issue.in_queue===false?"这是已有记录的访问样本，确认仅保存失败记录，原队列和已有收藏数保留。":"这条仍在采集队列中，确认后会记录失败并跳过。"}仅在浏览器也无法打开此链接时点击确认，以后可单独重试。`:"";
@@ -215,7 +219,7 @@
     let focusProgress=false;
     invalidatePreview();
     const revision=previewRevision,key=scopeKey();
-    actionBusy=true;updateControls();feedback(path==="preview"?"正在统计待抓取数量和预计耗时，不访问源站…":path==="verify"?"正在随机取样并验证源站访问，请稍候…":"正在处理…");
+    actionBusy=true;updateControls();feedback(path==="preview"?"正在统计待抓取数量和预计耗时，不访问源站…":path==="verify"?(payload.recover_cooldown?"正在单次验证客户端访问，成功后解除冷却…":"正在随机取样并验证源站访问，请稍候…"):"正在处理…");
     try{
       const response=await fetch(`/api/collector/${path}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify(payload)});
       const data=await response.json();
@@ -223,7 +227,7 @@
       if(path==="preview"){
         if(revision===previewRevision&&key===scopeKey()){renderPreview(data,key,payload.query||"");feedback("预估已生成，确认后才会进行批量抓取。");}
         else feedback("搜索或设置已变化，请重新预估。",true);
-      }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。\n${data.unavailable.map(item=>`作品 ID ${item.gid}：${item.error}`).join("\n")}\n`:""}随机验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。${data.verification_only?"本条仅用于访问验证，已有收藏数、来源和采集时间未改写。":"本条读取结果已保存。"}现在请预估耗时，再确认采集。`);
+      }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。\n${data.unavailable.map(item=>`作品 ID ${item.gid}：${item.error}`).join("\n")}\n`:""}${data.cooldown_cleared?"冷却已解除，原任务保持暂停。":""}随机验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。${data.verification_only?"本条仅用于访问验证，已有收藏数、来源和采集时间未改写。":"本条读取结果已保存。"}现在请预估耗时，再确认采集。`);
       else feedback({settings:"设置已应用。可先预估耗时，再确认采集。",start:data.job?.state==="completed"?data.job.message:"计划已保存，本轮已开始采集，可随时暂停。",next_round:"下一轮已开始。本轮结束后会再次自动停止。",next_batch:data.job?.state==="completed"?data.job.message:"下一批已开始采集，沿用上一批的搜索条件。",pause:"已请求暂停，正在发出的请求会等待结束。",resume:"已按预估继续采集。",retry:"已按预估重试失败项。",cancel:"任务已结束，已采集的收藏数保留。"}[path]||"操作完成。");
       if(path==="settings") {settingsDirty=false;["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");}
       if(path==="skip_unavailable")feedback(data.message);
@@ -272,7 +276,8 @@
   ui("credential-import").onclick=()=>ui("credential-file").click();
   ui("credential-file").onchange=event=>importCredentials(event.target.files?.[0]);
   ui("collector-verify").onclick=()=>action("verify",savedTask()?{use_job:true}:{query:submittedFilters.toString()});
-  ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),retry_unavailable:true});
+  ui("collector-recover").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),recover_cooldown:true});
+  ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),retry_unavailable:true,recover_cooldown:Boolean(state?.cooldown_until>Date.now()/1000)});
   ui("collector-skip-unavailable").onclick=()=>{if(state?.verification_issue)action("skip_unavailable",{issue_id:state.verification_issue.id});};
   ui("collector-start").onclick=()=>action("preview",{query:submittedFilters.toString(),operation:"start"});
   ["pause","cancel"].forEach(name=>ui(`collector-${name}`).onclick=()=>action(name));
@@ -292,7 +297,7 @@
       const response=await fetch("/api/status");
       const data=await response.json();token=data.action_token||"";
       await refresh();
-      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=state.proxy;ui("collector-interval").value=state.busy?String(state.interval):"4";settingsDirty=Boolean(state.configured&&!state.busy&&state.interval!==4);ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);updateControls();}
+      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=state.proxy;ui("collector-interval").value=String(state.interval);ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);updateControls();}
     }catch(error){feedback("采集工具尚未连接，请重新启动服务后刷新页面。",true);}
   })();
   setInterval(()=>{if(!document.hidden)refresh();},3000);

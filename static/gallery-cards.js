@@ -138,5 +138,8 @@
     }
     return recordCard(item);
   }
-  window.galleryCards={render,dateParts,renderRatingGuide};
+  function fillCategoryFilter(select){
+    select.replaceChildren(new Option("全部类型",""),...Object.entries(categories).map(([value,label])=>new Option(label,value)));
+  }
+  window.galleryCards={render,dateParts,renderRatingGuide,fillCategoryFilter};
 })();

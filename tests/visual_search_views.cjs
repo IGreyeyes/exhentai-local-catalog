@@ -43,6 +43,7 @@ async function main(){
   await page.route('**/api/cover/*',route=>route.fulfill({status:200,contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="176" height="235"><rect width="176" height="235" fill="#edf1e8"/></svg>'}));
   const query='/?tag=language%3Aenglish&sort=favorites';
   await page.goto(base+query);await ready(page);
+  await page.locator('#search-advanced > summary').click();
   await page.locator('#rating-system-guide summary').click();
   assert(await page.locator('#rating-system-guide tbody tr').count()===5,'Rating thresholds are missing');
   assert((await page.locator('.rating-guide-content').textContent()).includes('至少 20 人评分'),'Minimum rating sample is missing');
@@ -100,6 +101,7 @@ async function main(){
       assert(overflow<=1&&await page.locator('.saved-ratio').first().isVisible(),'Record rating layout failed in '+view+' at '+width);
     }
   }
+  await page.locator('#records-advanced > summary').click();
   await page.locator('#rating-system-guide summary').click();
   assert(await page.locator('#rating-system-guide tbody tr').count()===5,'Rating guide missing on records page');
   await page.locator('#rating-system-guide').screenshot({path:path.join(output,'records-rating-guide.png')});

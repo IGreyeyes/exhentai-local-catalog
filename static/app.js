@@ -249,6 +249,7 @@ async function search(page = 1, fresh = true, updateHistory = true) {
   } finally { if (searchRequest === request) setBusy(false); }
 }
 function renderResults() {
+  document.dispatchEvent(new Event("catalog:filters-changed"));
   const data = responseData;
   if (!data) return;
   const coverage=data.favorite_coverage;
@@ -333,6 +334,7 @@ function restoreURL() {
   searchCategory.set(formCategory.selected());
   $("include-inactive").checked=params.get("include_inactive")==="1";
   $("use-tag-blacklist").checked=params.get("use_blacklist")!=="0";
+  document.dispatchEvent(new Event("catalog:filters-changed"));
   if(tags.length||$("title-input").value) search(Number(params.get("page"))||1,true,false);
 }
 window.addEventListener("popstate",restoreURL);

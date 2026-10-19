@@ -150,6 +150,7 @@
     $("apply-bulk-state").disabled=loading||actionBusy||!selected.size;
   }
   async function load(page=1,fresh=true,updateHistory=true){
+    document.dispatchEvent(new Event("catalog:filters-changed"));
     if(fresh){if($("record-tag").value.trim())addTag($("record-tag").value);applied=filters();}
     request?.abort();const active=new AbortController();request=active;
     const params=new URLSearchParams(applied);params.set("page",String(Math.max(1,Number(page)||1)));

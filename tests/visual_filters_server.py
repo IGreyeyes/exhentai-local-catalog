@@ -1,5 +1,7 @@
 """Disposable type-filter data and a simulated source for interval persistence checks."""
 from pathlib import Path
+from contextlib import redirect_stdout
+import io
 import sqlite3
 import sys
 import threading
@@ -9,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import Catalog, Server
 from favorites import Collector
 from test_desktop import make_library
+from initialize_catalog import initialize
 
 
 class FixtureCollector(Collector):
@@ -36,6 +39,8 @@ if not database.exists():
             category = 'Manga' if gid <= 60 else 'Non-H' if gid <= 90 else 'Artist CG'
             db.execute("INSERT INTO gallery VALUES(?,'abcdef0123',?,'',?,?,10,'4.0',0,0,0)", (gid, f'类型筛选示例 {gid}', category, gid))
             db.execute('INSERT INTO gid_tid VALUES(?,1)', (gid,))
+    with redirect_stdout(io.StringIO()):
+        initialize(database)
     catalog = Catalog(database)
     for gid in range(2, 97):
         catalog.favorites.save(gid, gid * 10, 'e-hentai.org')

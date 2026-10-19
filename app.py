@@ -593,6 +593,8 @@ class Handler(BaseHTTPRequestHandler):
                 files["/changelog"] = ("changelog.html", "text/html")
                 files["/changelog/"] = ("changelog.html", "text/html")
                 files["/changelog.css"] = ("changelog.css", "text/css")
+                files["/workspace.css"] = ("workspace.css", "text/css")
+                files["/workspace.js"] = ("workspace.js", "text/javascript")
                 files["/changelog.js"] = ("changelog.js", "text/javascript")
                 files["/release-notes.js"] = ("release-notes.js", "text/javascript")
                 if request.path not in files:

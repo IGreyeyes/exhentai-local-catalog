@@ -21,6 +21,8 @@ import zipfile
 import desktop_updates as updates
 from client_version import APP_VERSION, PACKAGE_NAME, REPOSITORY
 
+NEXT_VERSION = ".".join([*APP_VERSION.split(".")[:2], str(int(APP_VERSION.split(".")[2]) + 1)])
+
 
 def archive_bytes(extra=()):
     output = io.BytesIO()
@@ -62,14 +64,14 @@ class ClientUpdateTests(unittest.TestCase):
         self.directory.cleanup()
 
     def release(self, raw=b"test"):
-        return {"tag_name": "v1.2.0", "body": "更新内容", "assets": [{"name": PACKAGE_NAME, "size": len(raw),
+        return {"tag_name": "v" + NEXT_VERSION, "body": "更新内容", "assets": [{"name": PACKAGE_NAME, "size": len(raw),
             "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
-            "browser_download_url": f"https://github.com/{REPOSITORY}/releases/download/v1.2.0/{PACKAGE_NAME}"}]}
+            "browser_download_url": f"https://github.com/{REPOSITORY}/releases/download/v{NEXT_VERSION}/{PACKAGE_NAME}"}]}
 
     def test_release_selection_and_version_comparison(self):
         result = updates.release_info(self.release())
         self.assertTrue(result["available"])
-        self.assertEqual(result["latest_version"], "1.2.0")
+        self.assertEqual(result["latest_version"], NEXT_VERSION)
         self.assertFalse(updates.release_info({"tag_name": "v1.0.0"})["available"])
         self.assertFalse(updates.release_info({"tag_name": APP_VERSION})["available"])
 
@@ -87,7 +89,7 @@ class ClientUpdateTests(unittest.TestCase):
         self.assertTrue(self.updater.info()["show_notes"])
         self.updater.acknowledge()
         self.assertFalse(updates.ClientUpdater(self.root).info()["show_notes"])
-        with patch("desktop_updates.APP_VERSION", "1.2.0"):
+        with patch("desktop_updates.APP_VERSION", NEXT_VERSION):
             self.assertTrue(self.updater.info()["show_notes"])
         (self.root / "data" / "client-update-state.json").write_text("broken", encoding="utf-8")
         self.assertTrue(self.updater.info()["show_notes"])

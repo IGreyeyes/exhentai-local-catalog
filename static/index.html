@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>EX资料库 · 本地 Tag 搜索</title>
+  <title>标签搜索 · EX资料库</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/records.css">
@@ -13,51 +13,53 @@
   <script src="/app.js" defer></script>
   <script src="/collector.js" defer></script>
   <script src="/service.js" defer></script>
+  <link rel="stylesheet" href="/workspace.css">
+  <script src="/workspace.js" defer></script>
 </head>
-<body>
+<body class="search-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
   <div class="shell">
     <aside class="sidebar">
       <a class="brand" href="/" aria-label="EX资料库首页"><span class="brand-icon" aria-hidden="true">Ex</span><span>EX资料库<small>LOCAL CATALOG</small></span></a>
-      <div class="nav-caption">我的资料库</div>
-      <a class="nav-item selected" href="/" aria-current="page"><span aria-hidden="true">⌕</span> 标签搜索 <span class="nav-arrow" aria-hidden="true">↗</span></a>
+      <div class="nav-caption">工作区</div>
+      <a class="nav-item selected" href="/" aria-current="page"><span aria-hidden="true">⌕</span> 标签搜索 </a>
       <a class="nav-item" href="/records"><span aria-hidden="true">✓</span> 已记录</a>
+      <a class="nav-item nav-collector" href="/#collector-panel"><span aria-hidden="true">⇩</span> 收藏数采集</a>
       <a class="nav-item" href="/maintenance"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <div class="nav-caption nav-caption-secondary">帮助与版本</div>
       <a class="nav-item nav-changelog" href="/changelog"><span aria-hidden="true">☷</span> 更新日志</a>
       <a class="nav-item nav-contact" href="/contact"><span aria-hidden="true">✉</span> 联系我们</a>
       <div class="sidebar-note"><span class="small-dot"></span> 数据已保存在本机<p>搜索在本地完成。点击作品链接时才会打开源站。</p></div>
-      <div class="sidebar-bottom"><span>收藏榜</span><strong id="sidebar-collector">采集工具已就绪</strong><p>搜索后展开「收藏数采集」，为匹配作品补充收藏数。</p><div class="stages"><span class="complete">目录</span><i></i><span class="complete">搜索</span><i></i><span class="complete">收藏数</span></div></div>
+      <div class="sidebar-bottom"><span>收藏榜</span><strong id="sidebar-collector">采集工具已就绪</strong><p>搜索后建立采集计划，随时查看进度。</p><div class="stages"><span class="complete">目录</span><i></i><span class="complete">搜索</span><i></i><span class="complete">收藏数</span></div></div>
     </aside>
-    <main>
-      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>标签搜索</strong></span><div class="topbar-actions"><span class="connection" id="connection"><i></i> 正在连接本地服务</span><a class="button secondary recorded-link" href="/records">已记录</a><a class="button secondary" href="/maintenance">资料库维护</a><a class="button secondary" href="/maintenance#stop">停止服务</a></div></header>
+    <main id="main-content" tabindex="-1">
+      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>标签搜索</strong></span><div class="topbar-actions"><span class="connection" id="connection"><i></i> 正在连接本地服务</span><a class="button secondary" href="/maintenance#stop">停止服务</a></div></header>
       <div class="main-content">
-        <section class="intro"><div class="eyebrow">YOUR PERSONAL INDEX</div><h1>从标签开始，探索整个资料库。</h1><p>组合你感兴趣的 Tag，查看本地数据库中的全部匹配作品。</p></section>
+        <section class="intro workspace-intro"><div><h1>标签搜索</h1><p>组合标签与关键词，在本地资料库中查找作品。</p></div><a class="button secondary" href="#collector-panel">收藏数采集 <span aria-hidden="true">↗</span></a></section>
         <section class="stats" aria-label="数据库概况">
           <div><span>已收录作品记录</span><strong id="gallery-count">—</strong><small>包含历史版本与已移除记录</small></div>
           <div><span>可检索标签</span><strong id="tag-count">—</strong><small>支持完整 Tag 精确匹配</small></div>
           <div><span>库内最新作品发布日</span><strong id="latest-date" class="date-value">—</strong><small>反映本地快照，不代表实时数据</small></div>
         </section>
         <section class="search-panel" aria-labelledby="search-title">
-          <div class="panel-heading"><h2 id="search-title">查找作品</h2><span>多个标签须同时满足</span></div>
+          <div class="panel-heading"><h2 id="search-title">查找作品</h2><span>本地检索 · 多个标签同时满足</span></div>
           <form id="search-form">
-            <label class="field-label" for="tag-input">标签 <span>TAG</span></label>
-            <div class="tag-field" id="tag-field"><div id="selected-tags" class="selected-tags"></div><div class="tag-input-wrap"><input id="tag-input" type="text" placeholder="输入中文或英文标签，例如 中文、language:chinese" role="combobox" aria-autocomplete="list" aria-controls="suggestions" aria-expanded="false" autocomplete="off" maxlength="200"><ul id="suggestions" role="listbox" hidden></ul></div></div>
-            <p class="field-hint">支持中文或英文搜索标签。从建议中选择具体标签，多个标签须同时满足。<span id="translation-status">正在读取中文词库…</span></p>
-            <div class="examples"><span>试试看</span><button type="button" data-example="language:chinese">中文作品 <small>language:chinese</small><b>＋</b></button><button type="button" data-example="other:anthology">合集 <small>other:anthology</small><b>＋</b></button></div>
-            <label class="field-label" for="exclude-tag-input">排除标签 <span>可选</span></label>
+            <div class="primary-search-grid"><div><label class="field-label" for="tag-input">标签 <span>TAG</span></label>
+            <div class="tag-field" id="tag-field"><div id="selected-tags" class="selected-tags"></div><div class="tag-input-wrap"><input id="tag-input" type="text" placeholder="输入中文或英文标签，例如 中文、language:chinese" role="combobox" aria-autocomplete="list" aria-controls="suggestions" aria-expanded="false" autocomplete="off" maxlength="200"><ul id="suggestions" role="listbox" hidden></ul></div></div></div><label class="title-field">标题关键词 <span>可选</span><input id="title-input" type="search" placeholder="搜索原标题或日文标题" maxlength="200"></label></div>
+            <div class="search-assist"><p class="field-hint">支持中文或英文搜索标签。从建议中选择具体标签，多个标签须同时满足。<span id="translation-status">正在读取中文词库…</span></p>
+            <div class="examples"><span>试试看</span><button type="button" data-example="language:chinese">中文作品 <small>language:chinese</small><b>＋</b></button><button type="button" data-example="other:anthology">合集 <small>other:anthology</small><b>＋</b></button></div></div>
+            <div class="search-toolbar"><div class="search-options"><div class="category-control"><span>作品分类</span><div id="category"></div></div><label>排序方式<select id="sort"><option value="newest">发布时间 · 从新到旧</option><option value="oldest">发布时间 · 从旧到新</option><option value="rating">平均评分 · 从高到低</option><option value="favorites">收藏数 · 从高到低（未知置后）</option><option value="favorites_per_rating">收藏/评分 · 从高到低</option><option value="pages">作品页数 · 从多到少</option></select></label></div><div><button type="button" class="button secondary" id="reset-filters">清空条件</button><button class="button primary" id="search-button" type="submit"><span aria-hidden="true">⌕</span> 搜索资料库</button></div></div>
+            <details class="advanced-filters" id="search-advanced">
+              <summary><span>更多筛选</span><span class="filter-summary" id="search-filter-summary">排除标签、黑名单与历史记录</span></summary>
+              <div class="advanced-content"><label class="field-label" for="exclude-tag-input">排除标签 <span>可选</span></label>
             <div class="tag-field exclude-tag-field" id="exclude-tag-field"><div id="selected-exclude-tags" class="selected-tags"></div><div class="tag-input-wrap"><input id="exclude-tag-input" type="text" placeholder="含有这些标签的作品不会出现" role="combobox" aria-autocomplete="list" aria-controls="exclude-suggestions" aria-expanded="false" autocomplete="off" maxlength="200"><ul id="exclude-suggestions" role="listbox" hidden></ul></div></div>
             <p class="field-hint">这里仅用于本次搜索。需要长期排除时，可将当前排除标签保存到黑名单。</p>
             <div class="blacklist-panel">
               <div class="blacklist-heading"><label class="checkbox"><input id="use-tag-blacklist" type="checkbox" checked>本次搜索应用持久黑名单</label><button type="button" class="button secondary" id="save-excluded-blacklist" disabled>将当前排除标签加入黑名单</button></div>
               <div id="blacklist-tags" class="blacklist-tags"><span class="blacklist-empty">黑名单为空</span></div>
               <p id="blacklist-status" class="field-hint">黑名单保存在本地收藏资料库中，关闭服务或重启电脑后仍会保留。</p>
-            </div>
-            <div class="filter-grid">
-              <label class="title-field">标题关键词 <span>可选</span><input id="title-input" type="search" placeholder="搜索原标题或日文标题" maxlength="200"></label>
-              <div class="category-control"><span>作品分类</span><div id="category"></div></div>
-              <label>排序方式<select id="sort"><option value="newest">发布时间 · 从新到旧</option><option value="oldest">发布时间 · 从旧到新</option><option value="rating">平均评分 · 从高到低</option><option value="favorites">收藏数 · 从高到低（未知置后）</option><option value="favorites_per_rating">收藏/评分 · 从高到低</option><option value="pages">作品页数 · 从多到少</option></select></label>
-            </div>
-            <details id="rating-system-guide" class="rating-system-guide"><summary>收藏/评分怎么算？查看评级标准</summary><div class="rating-guide-content"><p>正在读取评级标准…</p></div></details>
-            <div class="search-actions"><label class="checkbox"><input id="include-inactive" type="checkbox">包含已移除、已隐藏及旧版本记录</label><div><button type="button" class="button secondary" id="reset-filters">清空条件</button><button class="button primary" id="search-button" type="submit"><span aria-hidden="true">⌕</span> 搜索资料库</button></div></div>
+            </div><label class="checkbox"><input id="include-inactive" type="checkbox">包含已移除、已隐藏及旧版本记录</label><details id="rating-system-guide" class="rating-system-guide"><summary>收藏/评分怎么算？查看评级标准</summary><div class="rating-guide-content"><p>正在读取评级标准…</p></div></details></div>
+            </details>
           </form>
         </section>
         <div id="message" class="message" role="alert" hidden></div>
@@ -82,22 +84,9 @@
               <p class="round-save-note" id="collector-save-note" hidden>关闭服务后仍保留队列、轮次和剩余数量。重新打开后，应用并验证源站访问即可接着抓取。</p>
             </section>
             <form id="collector-settings" autocomplete="off">
-              <h3>1. 配置源站访问</h3>
-              <div class="filter-grid">
-                <label>采集源站<select id="collector-host"><option value="exhentai.org">ExHentai</option><option value="e-hentai.org">E-Hentai</option></select></label>
-                <label>请求间隔<select id="collector-interval"><option value="1">1 秒</option><option value="1.5">1.5 秒</option><option value="2">2 秒</option><option value="2.5">2.5 秒</option><option value="3" selected>3 秒</option></select></label>
-                <label>缓存刷新周期<select id="collector-refresh"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option><option value="custom">自定义天数</option></select></label>
-              </div>
-              <div class="filter-grid collection-mode-grid"><label>采集模式<select id="collector-mode"><option value="rounds" selected>分轮抓取 · 每轮结束自动停止（推荐）</option><option value="batch">分批补充 · 每次挑选一批</option><option value="full">全量采集所有待处理作品</option></select></label><label>每轮 / 每批抓取数量<select id="collector-batch-size"><option value="100">100 条</option><option value="300">300 条</option><option value="1000" selected>1,000 条</option><option value="3000">3,000 条</option><option value="5000">5,000 条</option><option value="custom">自定义数量</option></select></label></div>
-              <div class="custom-refresh custom-batch" id="custom-batch-control" hidden><label for="collector-custom-batch-size">自定义抓取数量</label><input id="collector-custom-batch-size" type="number" min="1" max="100000" step="1" value="1000" disabled><span>条 / 轮（1～100,000）</span></div>
-              <div class="round-mode-note" id="collector-round-hint"><strong>建立一次计划，按轮继续</strong><p>例如待抓取 10,000 条、每轮 1,000 条，会分成 10 轮。每轮完成后自动停下，由你选择何时继续；关闭服务后也能恢复。</p></div>
-              <label class="checkbox rating-priority"><input id="collector-rating-priority" type="checkbox">抓取时按平均评分从高到低</label>
-              <p class="field-hint" id="collector-rating-hint">关闭时，分批模式按年份均衡挑选，并在各年份内优先高评分作品。</p>
-              <p class="field-hint" id="collector-batch-hint">按发布年份轮流挑选，年份内优先评分高的作品。先补尚未记录和尝试的新作品，未纳入本批的内容留待后续。</p>
-              <div class="custom-refresh" id="custom-refresh" hidden><label for="collector-custom-days">自定义缓存天数</label><input id="collector-custom-days" type="number" min="1" max="3650" step="1" value="90" disabled><span>天（1～3650）</span></div>
-              <label class="checkbox skip-existing"><input id="collector-skip-existing" type="checkbox">只抓取从未成功采集过的作品，跳过已有收藏数</label>
-              <p class="field-hint" id="collector-policy-hint">超过缓存天数后，再次创建任务时才会刷新；不会自动重新抓取。</p>
-              <div class="filter-grid credential-grid">
+              <h3 class="step-heading"><span>01</span> 访问与采集设置</h3>
+              <div class="collector-settings-grid">
+                <details class="settings-group" id="collector-access-settings" open><summary>源站访问 <span>账号与网络</span></summary><div class="settings-content"><div class="filter-grid source-grid"><label>采集源站<select id="collector-host"><option value="exhentai.org">ExHentai</option><option value="e-hentai.org">E-Hentai</option></select></label></div><div class="filter-grid credential-grid">
                 <label>ipb_member_id<input id="cookie-member" type="password" autocomplete="off" spellcheck="false" placeholder="Cookie 的 Value"></label>
                 <label>ipb_pass_hash<input id="cookie-hash" type="password" autocomplete="off" spellcheck="false" placeholder="Cookie 的 Value"></label>
                 <label>igneous<input id="cookie-igneous" type="password" autocomplete="off" spellcheck="false" placeholder="ExHentai 需要填写"></label>
@@ -106,10 +95,20 @@
               <p class="field-hint">登录信息默认只保留在本次服务运行的内存中。应用设置后可导出本机加密文件，下次直接导入。E-Hentai 可先尝试不填写 Cookie。</p>
               <div class="credential-file-actions"><button type="button" class="button secondary" id="credential-export" disabled>导出加密登录文件</button><button type="button" class="button secondary" id="credential-import">导入加密登录文件</button><input id="credential-file" type="file" accept=".ehcred,application/octet-stream" hidden></div>
               <p class="field-hint credential-file-note">.ehcred 文件由 Windows DPAPI 加密，只能由这台电脑上的当前 Windows 用户解密。请像密码一样保管，不要发送给他人。</p>
-              <details class="cookie-help"><summary>在 Chrome / Edge 中找到这三项 Cookie</summary><ol><li>在浏览器打开你能正常访问的源站作品页。</li><li>按 F12，进入「应用（Application）」→「存储」→「Cookies」，选择当前源站域名。</li><li>找到上面的三个名称，将各自的 Value 填入这里。不要复制整段请求头，也不需要把这些值发到聊天中。</li></ol></details>
+              <details class="cookie-help"><summary>在 Chrome / Edge 中找到这三项 Cookie</summary><ol><li>在浏览器打开你能正常访问的源站作品页。</li><li>按 F12，进入「应用（Application）」→「存储」→「Cookies」，选择当前源站域名。</li><li>找到上面的三个名称，将各自的 Value 填入这里。不要复制整段请求头，也不需要把这些值发到聊天中。</li></ol></details></div></details>
+                <details class="settings-group" id="collector-policy-settings" open><summary>采集策略 <span>范围、节奏与缓存</span></summary><div class="settings-content"><div class="filter-grid policy-grid"><label>请求间隔<select id="collector-interval"><option value="1">1 秒</option><option value="1.5">1.5 秒</option><option value="2">2 秒</option><option value="2.5">2.5 秒</option><option value="3" selected>3 秒</option></select></label><label>缓存刷新周期<select id="collector-refresh"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option><option value="custom">自定义天数</option></select></label></div><div class="filter-grid collection-mode-grid"><label>采集模式<select id="collector-mode"><option value="rounds" selected>分轮抓取 · 每轮结束自动停止（推荐）</option><option value="batch">分批补充 · 每次挑选一批</option><option value="full">全量采集所有待处理作品</option></select></label><label>每轮 / 每批抓取数量<select id="collector-batch-size"><option value="100">100 条</option><option value="300">300 条</option><option value="1000" selected>1,000 条</option><option value="3000">3,000 条</option><option value="5000">5,000 条</option><option value="custom">自定义数量</option></select></label></div>
+              <div class="custom-refresh custom-batch" id="custom-batch-control" hidden><label for="collector-custom-batch-size">自定义抓取数量</label><input id="collector-custom-batch-size" type="number" min="1" max="100000" step="1" value="1000" disabled><span>条 / 轮（1～100,000）</span></div>
+              <div class="round-mode-note" id="collector-round-hint"><strong>建立一次计划，按轮继续</strong><p>例如待抓取 10,000 条、每轮 1,000 条，会分成 10 轮。每轮完成后自动停下，由你选择何时继续；关闭服务后也能恢复。</p></div>
+              <label class="checkbox rating-priority"><input id="collector-rating-priority" type="checkbox">抓取时按平均评分从高到低</label>
+              <p class="field-hint" id="collector-rating-hint">关闭时，分批模式按年份均衡挑选，并在各年份内优先高评分作品。</p>
+              <p class="field-hint" id="collector-batch-hint">按发布年份轮流挑选，年份内优先评分高的作品。先补尚未记录和尝试的新作品，未纳入本批的内容留待后续。</p>
+              <div class="custom-refresh" id="custom-refresh" hidden><label for="collector-custom-days">自定义缓存天数</label><input id="collector-custom-days" type="number" min="1" max="3650" step="1" value="90" disabled><span>天（1～3650）</span></div>
+              <label class="checkbox skip-existing"><input id="collector-skip-existing" type="checkbox">只抓取从未成功采集过的作品，跳过已有收藏数</label>
+              <p class="field-hint" id="collector-policy-hint">超过缓存天数后，再次创建任务时才会刷新；不会自动重新抓取。</p></div></details>
+              </div>
               <div class="collector-actions"><span id="collector-config-state">尚未配置</span><button class="button secondary" id="collector-save" type="submit">应用本次设置</button></div>
             </form>
-            <div class="collector-step"><h3>2. 先预估，再确认采集</h3><p class="field-hint">预估只读取本地数据，不访问源站。验证优先从原范围内的缓存、已完成记录随机取样，只检查访问，不改写已有数据；无缓存样本时随机检查待处理作品。每次最多尝试 3 条，正式采集仍按原队列进行。不可用提示后再次验证会临时换其他候选；若浏览器也打不开，可点击“确认不可访问并跳过”，继续原任务时不再请求这条。暂缓验证本身不记录失败；正式批量采集会自动记录不可用作品并继续队列。登录、浏览器验证和限流仍会停止请求；处理后可点击“重新验证失败作品”。批量采集须在预估后单独确认。</p><div class="collector-buttons"><button class="button secondary" id="collector-verify" disabled>随机验证源站访问</button><button class="button secondary" id="collector-reverify" disabled hidden>重新验证失败作品</button><button class="button secondary" id="collector-recover" type="button" disabled hidden>浏览器已恢复，单次验证</button><button class="button primary" id="collector-start" disabled>预估采集耗时</button></div></div>
+            <div class="collector-step"><h3 class="step-heading"><span>02</span> 预估与开始</h3><p class="field-hint">先应用设置，再验证源站访问。预估只读取本地数据，确认后才开始批量采集。</p><details class="inline-help"><summary>验证方式与异常处理说明</summary><p class="field-hint">预估只读取本地数据，不访问源站。验证优先从原范围内的缓存、已完成记录随机取样，只检查访问，不改写已有数据；无缓存样本时随机检查待处理作品。每次最多尝试 3 条，正式采集仍按原队列进行。不可用提示后再次验证会临时换其他候选；若浏览器也打不开，可点击“确认不可访问并跳过”，继续原任务时不再请求这条。暂缓验证本身不记录失败；正式批量采集会自动记录不可用作品并继续队列。登录、浏览器验证和限流仍会停止请求；处理后可点击“重新验证失败作品”。批量采集须在预估后单独确认。</p></details><div class="collector-buttons"><button class="button secondary" id="collector-verify" disabled>随机验证源站访问</button><button class="button secondary" id="collector-reverify" disabled hidden>重新验证失败作品</button><button class="button secondary" id="collector-recover" type="button" disabled hidden>浏览器已恢复，单次验证</button><button class="button primary" id="collector-start" disabled>预估采集耗时</button></div></div>
             <p id="collector-cooldown-note" class="field-hint" role="status" hidden></p>
             <div class="collector-feedback-row"><div id="collector-feedback" class="collector-feedback" role="status" aria-live="polite"></div><button class="button secondary" id="collector-view-progress" type="button" hidden>查看抓取进度 ↑</button></div>
             <section class="collector-errors" id="collector-access-issue" hidden aria-label="确认访问异常作品"><p id="collector-access-issue-note"></p><a id="collector-access-issue-link" target="_blank" rel="noopener noreferrer"></a><div class="collector-buttons"><button class="button secondary" id="collector-skip-unavailable" type="button" disabled>确认不可访问并跳过</button></div></section>

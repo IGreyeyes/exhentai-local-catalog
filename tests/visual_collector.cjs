@@ -1,8 +1,8 @@
-const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { chromium } = require(require.resolve('playwright', { paths: [path.resolve(path.dirname(process.execPath), '..')] }));
 const readline = require('readline');
 
 function assert(condition, message) { if (!condition) throw new Error(message); }
@@ -63,7 +63,7 @@ async function screenshotAndCheck(page, viewport, name) {
 (async () => {
   fs.mkdirSync('logs', { recursive: true });
   let root = await startServer();
-  browser = await chromium.launch({ headless: true, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' });
+  browser = await chromium.launch({ headless: true, channel: 'chrome' });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -74,7 +74,7 @@ async function screenshotAndCheck(page, viewport, name) {
   await page.locator('#tag-input').fill('language:english');
   await page.locator('#tag-input').press('Enter');
   await page.locator('#search-button').click();
-  await page.waitForFunction(() => document.querySelector('#results').getAttribute('aria-busy') === 'false' && document.querySelector('.result-card'));
+  await page.waitForFunction(() => document.querySelector('#results').getAttribute('aria-busy') === 'false' && document.querySelector('.saved-card'));
   await page.locator('#collector-panel > summary').click();
   assert(await page.locator('#collector-mode').inputValue() === 'rounds', 'New plans should default to rounds');
   await page.locator('#collector-host').selectOption('e-hentai.org');
@@ -133,5 +133,6 @@ async function screenshotAndCheck(page, viewport, name) {
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
   if (browser) await browser.close();
   await stopServer();
+  if (path.dirname(path.resolve(fixture)) !== path.resolve(os.tmpdir()) || !path.basename(fixture).startsWith('collector-visual-')) throw new Error('Unexpected cleanup path');
   fs.rmSync(fixture, { recursive: true, force: true });
 });

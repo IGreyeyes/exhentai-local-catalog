@@ -4,21 +4,26 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light">
   <title>更新日志 · EX资料库</title><link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/changelog.css"><link rel="stylesheet" href="/client-updates.css">
+  <link rel="stylesheet" href="/workspace.css">
+  <script src="/workspace.js" defer></script>
 </head>
 <body class="changelog-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
   <div class="shell">
     <aside class="sidebar">
       <a class="brand" href="/" aria-label="EX资料库首页"><span class="brand-icon" aria-hidden="true">Ex</span><span>EX资料库<small>LOCAL CATALOG</small></span></a>
-      <div class="nav-caption">我的资料库</div>
+      <div class="nav-caption">工作区</div>
       <a class="nav-item" href="/"><span aria-hidden="true">⌕</span> 标签搜索</a>
       <a class="nav-item" href="/records"><span aria-hidden="true">✓</span> 已记录</a>
+      <a class="nav-item nav-collector" href="/#collector-panel"><span aria-hidden="true">⇩</span> 收藏数采集</a>
       <a class="nav-item" href="/maintenance"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <div class="nav-caption nav-caption-secondary">帮助与版本</div>
       <a class="nav-item nav-changelog selected" href="/changelog" aria-current="page"><span aria-hidden="true">☷</span> 更新日志</a>
       <a class="nav-item nav-contact" href="/contact"><span aria-hidden="true">✉</span> 联系我们</a>
       <div class="sidebar-note"><span class="small-dot"></span> 每次变化，都有记录<p>按版本查看更新内容和升级事项，内置日志离线也能阅读。</p></div>
     </aside>
-    <main>
-      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>更新日志</strong></span><div class="topbar-actions"><a class="button secondary" href="/">标签搜索</a></div></header>
+    <main id="main-content" tabindex="-1">
+      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>更新日志</strong></span><div class="topbar-actions"></div></header>
       <div class="main-content changelog-content">
         <div class="changelog-heading"><div><h1>更新日志</h1><p>完整发布记录与合并版本说明，按版本查看更新内容。</p></div><div class="changelog-tools"><label><input id="history-prerelease" type="checkbox">显示预发布版本</label><button id="history-refresh" class="button secondary" disabled>刷新发布记录</button><a id="history-releases" target="_blank" rel="noopener noreferrer">在 GitHub 查看全部发布 ↗</a></div></div>
         <p id="history-status" class="history-status" role="status">正在读取内置更新日志…</p>

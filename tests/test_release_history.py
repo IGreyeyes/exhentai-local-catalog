@@ -13,6 +13,8 @@ from desktop_updates import ClientUpdater
 from release_history import ReleaseHistory, announcement_notes, bundled_history, upgrade_notes, version_key, version_sections
 from test_desktop import make_library
 
+NEXT_VERSION = ".".join([*APP_VERSION.split(".")[:2], str(int(APP_VERSION.split(".")[2]) + 1)])
+
 
 class ReleaseHistoryTests(unittest.TestCase):
     def test_release_body_contains_only_current_and_merged_versions(self):
@@ -23,8 +25,12 @@ class ReleaseHistoryTests(unittest.TestCase):
         self.assertNotIn("历史更新概览",body)
         self.assertEqual(set(sections),{APP_VERSION})
         self.assertEqual(body.strip(), RELEASE_NOTES.strip())
-        self.assertIn("作品类型支持打勾多选",sections[APP_VERSION])
-        self.assertIn("筛选条件保持一致",sections[APP_VERSION])
+        self.assertIn("高级筛选按需展开",sections[APP_VERSION])
+        self.assertIn("维护工具独立切换",sections[APP_VERSION])
+        recent=next(item for item in bundled_history() if item['version']=='1.1.37')
+        self.assertEqual(recent['date'],'2026-10-19T07:32:56Z')
+        self.assertFalse(recent['prerelease'])
+        self.assertIn('作品类型支持打勾多选',recent['notes'])
         merged=next(item for item in bundled_history() if item['version']=='1.1.35')
         self.assertIsNone(merged['date'])
         self.assertEqual(merged['combined_in'],'1.1.36')
@@ -112,7 +118,7 @@ class ReleaseHistoryTests(unittest.TestCase):
     def test_update_check_uses_target_announcement_without_fetching_historical_releases(self):
         with tempfile.TemporaryDirectory() as directory:
             updater=ClientUpdater(directory)
-            document={"tag_name":"v1.2.0","body":"- 最新功能","assets":[{"name":"ExCatalog-Windows-x64.zip","size":4,"digest":"sha256:"+"0"*64,"browser_download_url":f"https://github.com/{REPOSITORY}/releases/download/v1.2.0/ExCatalog-Windows-x64.zip"}]}
+            document={"tag_name":"v"+NEXT_VERSION,"body":"- 最新功能","assets":[{"name":"ExCatalog-Windows-x64.zip","size":4,"digest":"sha256:"+"0"*64,"browser_download_url":f"https://github.com/{REPOSITORY}/releases/download/v{NEXT_VERSION}/ExCatalog-Windows-x64.zip"}]}
             from io import BytesIO
             with patch.object(updater.opener,"open",return_value=BytesIO(json.dumps(document).encode())),patch.object(updater.history,"refresh",side_effect=ValueError("模拟离线")) as refresh:
                 result=updater.check()
@@ -120,7 +126,7 @@ class ReleaseHistoryTests(unittest.TestCase):
             self.assertEqual(result["sha256"],"0"*64)
             self.assertIn("最新功能",result["notes"])
             self.assertFalse(result["history_message"])
-            self.assertEqual(result["included_versions"],["1.2.0"])
+            self.assertEqual(result["included_versions"],[NEXT_VERSION])
             refresh.assert_not_called()
 
     def test_local_history_page_and_protected_refresh_use_temporary_library(self):

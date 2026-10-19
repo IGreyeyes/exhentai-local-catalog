@@ -11,26 +11,34 @@
   <link rel="stylesheet" href="/client-updates.css">
   <script src="/maintenance.js" defer></script>
   <script src="/cloud-sync.js" defer></script>
+  <link rel="stylesheet" href="/workspace.css">
+  <script src="/workspace.js" defer></script>
 </head>
 <body class="maintenance-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
   <div class="shell">
     <aside class="sidebar">
       <a class="brand" href="/" aria-label="EX资料库首页"><span class="brand-icon" aria-hidden="true">Ex</span><span>EX资料库<small>LOCAL CATALOG</small></span></a>
-      <div class="nav-caption">我的资料库</div>
+      <div class="nav-caption">工作区</div>
       <a class="nav-item" href="/"><span aria-hidden="true">⌕</span> 标签搜索</a>
       <a class="nav-item" href="/records"><span aria-hidden="true">✓</span> 已记录</a>
+      <a class="nav-item nav-collector" href="/#collector-panel"><span aria-hidden="true">⇩</span> 收藏数采集</a>
       <a class="nav-item selected" href="/maintenance" aria-current="page"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <div class="nav-caption nav-caption-secondary">帮助与版本</div>
       <a class="nav-item nav-changelog" href="/changelog"><span aria-hidden="true">☷</span> 更新日志</a>
       <a class="nav-item nav-contact" href="/contact"><span aria-hidden="true">✉</span> 联系我们</a>
       <div class="sidebar-note"><span class="small-dot"></span> 给资料留一份副本<p>备份到本机文件夹、其他磁盘，或已连接的网络共享文件夹。</p></div>
       <div class="sidebar-bottom"><span>资料管理</span><strong>备份与导入，都在这里</strong><p>导入前先校验文件，再自动备份当前资料。每份备份独立保存。</p></div>
     </aside>
-    <main>
-      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>资料库维护</strong></span><div class="topbar-actions"><span class="connection" id="connection"><i></i> 正在连接本地服务</span><a class="button secondary" href="/">标签搜索</a><a class="button secondary" href="/records">已记录</a><button class="button secondary" id="maintenance-stop-request">停止服务</button></div></header>
+    <main id="main-content" tabindex="-1">
+      <header class="topbar"><span>资料库 <span class="separator">/</span> <strong>资料库维护</strong></span><div class="topbar-actions"><span class="connection" id="connection"><i></i> 正在连接本地服务</span><button class="button secondary" id="maintenance-stop-request">停止服务</button></div></header>
       <div class="main-content">
-        <section class="intro"><div class="eyebrow">LIBRARY CARE</div><h1>管理资料，安心保存。</h1><p>备份与恢复资料，更新作品目录和中文词库。</p></section>
-        <nav class="maintenance-tabs" aria-label="维护功能"><a href="#cloud-sync-section">上传与在线同步</a><a href="#backup-section">备份资料</a><a href="#favorites-section">收藏数导入导出</a><a href="#restore-section">导入备份</a><a href="#catalog-section">更新作品目录</a><a href="#translations-section">中文词库</a><a href="#covers-section">封面缓存</a></nav>
+        <section class="intro"><h1>资料库维护</h1><p>按需选择维护工具，所有操作进度留在当前页面。</p></section>
+
         <div id="maintenance-status" class="maintenance-status" role="status" aria-live="polite">维护工具正在连接…</div>
+        <div class="maintenance-workspace">
+<nav class="maintenance-tabs" aria-label="维护功能"><a href="#cloud-sync-section"><span class="tool-icon" aria-hidden="true">⇄</span><span>在线同步<small>上传与下载收藏数</small></span></a><a href="#backup-section"><span class="tool-icon" aria-hidden="true">↗</span><span>备份资料<small>为本地资料保存副本</small></span></a><a href="#favorites-section"><span class="tool-icon" aria-hidden="true">⇅</span><span>收藏数导入导出<small>分享与合并收藏数</small></span></a><a href="#restore-section"><span class="tool-icon" aria-hidden="true">↙</span><span>恢复备份<small>检查并恢复已有资料</small></span></a><a href="#catalog-section"><span class="tool-icon" aria-hidden="true">▤</span><span>作品目录<small>导入新的目录快照</small></span></a><a href="#translations-section"><span class="tool-icon" aria-hidden="true">译</span><span>中文词库<small>检查与更新标签译名</small></span></a><a href="#covers-section"><span class="tool-icon" aria-hidden="true">▧</span><span>封面缓存<small>查看缓存空间与状态</small></span></a></nav>
+        <div class="maintenance-panels">
         <section class="maintenance-card maintenance-section" id="cloud-sync-section" aria-labelledby="cloud-sync-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">⇄</span><div><h2 id="cloud-sync-title">上传收藏数与在线同步</h2><p>共享大家最近采集的作品收藏数和评分人数；断网时继续使用本地资料。</p></div></div>
           <label class="maintenance-field" for="cloud-sync-endpoint">同步服务地址</label>
@@ -40,7 +48,7 @@
           <p class="field-hint">点击「保存同步设置」后，昵称在下次打开时仍保留。开启上传后同步到后台「上传来源」；修改昵称沿用原来源及审核状态，作品的原采集者信息保留。</p>
           <div id="cloud-upload-guide" class="cloud-upload-guide" hidden role="region" aria-labelledby="cloud-upload-guide-title">
             <strong id="cloud-upload-guide-title">上传并分享资料库中的收藏数</strong>
-            <p>以后从「资料库维护」最上方就能找到这里。上传和下载首次默认关闭，可按需要单独勾选。上传需确认下方公开分享范围并保存；已保存的选择会在下次打开时保留。新来源先待审核，通过后供大家同步使用。</p>
+            <p>以后从「资料库维护 → 在线同步」就能找到这里。上传和下载首次默认关闭，可按需要单独勾选。上传需确认下方公开分享范围并保存；已保存的选择会在下次打开时保留。新来源先待审核，通过后供大家同步使用。</p>
             <button id="cloud-upload-guide-done" class="button secondary" type="button">我知道了</button>
           </div>
           <label class="checkbox"><input id="cloud-sync-upload" type="checkbox" disabled>自动上传资料库中的全部成功收藏数记录和评分人数</label>
@@ -52,7 +60,7 @@
           <div class="maintenance-actions"><button class="button primary" id="cloud-sync-save" disabled>保存同步设置</button><button class="button secondary" id="cloud-sync-now" disabled>立即同步</button></div>
           <p class="maintenance-feedback" id="cloud-sync-message" role="status">正在读取同步设置…</p>
           <p class="field-hint" id="cloud-sync-progress"></p>
-          <p class="field-hint">「服务器已确认」包含公开接受、待审核、保留已有和云端免上传确认，不等于公共作品总数。「云端已有，免上传」只检查公开数据，不扣日上传条数。本机采集时间比公共快照晚不足服务器设定的间隔时免上传，达到间隔才提交；新版服务默认 14 天，管理员可调整，0 天恢复有更新就提交。新作品与仅待审核、已撤回的记录仍正常提交。新来源与异常数据通过审核后才可供其他用户下载。间隔越长，公共收藏数更新越慢。</p>
+          <details class="inline-help"><summary>同步计数、审核与更新间隔</summary><p class="field-hint">「服务器已确认」包含公开接受、待审核、保留已有和云端免上传确认，不等于公共作品总数。「云端已有，免上传」只检查公开数据，不扣日上传条数。本机采集时间比公共快照晚不足服务器设定的间隔时免上传，达到间隔才提交；新版服务默认 14 天，管理员可调整，0 天恢复有更新就提交。新作品与仅待审核、已撤回的记录仍正常提交。新来源与异常数据通过审核后才可供其他用户下载。间隔越长，公共收藏数更新越慢。</p></details>
           <p class="field-hint" id="cloud-sync-last"></p>
           <details class="favorites-merge-guide"><summary>在线同步如何合并</summary><p>公共库采用已接受的最新抓取快照，收藏数可能正常减少；同一抓取时间保留先接受的公共快照。下载时按抓取时间合并，本地更晚的快照保留，同时间采用公共快照。收藏数和评分人数作为同一份快照更新；公共快照缺少评分人数时显示未知，避免与旧评分人数混算。较新的本地失败记录及个人阅读状态保留。</p><p>首次同步分批下载全量，之后只下载变更；大量上传或下载会自动分批续传。新来源、异常上涨、下跌或归零进入云端待审核，通过后才能共享。管理员恢复历史或撤回错误快照时，客户端会纠正仍在使用的云端值，并保留更新的自采记录。此功能与手动 JSON 导入的原合并规则分别工作，原文件格式和 Discussion 分享继续可用。开启前可先使用下方备份功能保存资料。</p></details>
         </section>
@@ -130,7 +138,7 @@
           <label class="maintenance-field favorites-file-label" for="favorites-file">选择要合并的收藏数文件</label>
           <div class="maintenance-path-row"><input id="favorites-file" type="file" accept=".ehfavorites.json,.json,application/json"><button class="button secondary" id="favorites-check" disabled>检查收藏数文件</button></div>
           <p class="field-hint">选择本程序导出的 .ehfavorites.json 文件，最大 128 MiB。检查后先核对数量，再确认合并。</p>
-          <section class="favorites-merge-rules" aria-labelledby="favorites-rules-title">
+          <details class="inline-help merge-rules-help"><summary>收藏数如何合并？查看规则与示例</summary><section class="favorites-merge-rules" aria-labelledby="favorites-rules-title">
             <h3 id="favorites-rules-title">收藏数如何合并</h3>
             <p>先按作品 ID（GID）匹配。同一个作品只保留一条收藏数记录。</p>
             <p><strong>自己的 / 他人的数据：</strong>用导入记录的原采集者 ID，与上方「我的 ID」比较。昵称相同不代表同一个采集者。</p>
@@ -146,7 +154,7 @@
             <p><strong>已有记录的收藏数相同或减少时，一律保留本地记录。</strong>接受覆盖时，收藏数、原抓取时间、源站和原采集者一起替换；不会改成导入时间，也不会归到导入者名下。</p>
             <p class="favorites-rule-example">例如：本地收藏数为 100，导入的是更早抓取的 120。来自他人时会更新为 120；来自自己或未知采集者时会保留 100。即使本地原记录也是这位他人采集的，仍以「我的 ID」判断。</p>
             <p>检查文件只显示预计结果。确认合并后，程序暂停采集并自动备份，再按当时的数据执行上述规则。重复导入同一文件不会新增重复作品；阅读状态、黑名单和采集队列保留。</p>
-          </section>
+          </section></details>
           <div id="favorites-preview" class="prepared-import" hidden>
             <h3>收藏数文件已校验</h3><p class="path-hint" id="favorites-file-name"></p>
             <dl class="translation-stats"><div><dt>文件记录</dt><dd id="favorites-total">—</dd></div><div><dt>预计新增</dt><dd id="favorites-added">—</dd></div><div><dt>预计更新</dt><dd id="favorites-updated">—</dd></div><div><dt>保留现有</dt><dd id="favorites-kept">—</dd></div></dl>
@@ -160,7 +168,7 @@
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↙</span><div><h2 id="restore-title">导入已有备份</h2><p>从备份恢复收藏数、阅读状态、黑名单、采集进度和中文词库。</p></div></div>
           <label class="maintenance-field" for="restore-directory">备份文件夹</label>
           <div class="maintenance-path-row"><input id="restore-directory" type="text" placeholder="粘贴包含 manifest.json 的那一份备份文件夹路径" autocomplete="off" spellcheck="false"><button class="button secondary" id="restore-browse">选择文件夹</button><button class="button primary" id="maintenance-check-restore" disabled>检查备份</button></div>
-          <p class="field-hint">可粘贴其他磁盘上的备份路径，也可点击上方备份的「导入这份」。选择具体的一份备份，而不是存放所有备份的父文件夹。</p>
+          <p class="field-hint">可粘贴其他磁盘上的备份路径，也可在「备份资料」中点击「导入这份」。选择具体的一份备份，而不是存放所有备份的父文件夹。</p>
           <label class="checkbox"><input id="restore-full" type="checkbox">同时恢复作品目录（需要完整备份）</label>
           <div id="prepared-restore" class="prepared-import" hidden>
             <h3>备份已校验，可以导入</h3><p class="path-hint" id="restore-source"></p>
@@ -197,6 +205,8 @@
           <div class="cover-cache-stats"><div><span>已缓存</span><strong id="cover-cache-count">—</strong></div><div><span>缓存大小</span><strong id="cover-cache-size">—</strong></div><div><span>暂时失败</span><strong id="cover-cache-failed">—</strong></div></div>
           <p class="path-hint">缓存位置：<span id="cover-cache-path">—</span></p><p class="field-hint">封面请求不携带登录 Cookie。失败地址 24 小时内不会重复请求；封面缓存可重新生成，不包含在资料备份中。</p>
         </section>
+        </div>
+        </div>
         <section id="maintenance-stop-confirm" class="maintenance-stop-confirm" hidden><h3>停止本地服务</h3><p>当前采集会暂停，已抓取的数据会保留。再次使用时，双击项目中的「启动搜索.cmd」。Cookie 只存在内存中，下次可重新填写或导入加密登录文件。</p><div class="collector-buttons"><button id="maintenance-stop" class="button stop-button">确认停止服务</button><button id="maintenance-stop-cancel" class="button secondary">继续使用</button></div></section>
         <footer><span>EX资料库 · 资料库维护</span><a href="/records">查看我的记录 ↗</a></footer>
       </div>

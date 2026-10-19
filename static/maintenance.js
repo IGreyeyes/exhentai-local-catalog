@@ -186,7 +186,7 @@
         const detail=element("span","",`${new Date(backup.created_at).toLocaleString("zh-CN",{timeZone:"Asia/Hong_Kong"})} · ${size(backup.size_bytes)} · ${backup.reason}`);
         const path=element("code","",backup.path);
         const button=element("button","button secondary","导入这份");button.type="button";
-        button.onclick=()=>{ui("restore-directory").value=backup.path;ui("restore-full").checked=false;invalidateRestore();ui("restore-section").scrollIntoView({block:"start",behavior:"smooth"});ui("restore-directory").focus({preventScroll:true});};
+        button.onclick=()=>{ui("restore-directory").value=backup.path;ui("restore-full").checked=false;invalidateRestore();window.catalogWorkspace?.reveal("restore-section",{updateURL:true});ui("restore-section").scrollIntoView({block:"start",behavior:"smooth"});ui("restore-directory").focus({preventScroll:true});};
         row.append(title,detail,path,button);return row;
       });
       ui("backup-list").replaceChildren(...(rows.length?rows:[element("p","backup-empty","这个位置还没有备份，点击「立即备份」保存第一份。") ]));

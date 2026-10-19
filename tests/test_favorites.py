@@ -689,6 +689,25 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.assertEqual(updated['items'][0]['gid'],3)
         self.assertTrue(updated['favorite_coverage']['complete'])
 
+    def test_multi_category_preview_and_queue_preserve_the_complete_scope(self):
+        with closing(sqlite3.connect(self.catalog.path)) as db:
+            db.execute("UPDATE gallery SET category='Manga' WHERE gid IN (1,2)")
+            db.execute("UPDATE gallery SET category='Artist CG' WHERE gid=3")
+            db.commit()
+        self.ready()
+        self.calls.clear()
+        query={**self.query,'category':['Manga','Artist CG']}
+        preview=self.collector.preview(query)
+        self.assertEqual(preview['total'],3)
+        self.collector.start(query,preview['preview_id'])
+        self.finish()
+        job=self.collector.store.latest()
+        self.assertEqual(job['query']['category'],['Artist CG','Manga'])
+        with self.collector.store.connection() as db:
+            ids={row[0] for row in db.execute('SELECT gid FROM tasks WHERE job_id=?',(job['id'],))}
+        self.assertEqual(ids,{1,2,3})
+        self.assertNotIn(4,self.calls)
+
     def test_start_includes_entire_query_and_reuses_fresh_cache(self):
         with self.assertRaises(ValueError):
             self.collector.start(self.query)

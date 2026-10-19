@@ -121,6 +121,25 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(self.search(title="第一冊", category="Non-H")["total"], 1)
         self.assertEqual(self.search(tag="language:english", category="Manga")["total"], 0)
 
+    def test_multiple_categories_are_unioned_before_tag_filters_and_paging(self):
+        result=self.search(title='book',category=['Manga','Non-H','Manga'],limit=1,page=2,sort='newest')
+        self.assertEqual((result['total'],result['pages'],result['page']),(2,2,2))
+        self.assertEqual(result['categories'],['Manga','Non-H'])
+        self.assertEqual(result['items'][0]['gid'],1)
+        self.assertEqual(self.search(tag='language:english',category=['Manga','Non-H'])['total'],2)
+        self.assertEqual(self.search(title='book',category=['Manga','Non-H'],exclude_tag='other:anthology')['total'],1)
+        self.assertEqual(self.search(title='book',category=[])['total'],2)
+        self.assertEqual(self.search(title='book',category=['Non-H',"%' OR 1=1 --"])['total'],2)
+        for values in (['Non-H','x'*41],['Manga']*13):
+            with self.assertRaises(ValueError):self.search(title='book',category=values)
+        query={'tag':['language:english'],'category':['Non-H','Manga','Non-H']}
+        canonical,where,params=self.catalog.collection_plan(query)
+        self.assertEqual(canonical['category'],['Manga','Non-H'])
+        with self.catalog.connection() as db:
+            ids={row[0] for row in db.execute('SELECT g.gid FROM gallery AS g WHERE '+where,params)}
+        self.assertEqual(ids,{1,2})
+        self.assertEqual(self.catalog.collection_plan(canonical),(canonical,where,params))
+
     def test_autocomplete_and_readonly_connection(self):
         self.assertIn("language:english", self.catalog.suggest("eng")["items"])
         with self.catalog.connection() as db:

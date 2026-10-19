@@ -81,7 +81,7 @@ class SearchSelection:
     blacklist_tags: tuple
     title: str
     include_inactive: bool
-    category: str
+    categories: tuple
     use_blacklist: bool
 
 
@@ -167,7 +167,7 @@ class Catalog:
             raise ValueError("标签数量或长度超出限制。")
         return {"labels": self.translations.labels(tags)}
 
-    def build_filter(self, db, tags, title, include_inactive, category, excluded_tags=()):
+    def build_filter(self, db, tags, title, include_inactive, categories, excluded_tags=()):
         clauses, params, resolved = [], [], []
         for name in tags:
             row = db.execute("SELECT id, name FROM tag WHERE name = ?", (name,)).fetchone()
@@ -197,9 +197,10 @@ class Catalog:
             params.extend(["%" + like_literal(title) + "%"] * 2)
         if not include_inactive:
             clauses.extend(["g.removed = 0", "g.replaced = 0", "g.expunged = 0"])
-        if category:
-            clauses.append("g.category = ?")
-            params.append(category)
+        if categories:
+            placeholders = ",".join("?" for _ in categories)
+            clauses.append(f"g.category IN ({placeholders})")
+            params.extend(categories)
         return " AND ".join(clauses) or "1", tuple(params)
 
     @lru_cache(maxsize=128)
@@ -230,10 +231,11 @@ class Catalog:
         if conflict:
             raise ValueError(f"同一个标签不能同时包含和排除：{conflict[0]}。")
         include_inactive = query.get("include_inactive", ["0"])[0] == "1"
-        category = query.get("category", [""])[0]
-        if len(category) > 40:
+        raw_categories = query.get("category", [])
+        if len(raw_categories) > 12 or any(not isinstance(value, str) or len(value) > 40 for value in raw_categories):
             raise ValueError("无效的作品分类。")
-        return SearchSelection(tags, excluded, explicit_excluded, blacklist, title, include_inactive, category, use_blacklist)
+        categories = tuple(sorted(set(value for value in raw_categories if value)))
+        return SearchSelection(tags, excluded, explicit_excluded, blacklist, title, include_inactive, categories, use_blacklist)
 
     def preferences(self):
         tags = tuple(tag for tag in self.favorites.get_tag_blacklist() if tag in self.available_tags)
@@ -300,7 +302,7 @@ class Catalog:
                     SUM(COALESCE(rs.opened_count,0)>0),
                     SUM(COALESCE(rs.state,'none')='none'),SUM(rs.state='planned'),SUM(rs.state='reading'),SUM(rs.state='watched'),SUM(rs.state='ignored'),
                     SUM(f.collection_status='success'),SUM(f.collection_status='failed'),MAX(f.recorded_at)"""+joined,(now-7*86400,)).fetchone()
-                where,values=self.build_filter(db,tags,"",True,selection.category)
+                where,values=self.build_filter(db,tags,"",True,selection.categories)
                 clauses=[where];params=list(values)
                 if text:
                     pattern="%"+like_literal(text)+"%"
@@ -338,7 +340,7 @@ class Catalog:
                     items.append(item)
         finally:self.slots.release()
         return {
-            "items":items,"total":total,"page":page,"pages":pages,"limit":limit,"tags":list(tags),"category":selection.category,"sort":sort,"collection":collection,"job_id":job_id,
+            "items":items,"total":total,"page":page,"pages":pages,"limit":limit,"tags":list(tags),"categories":list(selection.categories),"category":selection.categories[0] if len(selection.categories)==1 else "","sort":sort,"collection":collection,"job_id":job_id,
             "collector_identity":self.favorites.collector_identity(),
             "summary":{"total":summary_row[0],"recent_7_days":summary_row[1] or 0,"last_checked_at":summary_row[2],"missing_metadata":summary_row[3] or 0,"opened":summary_row[4] or 0,
                        "states":{"none":summary_row[5] or 0,"planned":summary_row[6] or 0,"reading":summary_row[7] or 0,"watched":summary_row[8] or 0,"ignored":summary_row[9] or 0},
@@ -352,13 +354,13 @@ class Catalog:
         with self.connection() as db:
             where, params = self.build_filter(
                 db, selection.tags, selection.title, selection.include_inactive,
-                selection.category, selection.excluded_tags,
+                selection.categories, selection.excluded_tags,
             )
         canonical = {
             "tag":list(selection.tags), "exclude_tag":list(selection.excluded_tags),
             "use_blacklist":["0"], "title":[selection.title],
             "include_inactive":["1" if selection.include_inactive else "0"],
-            "category":[selection.category],
+            "category":list(selection.categories),
         }
         return canonical, where, params
 
@@ -379,7 +381,7 @@ class Catalog:
             with self.connection() as db:
                 where, params = self.build_filter(
                     db, selection.tags, selection.title, selection.include_inactive,
-                    selection.category, selection.excluded_tags,
+                    selection.categories, selection.excluded_tags,
                 )
                 total = self.count(where, params)
                 coverage = db.execute("SELECT COUNT(f.favorite_count),SUM(CASE WHEN f.checked_at>=? THEN 1 ELSE 0 END),MIN(f.checked_at),MAX(f.checked_at),COUNT(" + FAVORITE_RATING_RATIO + ") FROM gallery AS g" + JOIN_FAVORITES + JOIN_RATINGS + "WHERE " + where, (int(time.time())-7*86400,*params)).fetchone()
@@ -401,7 +403,7 @@ class Catalog:
             self.slots.release()
         return {
             "items": items, "total": total, "page": page, "pages": pages,
-            "limit": limit, "tags": list(selection.tags),
+            "limit": limit, "tags": list(selection.tags), "categories": list(selection.categories),
             "exclude_tags": list(selection.explicit_excluded_tags),
             "blacklist_tags": list(selection.blacklist_tags),
             "use_blacklist": selection.use_blacklist, "sort": sort,
@@ -545,7 +547,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         request = urlparse(self.path)
         try:
-            query = parse_qs(request.query, max_num_fields=40)
+            query = parse_qs(request.query, max_num_fields=64)
             if request.path == "/api/cloud-sync":
                 self.reply(self.server.cloud_sync.status())
             elif request.path == "/api/release-history":
@@ -784,7 +786,7 @@ class Handler(BaseHTTPRequestHandler):
                     elif self.path in {"/api/collector/verify","/api/collector/start","/api/collector/preview"}:
                         query_text=payload.get("query","")
                         if not isinstance(query_text,str) or len(query_text)>12000:raise ValueError("搜索条件不正确。")
-                        query=parse_qs(query_text,max_num_fields=40)
+                        query=parse_qs(query_text,max_num_fields=64)
                         if self.path.endswith("verify"):
                             if not isinstance(payload.get("use_job",False),bool):raise ValueError("任务验证选项须为开关值。")
                             result=collector.verify(None if payload.get("use_job") else query,payload.get("retry_unavailable",False),payload.get("recover_cooldown",False))

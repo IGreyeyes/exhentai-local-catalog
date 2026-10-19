@@ -138,8 +138,31 @@
     }
     return recordCard(item);
   }
-  function fillCategoryFilter(select){
-    select.replaceChildren(new Option("全部类型",""),...Object.entries(categories).map(([value,label])=>new Option(label,value)));
+  function categoryFilter(container,label="作品类型"){
+    const picker=node("details","category-picker"),summary=node("summary"),panel=node("div","category-picker-panel");
+    const group=node("fieldset"),legend=node("legend","",`${label}（可多选）`),allLabel=node("label","category-all"),all=node("input");
+    all.type="checkbox";all.value="";allLabel.append(all,node("span","","全部类型"));
+    const list=node("div","category-options"),inputs=[];
+    for(const [value,text] of Object.entries(categories)){
+      const option=node("label"),input=node("input");input.type="checkbox";input.value=value;
+      option.append(input,node("span","",text));list.append(option);inputs.push(input);
+    }
+    group.append(legend,allLabel,list);panel.append(group,node("p","category-picker-hint","可多选，匹配任一已选类型；全部类型取消限制。"));
+    picker.append(summary,panel);container.replaceChildren(picker);
+    const selected=()=>inputs.filter(input=>input.checked).map(input=>input.value);
+    function set(values=[]){
+      const chosen=new Set(values);inputs.forEach(input=>{input.checked=chosen.has(input.value);});
+      const valuesNow=selected(),names=valuesNow.map(value=>categories[value]);all.checked=!valuesNow.length;
+      summary.textContent=names.length>2?`已选 ${names.length} 种`:names.join("、")||"全部类型";
+      summary.title=names.join("、")||"全部类型";
+      summary.setAttribute("aria-label",`${label}：${summary.title}，可多选`);
+    }
+    all.onchange=()=>{set([]);control.onchange?.([]);};
+    inputs.forEach(input=>{input.onchange=()=>{set(selected());control.onchange?.(selected());};});
+    picker.addEventListener("keydown",event=>{if(event.key==="Escape"){event.preventDefault();picker.open=false;summary.focus();}});
+    document.addEventListener("pointerdown",event=>{if(!picker.contains(event.target))picker.open=false;});
+    const control={selected,set,write(params){params.delete("category");selected().forEach(value=>params.append("category",value));},onchange:null};
+    set([]);return control;
   }
-  window.galleryCards={render,dateParts,renderRatingGuide,fillCategoryFilter};
+  window.galleryCards={render,dateParts,renderRatingGuide,categoryFilter,categoryNames:values=>values.map(value=>categories[value]||value).join("、")};
 })();

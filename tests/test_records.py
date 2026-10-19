@@ -129,6 +129,18 @@ class RecordedWorksTests(unittest.TestCase):
         self.assertEqual(self.query(category='')['total'],5)
         with self.assertRaises(ValueError):self.query(category='x'*41)
 
+    def test_multiple_categories_keep_filters_and_exclude_unknown_metadata(self):
+        result=self.query(category=['Manga','Non-H','Manga'],limit=2,page=2)
+        self.assertEqual((result['total'],result['pages'],result['page']),(4,2,2))
+        self.assertEqual(result['categories'],['Manga','Non-H'])
+        self.assertEqual([item['gid'] for item in result['items']],[4,1])
+        self.assertEqual(result['summary']['total'],5)
+        self.assertEqual(self.query(category=['Manga','Non-H'],tag='language:english')['total'],3)
+        self.assertEqual(self.query(category=['Manga','Non-H'],source='e-hentai.org')['total'],1)
+        self.assertEqual(self.query(category=['Non-H',"%' OR 1=1 --"])['total'],3)
+        self.assertEqual(self.query(category=[])['total'],5)
+        with self.assertRaises(ValueError):self.query(category=['Non-H','x'*41])
+
     def test_no_records_and_no_filter_matches_are_distinct(self):
         filtered=self.query(q='not present')
         self.assertEqual(filtered['total'],0)

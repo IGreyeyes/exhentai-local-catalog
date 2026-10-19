@@ -42,7 +42,7 @@
   }
   function scopeKey(){
     if(!submittedFilters)return "";
-    return JSON.stringify({tags:submittedFilters.getAll("tag").sort(),excluded:submittedFilters.getAll("exclude_tag").sort(),blacklist:submittedFilters.get("use_blacklist")||"1",title:submittedFilters.get("title")||"",category:submittedFilters.get("category")||"",inactive:submittedFilters.get("include_inactive")||"0"});
+    return JSON.stringify({tags:submittedFilters.getAll("tag").sort(),excluded:submittedFilters.getAll("exclude_tag").sort(),blacklist:submittedFilters.get("use_blacklist")||"1",title:submittedFilters.get("title")||"",categories:submittedFilters.getAll("category").sort(),inactive:submittedFilters.get("include_inactive")||"0"});
   }
   function invalidatePreview(){preview=null;previewRevision++;ui("collector-estimate").hidden=true;}
   function duration(seconds){
@@ -163,7 +163,8 @@
       const terms=job.query?.tag?.map(tagName)||[];
       (job.query?.exclude_tag||[]).forEach(tag=>terms.push("排除："+tagName(tag)));
       if(job.query?.title?.[0]) terms.push("标题："+job.query.title[0]);
-      if(job.query?.category?.[0]) terms.push("分类："+job.query.category[0]);
+      const jobCategories=(job.query?.category||[]).filter(Boolean);
+      if(jobCategories.length) terms.push("分类："+window.galleryCards.categoryNames(jobCategories));
       ui("collector-job-scope").textContent=`原任务范围：${terms.join(" + ")||"全部作品"} · ${job.host}`;
       const selection=job.selection||{},batched=job.collection_mode==="batch",rounds=job.collection_mode==="rounds",plan=job.round_progress;
       const ordering=selection.rating_priority?"评分从高到低":"年份均衡";

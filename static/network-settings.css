@@ -1,0 +1,28 @@
+#network-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.network-mode { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 16px; background: var(--wash); border: 1px solid var(--line); border-radius: 8px; margin: 20px 0; }
+.network-mode .checkbox { margin: 0; }
+#network-saved-note { color: var(--muted); font-size: 12px; }
+.network-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(140px, 1fr); gap: 18px; }
+.network-grid label, .network-fallback, .network-test-row label { display: flex; flex-direction: column; gap: 7px; font-size: 13px; font-weight: 550; min-width: 0; }
+.network-grid input, .network-fallback select, .network-test-row select, #network-domains { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--ink); padding: 10px 12px; min-height: 42px; box-sizing: border-box; }
+.network-grid small { color: var(--muted); font-size: 11px; font-weight: 400; }
+#network-fields :disabled { opacity: .6; }
+.network-auth { display: flex; gap: 12px; justify-content: space-between; align-items: center; flex-wrap: wrap; margin: 12px 0 20px; font-size: 11px; color: var(--muted); }
+.network-auth .checkbox { margin: 0; }
+.network-domains { display: block; margin: 0 0 7px; font-size: 13px; font-weight: 550; }
+#network-domains { resize: vertical; line-height: 1.7; }
+.network-fallback { max-width: 360px; margin-top: 20px; }
+.network-test-row { display: flex; align-items: flex-end; gap: 12px; margin: 24px 0 12px; }
+.network-test-row label { flex: 1; max-width: 360px; }
+.network-test-row .button { min-height: 42px; }
+.network-result { padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: #f7f9f8; font-size: 12px; line-height: 1.9; white-space: pre-line; overflow-wrap: anywhere; }
+.network-result[data-state="success"] { background: #edf7f0; border-color: #b5d5c0; color: #225d3c; }
+.network-result[data-state="error"] { background: #fff5f4; border-color: #e5c5c0; color: #974b42; }
+.network-result[data-state="warning"] { background: #fff9ed; border-color: #e3d1a7; color: #806020; }
+#network-reload { margin-top: 8px; font-size: 12px; }
+#network-form .maintenance-actions { margin-top: 18px; }
+@media (max-width: 640px) {
+  .network-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .network-test-row { flex-wrap: wrap; }
+  .network-test-row label { min-width: 160px; }
+}

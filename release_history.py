@@ -80,7 +80,8 @@ def upgrade_notes(entries, current, target, target_notes):
 
 
 class ReleaseHistory:
-    def __init__(self):
+    def __init__(self, network=None):
+        self.network = network
         self.entries = bundled_history()
         self.lock = threading.Lock()
         self.refreshed = False
@@ -90,10 +91,11 @@ class ReleaseHistory:
                 "refreshed": self.refreshed}
 
     def _request(self, url):
-        request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "ExCatalog/" + APP_VERSION})
         for index in range(2):
+            request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "ExCatalog/" + APP_VERSION})
             try:
-                with build_opener(ProxyHandler() if not index else ProxyHandler({})).open(request, timeout=15) as response:
+                handler = self.network.handler(direct_fallback=bool(index)) if self.network is not None else (ProxyHandler() if not index else ProxyHandler({}))
+                with build_opener(handler).open(request, timeout=15) as response:
                     raw = response.read(3 * 1024**2 + 1)
                 if len(raw) > 3 * 1024**2:
                     raise ValueError("发布历史超过大小限制。")

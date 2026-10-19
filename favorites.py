@@ -191,7 +191,7 @@ class SameGalleryRedirect(HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, newurl)
 
 
-def fetch_favorites(settings, gid, token):
+def fetch_favorites(settings, gid, token, network=None):
     if settings["host"] not in HOSTS or not re.fullmatch(r"[0-9a-fA-F]{10}", str(token)):
         raise GalleryUnavailable("作品链接信息无效。")
     url = f"https://{settings['host']}/g/{int(gid)}/{token}/"
@@ -199,7 +199,9 @@ def fetch_favorites(settings, gid, token):
     if settings.get("cookies"):
         headers["Cookie"] = settings["cookies"]
     handlers = [SameGalleryRedirect()]
-    if settings.get("proxy"):
+    if network is not None:
+        handlers.append(network.handler(legacy_proxy=settings.get("proxy", "")))
+    elif settings.get("proxy"):
         handlers.append(ProxyHandler({"https": settings["proxy"], "http": settings["proxy"]}))
     opener = build_opener(*handlers)
     try:
@@ -596,8 +598,10 @@ class FavoriteStore:
 
 
 class Collector:
-    def __init__(self, catalog, fetcher=fetch_favorites, on_completed=None):
+    def __init__(self, catalog, fetcher=fetch_favorites, on_completed=None, network=None):
         self.catalog, self.store, self.fetcher = catalog, catalog.favorites, fetcher
+        if network is not None and fetcher is fetch_favorites:
+            self.fetcher = lambda settings, gid, token: fetch_favorites(settings, gid, token, network=network)
         self.on_completed = on_completed
         self.lock = threading.RLock()
         self.thread = None

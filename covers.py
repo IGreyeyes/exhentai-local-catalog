@@ -55,9 +55,12 @@ class PublicCoverRedirect(HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, newurl)
 
 
-def download_public_cover(url, opener=None):
+def download_public_cover(url, opener=None, network=None):
     """Fetch a public thumbnail. The request intentionally has no Cookie or Authorization header."""
-    opener = opener or build_opener(PublicCoverRedirect())
+    handlers = [PublicCoverRedirect()]
+    if network is not None:
+        handlers.append(network.handler())
+    opener = opener or build_opener(*handlers)
     request = Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/132.0.0.0 Safari/537.36",
         "Accept": "image/webp,image/png,image/jpeg,image/gif;q=0.8,*/*;q=0.1",

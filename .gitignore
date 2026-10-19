@@ -22,6 +22,7 @@ __pycache__/
 cookies*.json
 cookies*.txt
 *.ehcred
+*.ehproxy
 *.ehfavorites.json
 *.zip
 *.ehcollector.json

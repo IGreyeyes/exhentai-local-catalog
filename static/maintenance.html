@@ -11,6 +11,8 @@
   <link rel="stylesheet" href="/client-updates.css">
   <script src="/maintenance.js" defer></script>
   <script src="/cloud-sync.js" defer></script>
+  <link rel="stylesheet" href="/network-settings.css">
+  <script src="/network-settings.js" defer></script>
   <link rel="stylesheet" href="/workspace.css">
   <script src="/workspace.js" defer></script>
 </head>
@@ -24,6 +26,7 @@
       <a class="nav-item" href="/records"><span aria-hidden="true">✓</span> 已记录</a>
       <a class="nav-item nav-collector" href="/#collector-panel"><span aria-hidden="true">⇩</span> 收藏数采集</a>
       <a class="nav-item selected" href="/maintenance" aria-current="page"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <a class="nav-item nav-network" href="/maintenance#network-section"><span aria-hidden="true">⇆</span> 网络代理</a>
       <div class="nav-caption nav-caption-secondary">帮助与版本</div>
       <a class="nav-item nav-changelog" href="/changelog"><span aria-hidden="true">☷</span> 更新日志</a>
       <a class="nav-item nav-contact" href="/contact"><span aria-hidden="true">✉</span> 联系我们</a>
@@ -37,7 +40,7 @@
 
         <div id="maintenance-status" class="maintenance-status" role="status" aria-live="polite">维护工具正在连接…</div>
         <div class="maintenance-workspace">
-<nav class="maintenance-tabs" aria-label="维护功能"><a href="#cloud-sync-section"><span class="tool-icon" aria-hidden="true">⇄</span><span>在线同步<small>上传与下载收藏数</small></span></a><a href="#backup-section"><span class="tool-icon" aria-hidden="true">↗</span><span>备份资料<small>为本地资料保存副本</small></span></a><a href="#favorites-section"><span class="tool-icon" aria-hidden="true">⇅</span><span>收藏数导入导出<small>分享与合并收藏数</small></span></a><a href="#restore-section"><span class="tool-icon" aria-hidden="true">↙</span><span>恢复备份<small>检查并恢复已有资料</small></span></a><a href="#catalog-section"><span class="tool-icon" aria-hidden="true">▤</span><span>作品目录<small>导入新的目录快照</small></span></a><a href="#translations-section"><span class="tool-icon" aria-hidden="true">译</span><span>中文词库<small>检查与更新标签译名</small></span></a><a href="#covers-section"><span class="tool-icon" aria-hidden="true">▧</span><span>封面缓存<small>查看缓存空间与状态</small></span></a></nav>
+<nav class="maintenance-tabs" aria-label="维护功能"><a href="#cloud-sync-section"><span class="tool-icon" aria-hidden="true">⇄</span><span>在线同步<small>上传与下载收藏数</small></span></a><a href="#network-section"><span class="tool-icon" aria-hidden="true">⇆</span><span>网络代理<small>设置与测试连接</small></span></a><a href="#backup-section"><span class="tool-icon" aria-hidden="true">↗</span><span>备份资料<small>为本地资料保存副本</small></span></a><a href="#favorites-section"><span class="tool-icon" aria-hidden="true">⇅</span><span>收藏数导入导出<small>分享与合并收藏数</small></span></a><a href="#restore-section"><span class="tool-icon" aria-hidden="true">↙</span><span>恢复备份<small>检查并恢复已有资料</small></span></a><a href="#catalog-section"><span class="tool-icon" aria-hidden="true">▤</span><span>作品目录<small>导入新的目录快照</small></span></a><a href="#translations-section"><span class="tool-icon" aria-hidden="true">译</span><span>中文词库<small>检查与更新标签译名</small></span></a><a href="#covers-section"><span class="tool-icon" aria-hidden="true">▧</span><span>封面缓存<small>查看缓存空间与状态</small></span></a></nav>
         <div class="maintenance-panels">
         <section class="maintenance-card maintenance-section" id="cloud-sync-section" aria-labelledby="cloud-sync-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">⇄</span><div><h2 id="cloud-sync-title">上传收藏数与在线同步</h2><p>共享大家最近采集的作品收藏数和评分人数；断网时继续使用本地资料。</p></div></div>
@@ -63,6 +66,30 @@
           <details class="inline-help"><summary>同步计数、审核与更新间隔</summary><p class="field-hint">「服务器已确认」包含公开接受、待审核、保留已有和云端免上传确认，不等于公共作品总数。「云端已有，免上传」只检查公开数据，不扣日上传条数。本机采集时间比公共快照晚不足服务器设定的间隔时免上传，达到间隔才提交；新版服务默认 14 天，管理员可调整，0 天恢复有更新就提交。新作品与仅待审核、已撤回的记录仍正常提交。新来源与异常数据通过审核后才可供其他用户下载。间隔越长，公共收藏数更新越慢。</p></details>
           <p class="field-hint" id="cloud-sync-last"></p>
           <details class="favorites-merge-guide"><summary>在线同步如何合并</summary><p>公共库采用已接受的最新抓取快照，收藏数可能正常减少；同一抓取时间保留先接受的公共快照。下载时按抓取时间合并，本地更晚的快照保留，同时间采用公共快照。收藏数和评分人数作为同一份快照更新；公共快照缺少评分人数时显示未知，避免与旧评分人数混算。较新的本地失败记录及个人阅读状态保留。</p><p>首次同步分批下载全量，之后只下载变更；大量上传或下载会自动分批续传。新来源、异常上涨、下跌或归零进入云端待审核，通过后才能共享。管理员恢复历史或撤回错误快照时，客户端会纠正仍在使用的云端值，并保留更新的自采记录。此功能与手动 JSON 导入的原合并规则分别工作，原文件格式和 Discussion 分享继续可用。开启前可先使用下方备份功能保存资料。</p></details>
+        </section>
+        <section class="maintenance-card maintenance-section" id="network-section" aria-labelledby="network-title">
+          <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">⇆</span><div><h2 id="network-title">网络代理</h2><p>为采集、封面、在线同步、词库和客户端更新设置连接方式。</p></div></div>
+          <form id="network-form" autocomplete="off">
+            <fieldset id="network-fields" disabled>
+              <div class="network-mode"><label class="checkbox"><input id="network-enabled" type="checkbox">启用自定义 HTTP 代理</label><span id="network-saved-note" role="status">正在读取设置…</span></div>
+              <div class="network-grid">
+                <label>代理地址<input id="network-host" type="text" placeholder="127.0.0.1" maxlength="253" required spellcheck="false"><small>填写 IP 或域名，不包含协议和端口。</small></label>
+                <label>端口<input id="network-port" type="number" min="1" max="65535" step="1" placeholder="7890" required><small>使用代理软件的 HTTP / Mixed 端口。</small></label>
+                <label>用户名（可选）<input id="network-username" type="text" maxlength="512" autocomplete="off" spellcheck="false" placeholder="无需认证时留空"></label>
+                <label>密码（可选）<input id="network-password" type="password" maxlength="512" autocomplete="new-password" placeholder="无需认证时留空"></label>
+              </div>
+              <div class="network-auth"><span id="network-auth-hint">认证信息与代理设置使用当前 Windows 用户加密保存。</span><label class="checkbox"><input id="network-clear-password" type="checkbox">清除已保存密码</label></div>
+              <label class="network-domains" for="network-domains">代理列表（可选，每行一个域名）</label>
+              <textarea id="network-domains" rows="4" maxlength="8000" spellcheck="false" placeholder="留空：客户端所有联网请求使用代理&#10;按需填写，例如：&#10;e-hentai.org&#10;exhentai.org"></textarea>
+              <p class="field-hint">填写后，仅这些域名及其子域名走代理，其余直接连接。HTTP 代理也可连接 HTTPS 站点，本机资料库页面始终直接连接。</p>
+              <label class="network-fallback">关闭自定义代理时<select id="network-fallback"><option value="system">跟随系统代理（默认）</option><option value="direct">直接连接</option></select></label>
+              <div class="network-test-row"><label>连接测试<select id="network-target"><option value="github">GitHub</option><option value="e-hentai">E-Hentai</option><option value="exhentai">ExHentai</option></select></label><button class="button secondary" id="network-test" type="button">测试连接</button></div>
+              <div id="network-result" class="network-result" role="status" aria-live="polite">测试使用当前表单，不会自动保存，也不会携带源站 Cookie。</div>
+              <div class="maintenance-actions"><button class="button primary" id="network-save" type="submit">保存代理设置</button></div>
+            </fieldset>
+          </form>
+          <button class="button secondary" id="network-reload" type="button">重新读取已保存设置</button>
+          <p class="field-hint">保存后用于后续请求；正在采集时请先暂停。修改后需重新验证源站访问，已有任务和冷却时间保留。外部浏览器的网络设置由浏览器管理。</p>
         </section>
         <section class="maintenance-card maintenance-section" id="backup-section" aria-labelledby="backup-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↗</span><div><h2 id="backup-title">备份我的资料</h2><p>保存收藏数、阅读状态、黑名单、采集进度、中文词库和程序文件。</p></div></div>

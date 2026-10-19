@@ -9,6 +9,7 @@ import sqlite3
 from initialize_catalog import initialize
 from prepare_database import prepare
 from update_translations import update
+from network_settings import NetworkSettings
 
 
 @contextmanager
@@ -80,7 +81,7 @@ def prepare_library(root, progress=None):
         if not (data / "tag-translations.json").is_file():
             progress("[3/3] 正在准备中文词库…")
             try:
-                update(destination=data / "tag-translations.json", progress=progress)
+                update(destination=data / "tag-translations.json", progress=progress, network=NetworkSettings(root))
             except Exception:
                 progress("中文词库暂未下载成功，将继续启动英文标签搜索；稍后可在「资料库维护 → 中文词库」中安装。")
         progress("资料已准备好，正在启动本地服务并打开浏览器…")

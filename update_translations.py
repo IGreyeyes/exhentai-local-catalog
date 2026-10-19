@@ -3,7 +3,8 @@
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
+from network_settings import network_urlopen as urlopen
 import argparse
 import gzip
 import hashlib
@@ -21,10 +22,10 @@ MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
 
 
-def _download(url, limit):
+def _download(url, limit, network=None):
     request = Request(url, headers={"User-Agent": "LocalTagCatalog/1", "Accept": "application/vnd.github+json" if url == RELEASE_URL else "application/octet-stream"})
     try:
-        with urlopen(request, timeout=40) as response:
+        with urlopen(request, timeout=40, network=network) as response:
             raw = response.read(limit + 1)
     except HTTPError as error:
         if error.code in {403, 429}:
@@ -62,8 +63,8 @@ def local_status(destination=DEFAULT_TRANSLATIONS):
     return status
 
 
-def latest_release():
-    payload = json.loads(_download(RELEASE_URL, 2 * 1024 * 1024))
+def latest_release(network=None):
+    payload = json.loads(_download(RELEASE_URL, 2 * 1024 * 1024, network=network))
     if not isinstance(payload, dict):
         raise ValueError("官方版本信息格式不正确，请稍后重试。")
     asset = next((item for item in payload.get("assets", []) if isinstance(item, dict) and item.get("name") == "db.text.json.gz"), None)
@@ -91,17 +92,17 @@ def compare_version(local, latest):
     return "unknown"
 
 
-def check_latest(destination=DEFAULT_TRANSLATIONS):
-    local, latest = local_status(destination), latest_release()
+def check_latest(destination=DEFAULT_TRANSLATIONS, network=None):
+    local, latest = local_status(destination), latest_release(network=network)
     state = compare_version(local, latest)
     messages = {"not_installed": "尚未安装可用的中文词库，可以安装官方最新版。", "up_to_date": "检查完成：当前词库已是官方最新版本。", "update_available": "检查完成：发现新版中文词库，可以更新。", "unknown": "检查完成：本地版本信息不足，无法确认版本差异，可以安装官方最新版。"}
     return {"state": state, "latest": latest, "checked_at": datetime.now(timezone.utc).isoformat(), "dictionary_sha256": local["dictionary_sha256"], "message": messages[state]}
 
 
-def update(url=DEFAULT_URL, expected_sha256=None, destination=DEFAULT_TRANSLATIONS, *, release=None, progress=None, on_installed=None):
+def update(url=DEFAULT_URL, expected_sha256=None, destination=DEFAULT_TRANSLATIONS, *, release=None, progress=None, on_installed=None, network=None):
     progress = progress or (lambda message: print(message, flush=True))
     progress("正在下载官方中文词库…")
-    compressed = _download(url, MAX_ARCHIVE_BYTES)
+    compressed = _download(url, MAX_ARCHIVE_BYTES, network=network)
     digest = hashlib.sha256(compressed).hexdigest()
     if expected_sha256 and digest != expected_sha256.lower():
         raise ValueError("词库压缩包校验失败，原词库未修改。")

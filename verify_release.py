@@ -14,7 +14,7 @@ from desktop_updates import unpack_package
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE_PARTS = {"data", "logs", "backups", "dist", "build", ".venv", ".venv-desktop", "__pycache__", "node_modules", ".wrangler"}
-PRIVATE_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".zstd", ".ehcred", ".ehfavorites.json", ".ehcollector.json", ".pem", ".key", ".pfx", ".p12", ".log")
+PRIVATE_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".zstd", ".ehcred", ".ehproxy", ".ehfavorites.json", ".ehcollector.json", ".pem", ".key", ".pfx", ".p12", ".log")
 SECRET = re.compile(rb"(?<![A-Za-z0-9_-])(?:github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{30,}|AKIA[A-Z0-9]{16}|sk-proj-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{48}(?![A-Za-z0-9_-])|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)")
 IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 

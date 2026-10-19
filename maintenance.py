@@ -156,7 +156,8 @@ def recover_restore(catalog_path):
 
 
 class LibraryMaintenance:
-    def __init__(self,catalog_path,project_root):
+    def __init__(self,catalog_path,project_root,network=None):
+        self.network = network
         self.catalog_path = Path(catalog_path).resolve()
         self.root = Path(project_root).resolve()
         contained(self.catalog_path,self.root)
@@ -271,20 +272,20 @@ class LibraryMaintenance:
 
     def check_translations(self, progress=lambda message: None):
         progress("正在查询官方中文词库版本…")
-        result = check_latest(self.data/"tag-translations.json")
+        result = check_latest(self.data/"tag-translations.json", network=self.network)
         self.save_translation_check(result)
         return result
 
     def update_translations(self, reload_translations, progress=lambda message: None):
         progress("正在核对官方最新词库版本…")
         destination = self.data/"tag-translations.json"
-        latest = latest_release()
+        latest = latest_release(network=self.network)
         if compare_version(local_status(destination), latest) == "up_to_date":
             changed = False
             # Also reload when a CLI update has already installed the same release.
             reload_translations()
         else:
-            update(latest["download_url"], latest.get("archive_sha256") or None, destination, release=latest, progress=progress, on_installed=reload_translations)
+            update(latest["download_url"], latest.get("archive_sha256") or None, destination, release=latest, progress=progress, on_installed=reload_translations, network=self.network)
             changed = True
         local = local_status(destination)
         result = {"state": "up_to_date", "latest": latest, "checked_at": datetime.now(timezone.utc).isoformat(), "dictionary_sha256": local["dictionary_sha256"], "changed": changed, "message": "中文词库更新成功，已立即生效。已打开的搜索和记录页刷新后即可显示新译名。" if changed else "当前词库已是官方最新版本，并已载入；无需重复下载。"}

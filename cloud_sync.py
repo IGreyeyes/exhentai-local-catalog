@@ -38,7 +38,7 @@ class NoRedirect(HTTPRedirectHandler):
         raise ValueError("同步服务发生跳转，已停止请求；请核对服务地址。")
 
 
-def request_json(endpoint, path, payload=None, token=""):
+def request_json(endpoint, path, payload=None, token="", network=None):
     headers = {"Accept": "application/json", "User-Agent": "ExCatalog-CloudSync/3"}
     data = None
     if payload is not None:
@@ -47,7 +47,10 @@ def request_json(endpoint, path, payload=None, token=""):
     if token:
         headers["Authorization"] = "Bearer " + token
     try:
-        with build_opener(NoRedirect()).open(Request(endpoint + path, data=data, headers=headers), timeout=25) as response:
+        handlers = [NoRedirect()]
+        if network is not None:
+            handlers.append(network.handler())
+        with build_opener(*handlers).open(Request(endpoint + path, data=data, headers=headers), timeout=25) as response:
             if response.headers.get_content_type() != "application/json":
                 raise ValueError("同步服务没有返回 JSON，请检查 Worker 代码和服务地址。")
             raw = response.read(2 * 1024 * 1024 + 1)

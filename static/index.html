@@ -26,6 +26,7 @@
       <a class="nav-item" href="/records"><span aria-hidden="true">✓</span> 已记录</a>
       <a class="nav-item nav-collector" href="/#collector-panel"><span aria-hidden="true">⇩</span> 收藏数采集</a>
       <a class="nav-item" href="/maintenance"><span aria-hidden="true">⚙</span> 资料库维护</a>
+      <a class="nav-item nav-network" href="/maintenance#network-section"><span aria-hidden="true">⇆</span> 网络代理</a>
       <div class="nav-caption nav-caption-secondary">帮助与版本</div>
       <a class="nav-item nav-changelog" href="/changelog"><span aria-hidden="true">☷</span> 更新日志</a>
       <a class="nav-item nav-contact" href="/contact"><span aria-hidden="true">✉</span> 联系我们</a>
@@ -91,7 +92,7 @@
                 <label>ipb_pass_hash<input id="cookie-hash" type="password" autocomplete="off" spellcheck="false" placeholder="Cookie 的 Value"></label>
                 <label>igneous<input id="cookie-igneous" type="password" autocomplete="off" spellcheck="false" placeholder="ExHentai 需要填写"></label>
               </div>
-              <div class="filter-grid proxy-grid"><label>HTTP 代理（可选）<input id="collector-proxy" type="url" placeholder="系统网络可访问源站时留空"></label></div>
+              <p class="field-hint"><a href="/maintenance#network-section">设置网络代理与测试连接 ↗</a>。下面的临时地址仅在关闭自定义代理并选择「跟随系统」时使用；选择「直接连接」或启用自定义代理后，以网络代理页为准。</p><div class="filter-grid proxy-grid"><label>临时采集代理（可选）<input id="collector-proxy" type="url" placeholder="默认使用「网络代理」设置"></label></div>
               <p class="field-hint">登录信息默认只保留在本次服务运行的内存中。应用设置后可导出本机加密文件，下次直接导入。E-Hentai 可先尝试不填写 Cookie。</p>
               <div class="credential-file-actions"><button type="button" class="button secondary" id="credential-export" disabled>导出加密登录文件</button><button type="button" class="button secondary" id="credential-import">导入加密登录文件</button><input id="credential-file" type="file" accept=".ehcred,application/octet-stream" hidden></div>
               <p class="field-hint credential-file-note">.ehcred 文件由 Windows DPAPI 加密，只能由这台电脑上的当前 Windows 用户解密。请像密码一样保管，不要发送给他人。</p>

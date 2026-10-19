@@ -5,6 +5,7 @@ from http.client import IncompleteRead, RemoteDisconnected
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import ProxyHandler, Request, build_opener
+from network_settings import NetworkSettings
 import ctypes
 import errno
 import hashlib
@@ -180,12 +181,16 @@ class ClientUpdater:
         self._startup_error = ""
         self._startup_prompted = False
         self._startup_thread = None
-        # Use Windows/environment proxy settings, independently of collection settings.
+        self.network = NetworkSettings(data_root)
+        # Kept as injectable system-mode openers for the existing retry policy.
         self.opener = build_opener(ProxyHandler())
         self.direct_opener = build_opener(ProxyHandler({}))
-        self.history = ReleaseHistory()
+        self.history = ReleaseHistory(network=self.network)
 
     def _network_opener(self, attempt):
+        config = self.network.snapshot()
+        if config["enabled"] or config["fallback"] == "direct":
+            return build_opener(self.network.handler())
         return self.opener if attempt % 2 == 0 else self.direct_opener
 
     @staticmethod
@@ -272,10 +277,12 @@ class ClientUpdater:
             raise ValueError("客户端更新正在处理，请稍候。")
         try:
             self.release = None
-            request = Request(f"https://api.github.com/repos/{REPOSITORY}/releases/latest", headers={
-                "Accept": "application/vnd.github+json", "User-Agent": "ExCatalog/" + APP_VERSION})
             for attempt in range(NETWORK_ATTEMPTS):
                 self._retry_delay(attempt)
+                # Proxy handlers mutate Request when establishing HTTPS tunnels.
+                # A retry must start from the original destination and headers.
+                request = Request(f"https://api.github.com/repos/{REPOSITORY}/releases/latest", headers={
+                    "Accept": "application/vnd.github+json", "User-Agent": "ExCatalog/" + APP_VERSION})
                 try:
                     with self._network_opener(attempt).open(request, timeout=25) as response:
                         raw = response.read(1024**2 + 1)

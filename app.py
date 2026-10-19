@@ -21,11 +21,12 @@ from prepare_database import DEFAULT_DATABASE, inspect_database
 from translations import Translations
 from favorites import Collector, FavoriteStore, JOIN_FAVORITES, JOIN_RATINGS, gallery_url
 from maintenance import LibraryMaintenance, MaintenanceManager, recover_import
-from covers import CoverCache, CoverUnavailable
+from covers import CoverCache, CoverUnavailable, download_public_cover
 from credentials import export_credentials, import_credentials
 from favorite_transfer import MAX_FILE_BYTES, snapshot_share_info
 from collector_identity import MAX_IDENTITY_BYTES, parse_identity
-from cloud_sync import CloudSync
+from cloud_sync import CloudSync, request_json
+from network_settings import NetworkSettings
 from release_history import ReleaseHistory
 from runtime_paths import library_lock, library_root, resource_root
 
@@ -424,16 +425,19 @@ class Server(ThreadingHTTPServer):
         self.catalog = catalog
         self.shutdown_token = secrets.token_urlsafe(32)
         self.action_token = secrets.token_urlsafe(32)
-        self.release_history = ReleaseHistory()
+        project_root = catalog.path.parent.parent if catalog.path.parent.name=="data" else catalog.path.parent
+        self.network = NetworkSettings(project_root)
+        self.release_history = ReleaseHistory(network=self.network)
         self.catalog_gate = threading.RLock()
         super().__init__(address, Handler)
-        self.collector = Collector(catalog)
-        project_root = catalog.path.parent.parent if catalog.path.parent.name=="data" else catalog.path.parent
-        self.cover_cache = CoverCache(project_root/"data"/"covers", project_root/"data"/"covers.sqlite3")
-        self.maintenance = MaintenanceManager(LibraryMaintenance(catalog.path,project_root),self.exclusive_maintenance,self.reload_catalog,self.reload_translations,self.invalidate_collection_preview)
+        self.collector = Collector(catalog, network=self.network)
+        self.cover_cache = CoverCache(project_root/"data"/"covers", project_root/"data"/"covers.sqlite3",
+                                      downloader=lambda url: download_public_cover(url, network=self.network))
+        self.maintenance = MaintenanceManager(LibraryMaintenance(catalog.path,project_root,network=self.network),self.exclusive_maintenance,self.reload_catalog,self.reload_translations,self.invalidate_collection_preview)
         self.collector.on_completed = self.maintenance.on_collection_completed
         self.cloud_sync = CloudSync(lambda: self.catalog.favorites, self.catalog_gate,
-                                    lambda: self.maintenance.stopping or self.maintenance.state.get("busy", False))
+                                    lambda: self.maintenance.stopping or self.maintenance.state.get("busy", False),
+                                    transport=lambda *args, **kwargs: request_json(*args, **kwargs, network=self.network))
 
     @contextmanager
     def exclusive_maintenance(self):
@@ -548,7 +552,9 @@ class Handler(BaseHTTPRequestHandler):
         request = urlparse(self.path)
         try:
             query = parse_qs(request.query, max_num_fields=64)
-            if request.path == "/api/cloud-sync":
+            if request.path == "/api/network":
+                self.reply(self.server.network.status())
+            elif request.path == "/api/cloud-sync":
                 self.reply(self.server.cloud_sync.status())
             elif request.path == "/api/release-history":
                 self.reply(self.server.release_history.info())
@@ -586,6 +592,8 @@ class Handler(BaseHTTPRequestHandler):
                 files["/gallery-cards.js"] = ("gallery-cards.js", "text/javascript")
                 files["/client-updates.css"] = ("client-updates.css", "text/css")
                 files["/cloud-sync.js"] = ("cloud-sync.js", "text/javascript")
+                files["/network-settings.js"] = ("network-settings.js", "text/javascript")
+                files["/network-settings.css"] = ("network-settings.css", "text/css")
                 files["/contact"] = ("contact.html", "text/html")
                 files["/contact/"] = ("contact.html", "text/html")
                 files["/contact.css"] = ("contact.css", "text/css")
@@ -650,7 +658,31 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload,dict):
                 raise ValueError("请求格式不正确。")
-            if self.path == "/api/release-history/refresh":
+            if self.path == "/api/network/settings":
+                with self.server.catalog_gate, self.server.collector.lock:
+                    collector = self.server.collector
+                    if self.server.maintenance.stopping:
+                        raise ValueError("服务正在停止，请重新启动后再操作。")
+                    if collector.thread and collector.thread.is_alive():
+                        raise ValueError("请先暂停采集，等待当前请求结束后再修改代理设置。")
+                    result = self.server.network.save(payload)
+                    collector.verified = False
+                    collector.preview_data = None
+                    collector.response_times.clear()
+                    collector.verification_unavailable.clear()
+                    collector.verification_issues.clear()
+            elif self.path == "/api/network/test":
+                if set(payload) != {"settings", "target"}:
+                    raise ValueError("连接测试参数不正确。")
+                with self.server.collector.lock:
+                    collector = self.server.collector
+                    if payload["target"] in ("e-hentai", "exhentai"):
+                        if collector.cooldown_until > time.time():
+                            raise ValueError("源站仍处于保护冷却，可选择 GitHub 测试网络；恢复源站请使用采集区的单次验证。")
+                        if collector.thread and collector.thread.is_alive():
+                            raise ValueError("请先暂停采集，再测试源站连接。")
+                result = self.server.network.test(payload["settings"], payload["target"])
+            elif self.path == "/api/release-history/refresh":
                 if payload:
                     raise ValueError("刷新发布记录不接受额外选项。")
                 result = self.server.release_history.refresh()

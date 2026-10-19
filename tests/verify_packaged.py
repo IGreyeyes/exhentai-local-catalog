@@ -90,6 +90,21 @@ def verify(program_directory=None):
                 raise TimeoutError("Packaged service did not start")
             base = f"http://127.0.0.1:{runtime['port']}"
             token = get("/api/status")["action_token"]
+            network = get("/api/network")
+            if network["enabled"] or network["has_password"] or network["fallback"] != "system":
+                raise AssertionError("Packaged proxy must start with system defaults and no credentials")
+            settings = {key: network[key] for key in ("enabled", "fallback", "host", "port", "username", "domains")}
+            settings.update(fallback="direct", password="test-packaged-proxy-password", username="test-packaged-proxy-user")
+            saved_network = post("/api/network/settings", settings, token)
+            if "password" in saved_network or not saved_network["has_password"] or saved_network["fallback"] != "direct":
+                raise AssertionError("Packaged proxy persistence or password redaction failed")
+            encrypted = (root / "data" / "network-settings.ehproxy").read_bytes()
+            if b"test-packaged-proxy-password" in encrypted or b"test-packaged-proxy-user" in encrypted:
+                raise AssertionError("Packaged proxy preferences were not encrypted")
+            for asset in ("network-settings.js", "network-settings.css"):
+                with opener.open(base + "/" + asset, timeout=10) as response:
+                    if response.status != 200 or not response.read():
+                        raise AssertionError("Packaged network settings asset missing")
             cloud = get("/api/cloud-sync")
             if cloud["enabled"] or cloud["upload_enabled"] or cloud["source_id"]:
                 raise AssertionError("Packaged cloud sync must start disabled without credentials")

@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from first_run import catalog_prepared, preparation_lock, prepare_library
+from first_run import CATALOG_DOWNLOAD_URL, MissingCatalogError, catalog_prepared, missing_catalog, preparation_lock, prepare_library
 from initialize_catalog import initialize
 
 
@@ -91,6 +91,21 @@ class FirstRunTests(unittest.TestCase):
             self.prepare()
         self.assertEqual(partial.read_bytes(), b"incomplete")
         self.assertFalse(self.database.exists())
+
+    def test_missing_catalog_is_detected_before_any_preparation_and_can_retry(self):
+        self.assertTrue(missing_catalog(self.root))
+        with patch("first_run.prepare") as extract, patch("first_run.initialize") as index, patch("first_run.update") as download:
+            with self.assertRaises(MissingCatalogError) as caught:
+                self.prepare()
+            self.assertIn(str(self.root), str(caught.exception))
+            self.assertIn(CATALOG_DOWNLOAD_URL, str(caught.exception))
+            self.assertIn("重新检测", str(caught.exception))
+            extract.assert_not_called(); index.assert_not_called(); download.assert_not_called()
+        self.make_database(self.database)
+        (self.data / "tag-translations.json").write_text('{"data":[]}', encoding="utf-8")
+        self.assertFalse(missing_catalog(self.root))
+        self.prepare()
+        self.assertTrue(catalog_prepared(self.database))
 
     def test_existing_recovery_journal_is_left_for_server_recovery(self):
         journal = self.data / "catalog-swap.json"

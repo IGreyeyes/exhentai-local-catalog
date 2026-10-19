@@ -277,6 +277,58 @@ class NetworkApiTests(unittest.TestCase):
             self.post("/api/network/test", {"settings": DEFAULTS, "target": "http://localhost/"})
         self.assertEqual(raised.exception.code, 400); raised.exception.close()
 
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI")
+    def test_collector_proxy_autosaves_without_login_and_survives_restart_and_clear(self):
+        from favorites import Collector
+        route = "/api/collector/proxy"
+        proxy = "http://127.0.0.1:7890"
+        with self.assertRaises(HTTPError) as raised:
+            self.post(route, {"proxy": proxy}, authorized=False)
+        self.assertEqual(raised.exception.code, 403); raised.exception.close()
+        self.assertTrue(self.post(route, {"proxy": proxy})["saved"])
+        collector = Collector(self.server.catalog)
+        self.assertFalse(collector.status()["configured"])
+        self.assertEqual(collector.status()["proxy"], proxy)
+        self.assertFalse(collector.status()["has_credentials"])
+        with collector.store.connection() as db:
+            stored = db.execute("SELECT value FROM app_settings WHERE key='collector_proxy'").fetchone()[0]
+        self.assertNotIn("127.0.0.1", stored)
+        self.assertNotIn("7890", stored)
+        collector.configure({"host": "e-hentai.org"})
+        collector.verified = True
+        self.server.collector = collector
+        self.post(route, {"proxy": "http://127.0.0.1:7891"})
+        self.assertEqual(collector.settings["proxy"], proxy, "Autosave must not silently change an applied session")
+        self.assertTrue(collector.verified)
+        collector.configure({"host": "e-hentai.org", "proxy": "http://127.0.0.1:7891"})
+        self.assertFalse(collector.verified)
+        self.post(route, {"proxy": ""})
+        self.assertEqual(Collector(self.server.catalog).status()["proxy"], "")
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI")
+    def test_collector_proxy_validation_and_failed_save_preserve_previous_value(self):
+        from favorites import Collector
+        route = "/api/collector/proxy"
+        proxy = "http://127.0.0.1:7890"
+        self.post(route, {"proxy": proxy})
+        for invalid in (None, "socks5://localhost:7890", "http://test-user:test-password@localhost:7890", "http://localhost:0", "http://localhost:99999", "http://localhost\n", "http://[bad"):
+            with self.assertRaises(HTTPError) as raised:
+                self.post(route, {"proxy": invalid})
+            self.assertEqual(raised.exception.code, 400); raised.exception.close()
+        with patch("favorites._dpapi", side_effect=OSError("test-sensitive-details")):
+            with self.assertRaises(HTTPError) as raised:
+                self.post(route, {"proxy": "http://127.0.0.1:7891"})
+            self.assertNotIn("test-sensitive-details", json.load(raised.exception)["error"])
+            raised.exception.close()
+        self.assertEqual(Collector(self.server.catalog).status()["proxy"], proxy)
+        self.server.collector.thread = self.thread
+        try:
+            with self.assertRaises(HTTPError) as raised:
+                self.post(route, {"proxy": ""})
+            self.assertIn("先暂停", json.load(raised.exception)["error"]); raised.exception.close()
+        finally:
+            self.server.collector.thread = None
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,85 @@ import faulthandler
 import traceback
 
 
+def verify_first_run(report_path):
+    """Check the real startup window, missing-file retry, and archive preparation."""
+    import webview
+    from compression import zstd
+    from unittest.mock import patch
+    from desktop import open_desktop
+    from first_run import CATALOG_DOWNLOAD_URL
+    report_path = report_path.resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {"passed": False, "frozen": bool(getattr(sys, "frozen", False)), "checks": []}
+    original_create, original_start = webview.create_window, webview.start
+    windows = []
+    opened = []
+    def create(*args, **kwargs):
+        kwargs["hidden"] = True
+        window = original_create(*args, **kwargs)
+        windows.append((window, kwargs["js_api"]))
+        return window
+
+    with tempfile.TemporaryDirectory(prefix="excatalog-first-run-") as directory:
+        root = Path(directory)
+        def start_with_check(start, **kwargs):
+            def check():
+                window, api = windows[0]
+                try:
+                    start()
+                    if not window.events.loaded.wait(20):
+                        raise TimeoutError("Missing catalog page did not load")
+                    state = window.evaluate_js("({title:document.querySelector('h1').textContent,waiting:!document.querySelector('progress').hidden,path:document.querySelector('.directory').textContent,buttons:document.querySelectorAll('.actions button').length})")
+                    assert state == {"title": "未找到数据库", "waiting": False, "path": str(root.resolve()), "buttons": 3}, state
+                    assert api._session.server is None
+                    report["checks"].append("missing database immediately shows instructions, actual directory, and three actions without loading indefinitely")
+                    assert api.open_catalog_download().get("opened")
+                    assert api.open_catalog_directory().get("opened")
+                    assert opened == [CATALOG_DOWNLOAD_URL, root]
+                    reloaded = threading.Event()
+                    window.events.loaded += reloaded.set
+                    assert api.retry_startup().get("starting")
+                    if not reloaded.wait(20):
+                        raise TimeoutError("Missing-file retry did not finish")
+                    assert window.evaluate_js("document.querySelector('h1').textContent") == "未找到数据库"
+                    report["checks"].append("download and directory actions use fixed targets; retry with no file returns to instructions")
+                    source = root / "test-source.sqlite3"
+                    with closing(sqlite3.connect(source)) as db:
+                        db.executescript("""
+                            CREATE TABLE gallery(gid INTEGER PRIMARY KEY,token TEXT,title TEXT,title_jpn TEXT,category TEXT,posted INTEGER,filecount INTEGER,rating TEXT,removed INTEGER DEFAULT 0,replaced INTEGER DEFAULT 0,expunged INTEGER DEFAULT 0);
+                            CREATE TABLE tag(id INTEGER PRIMARY KEY,name TEXT UNIQUE);
+                            CREATE TABLE gid_tid(gid INTEGER,tid INTEGER);
+                            INSERT INTO gallery VALUES(1,'abcdef0123','First run test','','Non-H',1,10,'4.0',0,0,0);
+                            INSERT INTO tag VALUES(1,'language:english');
+                            INSERT INTO gid_tid VALUES(1,1);
+                        """)
+                    (root / "e-hentai.db.zstd").write_bytes(zstd.compress(source.read_bytes()))
+                    (root / "data").mkdir(exist_ok=True)
+                    (root / "data" / "tag-translations.json").write_text('{"data":[]}', encoding="utf-8")
+                    reloaded.clear()
+                    assert api.retry_startup().get("starting")
+                    if not reloaded.wait(25):
+                        raise TimeoutError("Startup did not continue after adding database")
+                    assert window.evaluate_js("!!document.querySelector('#search-form')")
+                    assert (root / "data" / "catalog.sqlite3").is_file()
+                    assert api._session.server is not None
+                    assert "error" in api.retry_startup(), "Main page must not restart the service"
+                    report["checks"].append("adding a valid archive and retrying extracts and indexes it, then opens the search page without restarting the application")
+                    report["passed"] = True
+                except Exception:
+                    report["error"] = traceback.format_exc()
+                finally:
+                    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                    window.destroy()
+            return original_start(check, **kwargs)
+        with patch("webview.create_window", side_effect=create), patch("webview.start", side_effect=start_with_check), \
+             patch("desktop.webbrowser.open", side_effect=lambda target: opened.append(target) or True), \
+             patch("desktop.os.startfile", side_effect=lambda target: opened.append(target)), \
+             patch("desktop.ClientUpdater.start_startup_check", return_value={"phase": "failed", "message": "Isolated check"}):
+            open_desktop(root)
+    return 0 if report["passed"] else 1
+
+
 def verify_desktop(report_path, fixture_root=None):
     import webview
     from desktop import DesktopApi

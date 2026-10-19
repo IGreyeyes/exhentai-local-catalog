@@ -8,7 +8,7 @@ import threading
 import unittest
 
 from app import Catalog, Server
-from client_version import APP_VERSION, RELEASE_NOTES, REPOSITORY
+from client_version import APP_VERSION, RELEASE_NOTES, RELEASE_TITLE, REPOSITORY
 from desktop_updates import ClientUpdater
 from release_history import ReleaseHistory, announcement_notes, bundled_history, upgrade_notes, version_key, version_sections
 from test_desktop import make_library
@@ -25,8 +25,12 @@ class ReleaseHistoryTests(unittest.TestCase):
         self.assertNotIn("历史更新概览",body)
         self.assertEqual(set(sections),{APP_VERSION})
         self.assertEqual(body.strip(), RELEASE_NOTES.strip())
-        self.assertIn("独立网络代理设置",sections[APP_VERSION])
-        self.assertIn("一键连接测试",sections[APP_VERSION])
+        self.assertTrue(body.startswith(f"# v{APP_VERSION} · {RELEASE_TITLE}\n"))
+        previous_proxy = next(item for item in bundled_history() if item['version']=='1.2.1')
+        self.assertEqual(previous_proxy['date'], '2026-10-19T13:37:59Z')
+        self.assertFalse(previous_proxy['prerelease'])
+        self.assertIn("独立网络代理设置",previous_proxy['notes'])
+        self.assertIn("一键连接测试",previous_proxy['notes'])
         previous_layout = next(item for item in bundled_history() if item['version']=='1.2.0')
         self.assertEqual(previous_layout['date'], '2026-10-19T08:17:38Z')
         self.assertFalse(previous_layout['prerelease'])

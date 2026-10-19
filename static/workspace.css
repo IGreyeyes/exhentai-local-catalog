@@ -131,6 +131,10 @@ h2, .results-heading h2 { font-size: 15px; }
 .credential-grid { margin-top: 14px; }
 .credential-file-actions { gap: 7px; flex-wrap: wrap; }
 .credential-file-actions .button { font-size: 11px; padding: 7px 10px; }
+.credential-state, .credential-feedback { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; border-radius: 7px; padding: 10px 12px; background: #f0f4f1; color: #526d5b; }
+.credential-state.loaded, .credential-feedback { background: #e5f2ea; color: #255b3b; border: 1px solid #c8dfd0; }
+.credential-feedback.error { background: #fff0eb; color: #9c3826; border-color: #eccfc5; }
+#collector-proxy-status.error { color: #9c3826; }
 .settings-content .round-mode-note { padding: 11px 12px; }
 .step-heading { display: flex; gap: 9px; align-items: center; font-size: 13px; margin: 20px 0 14px; }
 .step-heading > span { font-size: 11px; font-weight: 600; color: #417157; background: #e8f1eb; border-radius: 5px; padding: 3px 6px; }
@@ -168,6 +172,7 @@ h2, .results-heading h2 { font-size: 15px; }
 
 /* Maintenance tools show one panel while preserving every form in the DOM. */
 .maintenance-workspace { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 22px; align-items: start; }
+.maintenance-workspace.network-workspace { grid-template-columns: minmax(0, 1fr); }
 .maintenance-tabs { display: flex; flex-direction: column; flex-wrap: nowrap; gap: 5px; margin: 0; position: sticky; top: 20px; }
 .maintenance-tabs a { display: flex; align-items: center; gap: 10px; background: transparent; border-color: transparent; padding: 12px; border-radius: 8px; font-size: 12px; font-weight: 600; color: #53695b; }
 .maintenance-tabs small { display: block; margin-top: 4px; font-size: 10px; font-weight: 400; color: #7a8c7e; }

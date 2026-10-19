@@ -815,6 +815,10 @@ class Handler(BaseHTTPRequestHandler):
                     collector=self.server.collector
                     if self.path == "/api/collector/settings":
                         result=collector.configure(payload)
+                    elif self.path == "/api/collector/proxy":
+                        if set(payload) != {"proxy"}:
+                            raise ValueError("请只提交采集代理地址。")
+                        result=collector.save_proxy(payload["proxy"])
                     elif self.path == "/api/collector/skip_unavailable":
                         result=collector.skip_unavailable(payload.get("issue_id"))
                     elif self.path in {"/api/collector/verify","/api/collector/start","/api/collector/preview"}:

@@ -96,7 +96,7 @@ async function main() {
       await page.goto(base + route);
       if (route.startsWith("/?")) await page.locator("#results .saved-card").first().waitFor();
       if (route === "/records") await page.locator("#records-list .saved-card").first().waitFor();
-      assert(await page.locator(".sidebar .nav-item:visible").count() === 6, `Missing navigation at ${width}: ${route}`);
+      assert(await page.locator(".sidebar .nav-item:visible").count() === 7, `Missing navigation at ${width}: ${route}`);
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `Page overflow at ${width}: ${route}`);
       if (route === "/maintenance") {
         for (const link of await page.locator(".maintenance-tabs a").all()) {

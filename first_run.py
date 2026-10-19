@@ -11,6 +11,24 @@ from prepare_database import prepare
 from update_translations import update
 from network_settings import NetworkSettings
 
+CATALOG_DOWNLOAD_URL = "https://github.com/URenko/e-hentai-db/releases/tag/nightly"
+CATALOG_ARCHIVE = "e-hentai.db.zstd"
+
+
+class MissingCatalogError(ValueError):
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        super().__init__(f"未找到数据库。请先下载 {CATALOG_ARCHIVE}，无需解压，放入以下目录：\n{self.root}\n下载地址：{CATALOG_DOWNLOAD_URL}\n放好后点击「重新检测」。已有资料库应位于 data/catalog.sqlite3。")
+
+
+def missing_catalog(root):
+    root = Path(root)
+    data = root / "data"
+    # An interrupted replacement must be recovered by the service first.
+    return not any((data / name).is_file() for name in (
+        "catalog.sqlite3", "catalog-swap.json", "restore-swap.json"
+    )) and not (root / CATALOG_ARCHIVE).is_file()
+
 
 @contextmanager
 def preparation_lock(data):
@@ -63,12 +81,14 @@ def prepare_library(root, progress=None):
     if any((data / name).is_file() for name in ("catalog-swap.json", "restore-swap.json")):
         progress("发现待恢复的维护操作，启动服务后会先恢复资料。")
         return
+    if missing_catalog(root):
+        raise MissingCatalogError(root)
     with preparation_lock(data):
         database = data / "catalog.sqlite3"
         if not database.is_file():
-            archive = root / "e-hentai.db.zstd"
+            archive = root / CATALOG_ARCHIVE
             if not archive.is_file():
-                raise ValueError("请先下载 e-hentai.db.zstd 并放到程序文件夹，再重新打开应用。下载地址：https://github.com/URenko/e-hentai-db/releases/tag/nightly")
+                raise MissingCatalogError(root)
             if database.with_suffix(".sqlite3.partial").exists():
                 raise ValueError("上次解压未完成。请确认没有其他准备任务，核对并另存 data/catalog.sqlite3.partial 后再重试；不要将未完成文件直接改名为正式数据库。")
             progress("[1/3] 首次准备：正在解压作品目录，请保持窗口打开…")

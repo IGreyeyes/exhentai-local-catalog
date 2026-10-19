@@ -51,16 +51,49 @@ def notice(message):
         print(message, file=sys.stderr)
 
 
-def startup_page(message, failed=False):
+def startup_page(message, failed=False, missing_root=None):
+    from first_run import CATALOG_ARCHIVE, CATALOG_DOWNLOAD_URL
+    missing = missing_root is not None
+    heading = "未找到数据库" if missing else "暂时无法启动" if failed else "正在准备资料库"
+    guidance = ""
+    if missing:
+        guidance = f"""<section id="startup-guidance">
+        <ol><li>前往作品数据库下载页，下载 <strong>{CATALOG_ARCHIVE}</strong>。</li>
+        <li>无需解压，将文件放入下面的程序资料目录（通常与 ExCatalog.exe 同级）：</li></ol>
+        <p class="directory">{html.escape(str(Path(missing_root).resolve()))}</p>
+        <p class="hint">已有数据库应放在该目录的 data/catalog.sqlite3；不要放入 _internal。下载后请保留准确文件名。</p>
+        <div class="actions"><button disabled onclick="startupAction('open_catalog_download')">下载数据库</button>
+        <button disabled onclick="startupAction('open_catalog_directory')">打开存放目录</button>
+        <button disabled class="primary" onclick="startupAction('retry_startup')">重新检测</button></div>
+        <p class="hint">下载入口：<a href="{CATALOG_DOWNLOAD_URL}" target="_blank" rel="noopener noreferrer">URenko/e-hentai-db · nightly</a></p>
+        <p id="startup-feedback" role="status" aria-live="polite"></p></section>"""
     return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{TITLE}</title><style>
     body{{margin:0;background:#f6f8f7;color:#243a35;font-family:'Microsoft YaHei',sans-serif}}
-    main{{max-width:680px;margin:15vh auto;padding:40px;background:white;border-radius:18px}}
+    main{{max-width:680px;margin:7vh auto;padding:32px;background:white;border-radius:18px}}[hidden]{{display:none!important}}
     h1{{font-size:26px}}p{{line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere}}
     progress{{width:100%;accent-color:#247b64}}.hint{{color:#718079;font-size:14px}}
-    </style><main><h1>{'暂时无法启动' if failed else '正在准备资料库'}</h1>
-    <p id="progress-message">{html.escape(message)}</p>{'' if failed else '<progress></progress>'}
-    <p class="hint">{'请处理上述问题后重新打开应用。' if failed else '首次解压和建立索引可能需要几分钟，请保持窗口打开。'}</p></main></html>"""
+    li{{line-height:1.9}}.directory{{background:#edf5f0;padding:12px;border-radius:8px}}a{{color:#247b64}}
+    .actions{{display:flex;gap:10px;flex-wrap:wrap}}button{{padding:10px 16px;border:1px solid #bfd3c9;border-radius:8px;background:white;color:#245c49;cursor:pointer;font:inherit}}
+    button.primary{{background:#247b64;color:white}}button:disabled{{opacity:.6;cursor:wait}}
+    @media(max-width:600px){{main{{margin:16px;padding:20px}}h1{{font-size:23px}}}}
+    </style><main><h1 id="startup-title">{heading}</h1>
+    <p id="progress-message" role="status" aria-live="polite">{html.escape(message)}</p><progress id="startup-progress" {'hidden' if failed or missing else ''}></progress>
+    {guidance}<p id="startup-hint" class="hint">{'放好数据库后点击「重新检测」，也可直接关闭窗口，稍后继续。' if missing else '请处理上述问题后重新打开应用。' if failed else '首次解压和建立索引可能需要几分钟，请保持窗口打开。'}</p></main>
+    <script>
+    function bridgeReady(){{document.querySelectorAll('.actions button').forEach(button=>button.disabled=false);}}
+    addEventListener('pywebviewready',bridgeReady);
+    if(window.pywebview?.api)bridgeReady();
+    async function startupAction(method){{
+      const feedback=document.getElementById('startup-feedback');
+      document.querySelectorAll('.actions button').forEach(button=>button.disabled=true);
+      try{{const result=await window.pywebview.api[method]();if(result.error)throw new Error(result.error);
+        feedback.textContent=method==='retry_startup'?'正在重新检测…':method==='open_catalog_download'?'已打开下载页。下载完成后请放入指定目录，再点击「重新检测」。':'已打开数据库存放目录。';
+      }}catch(error){{feedback.textContent=error.message;}}
+      finally{{bridgeReady();}}
+    }}
+    </script></html>"""
 
 
 class DesktopApi:
@@ -70,6 +103,28 @@ class DesktopApi:
         self._dialog_lock = threading.Lock()
         self._updates = ClientUpdater(session.root)
         self._install_callback = None
+        self._startup_callback = None
+
+    def _startup_action(self, action):
+        try:
+            if self._session.base_url or not self._startup_callback:
+                raise ValueError("请在首次配置窗口中操作。")
+            return action()
+        except Exception as error:
+            return {"error": str(error)}
+
+    def open_catalog_download(self):
+        from first_run import CATALOG_DOWNLOAD_URL
+        return self._startup_action(lambda: {"opened": webbrowser.open(CATALOG_DOWNLOAD_URL)})
+
+    def open_catalog_directory(self):
+        def open_directory():
+            os.startfile(self._session.root)
+            return {"opened": True}
+        return self._startup_action(open_directory)
+
+    def retry_startup(self):
+        return self._startup_action(lambda: self._startup_callback())
 
     def _local_page(self):
         current = urlparse(self._window.get_current_url() or "")
@@ -178,6 +233,7 @@ class DesktopApi:
 
 
 def open_desktop(root):
+    from first_run import MissingCatalogError, missing_catalog
     if not webview2_available():
         notice("未检测到 Microsoft Edge WebView2 运行环境。\n请在微软官方网站安装 Evergreen Runtime 后重新打开应用。\n无需安装 Python。")
         webbrowser.open(WEBVIEW_HELP)
@@ -186,9 +242,11 @@ def open_desktop(root):
     from desktop_service import DesktopSession
     session = DesktopSession(root)
     api = DesktopApi(session)
-    window = webview.create_window(TITLE, html=startup_page("正在检查本地资料…"), js_api=api, width=1360, height=900, min_size=(1000, 650), background_color="#f6f8f7")
+    needs_catalog = missing_catalog(root)
+    initial_page = startup_page("程序包不包含作品数据库，请先下载并放入指定目录。", missing_root=root) if needs_catalog else startup_page("正在检查本地资料…")
+    window = webview.create_window(TITLE, html=initial_page, js_api=api, width=1360, height=900, min_size=(1000, 650), background_color="#f6f8f7")
     api._window = window
-    state = {"starting": True, "closing": False, "closed": False}
+    state = {"starting": not needs_catalog, "closing": False, "closed": False}
     gate = threading.Lock()
 
     def progress(message):
@@ -198,16 +256,36 @@ def open_desktop(root):
             logging.exception("Unable to show startup progress")
 
     def start():
+        failed_page = None
         try:
+            if not window.events.loaded.wait(20):
+                raise RuntimeError("准备页面加载超时，请关闭应用后重试。")
             if window.gui.renderer != "edgechromium":
                 raise RuntimeError("无法启用 WebView2。请更新 Microsoft Edge WebView2 运行环境及 Windows 系统组件后重试。")
+            window.evaluate_js("document.getElementById('startup-title').textContent='正在准备资料库';document.getElementById('startup-progress').hidden=false;document.getElementById('startup-guidance')?.setAttribute('hidden','');document.getElementById('startup-hint').textContent='首次解压和建立索引可能需要几分钟，请保持窗口打开。';")
+            progress("正在检查本地资料…")
             url = session.start(progress)
             window.load_url(url)
+        except MissingCatalogError:
+            failed_page = startup_page("未检测到数据库或作品目录压缩包，请确认下载已完成、文件名和位置正确。", missing_root=root)
         except Exception as error:
             logging.exception("Desktop startup failed")
-            window.load_html(startup_page(str(error), failed=True))
+            failed_page = startup_page(str(error), failed=True)
         finally:
-            state["starting"] = False
+            with gate:
+                state["starting"] = False
+        if failed_page:
+            window.load_html(failed_page)
+
+    def retry_startup():
+        with gate:
+            if state["starting"] or state["closing"] or state["closed"]:
+                return {"error": "正在处理，请稍候。"}
+            state["starting"] = True
+        threading.Thread(target=start, name="desktop-startup-retry", daemon=False).start()
+        return {"starting": True}
+
+    api._startup_callback = retry_startup
 
     def stop():
         try:
@@ -273,7 +351,7 @@ def open_desktop(root):
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
     webview.settings["ALLOW_DOWNLOADS"] = False  # Exports use the native save dialog.
     try:
-        webview.start(start, gui="edgechromium", private_mode=True)
+        webview.start(lambda: None if needs_catalog else start(), gui="edgechromium", private_mode=True)
     finally:
         session.close(wait_for_maintenance=True)
     return 0
@@ -304,6 +382,9 @@ def main():
     if remaining and remaining[0] == "--verify-desktop":
         from desktop_verify import verify_desktop
         return verify_desktop(Path(remaining[1]), Path(remaining[2]) if len(remaining)>2 else None)
+    if remaining and remaining[0] == "--verify-first-run":
+        from desktop_verify import verify_first_run
+        return verify_first_run(Path(remaining[1]))
     if options.data_root:
         os.environ["EH_CATALOG_DATA_ROOT"] = str(options.data_root.resolve())
     root = library_root()

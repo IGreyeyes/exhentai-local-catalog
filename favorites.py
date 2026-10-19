@@ -1,6 +1,7 @@
 """Persistent favorite counts and a single, deliberately paced metadata collector."""
 
 from contextlib import contextmanager
+from base64 import b64decode, b64encode
 from collections import deque
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -22,10 +23,39 @@ import threading
 import time
 
 from collector_identity import read_identity, validate_collector
+from credentials import _dpapi
 
 HOSTS = {"exhentai.org", "e-hentai.org"}
 REQUEST_INTERVALS = (1, 1.5, 2, 2.5, 3)
 DEFAULT_REQUEST_INTERVAL = 3
+
+
+def validate_collector_proxy(value):
+    if not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 32 for c in value):
+        raise ValueError("代理地址格式不正确。")
+    proxy = value.strip()
+    if proxy:
+        try:
+            parsed = urlparse(proxy)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}
+                    or any(c.isspace() for c in proxy)):
+                raise ValueError
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                raise ValueError
+        except ValueError:
+            raise ValueError("代理请填写有效的 HTTP 代理地址，例如 http://127.0.0.1:7890；无需代理时可留空。") from None
+    return proxy
+
+
+def encode_collector_proxy(proxy):
+    try:
+        protected = b64encode(_dpapi(proxy.encode("utf-8"), True)).decode("ascii") if proxy else ""
+    except (ValueError, OSError):
+        raise ValueError("无法加密保存采集代理，请确认使用当前 Windows 用户；原设置已保留。") from None
+    return json.dumps({"version": 1, "protected": protected})
+
+
 JOIN_FAVORITES = " LEFT JOIN collected.favorites AS f ON f.gid = g.gid "
 JOIN_RATINGS = " LEFT JOIN collected.rating_counts AS rc ON rc.gid = g.gid "
 READING_STATES = {"none", "planned", "reading", "watched", "ignored"}
@@ -615,7 +645,18 @@ class Collector:
         self.preview_data = None
         self.cooldown_until = 0
         self.cooldown_probe_after = 0
+        self.saved_proxy, self.proxy_error = "", ""
         with self.store.connection() as db:
+            saved_proxy = db.execute("SELECT value FROM app_settings WHERE key='collector_proxy'").fetchone()
+            if saved_proxy:
+                try:
+                    document = json.loads(saved_proxy[0])
+                    if document["version"] != 1:
+                        raise ValueError
+                    protected = b64decode(document["protected"], validate=True)
+                    self.saved_proxy = validate_collector_proxy(_dpapi(protected, False).decode("utf-8") if protected else "")
+                except (ValueError, OSError, KeyError, TypeError, AttributeError):
+                    self.proxy_error = "无法恢复已保存的采集代理，请重新填写或清空后保存。"
             saved = db.execute("SELECT value FROM app_settings WHERE key='collector_interval'").fetchone()
             if saved is None:
                 previous = db.execute("SELECT selection_json FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
@@ -643,7 +684,8 @@ class Collector:
                 "verification_issue": {key:issue[key] for key in ("id","gid","url","error","in_queue")} if issue else None,
                 "has_credentials": bool(settings.get("cookies")),
                 "host": settings.get("host","exhentai.org"), "interval": (self.settings or {}).get("interval",self.saved_interval),
-                "proxy": settings.get("proxy",""), "refresh_days": settings.get("refresh_days",7),
+                "proxy": settings.get("proxy",self.saved_proxy), "saved_proxy": self.saved_proxy, "proxy_error": self.proxy_error,
+                "refresh_days": settings.get("refresh_days",7),
                 "skip_existing": settings.get("skip_existing",False),
                 "collection_mode": settings.get("collection_mode","rounds"),
                 "batch_size": settings.get("batch_size",1000),
@@ -651,6 +693,17 @@ class Collector:
                 "busy": bool(self.thread and self.thread.is_alive()),
                 "cooldown_until": self.cooldown_until, "cooldown_probe_after": self.cooldown_probe_after, "job": job,
             }
+
+    def save_proxy(self, value):
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                raise ValueError("请先暂停采集，再修改采集代理。")
+            proxy = validate_collector_proxy(value)
+            encoded = encode_collector_proxy(proxy)
+            with self.store.connection() as db:
+                db.execute("INSERT INTO app_settings(key,value) VALUES('collector_proxy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (encoded,))
+            self.saved_proxy, self.proxy_error = proxy, ""
+            return {"proxy": proxy, "saved": True}
 
     def configure(self, values):
         with self.lock:
@@ -671,15 +724,9 @@ class Collector:
                     raise ValueError(f"ExHentai 需要填写 {name}。")
             if values.get("ipb_member_id") and not str(values["ipb_member_id"]).strip().isdigit():
                 raise ValueError("ipb_member_id 应为数字。")
-            proxy = str(values.get("proxy","")).strip()
-            if proxy:
-                parsed = urlparse(proxy)
-                if parsed.scheme not in {"http","https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"","/"}:
-                    raise ValueError("代理请填写 HTTP 代理地址，例如 http://127.0.0.1:7890；系统网络已可访问时可留空。")
-                try:
-                    parsed.port
-                except ValueError:
-                    raise ValueError("代理端口不正确。") from None
+            if self.proxy_error and "proxy" not in values:
+                raise ValueError(self.proxy_error)
+            proxy = validate_collector_proxy(values.get("proxy", self.saved_proxy))
             raw_interval = values.get("interval",self.saved_interval)
             if isinstance(raw_interval, bool):
                 raise ValueError("请求间隔请选择 1、1.5、2、2.5 或 3 秒。")
@@ -706,8 +753,11 @@ class Collector:
                 raise ValueError("评分优先选项须为开关值。")
             cookie_header = self.settings["cookies"] if reuse else "; ".join(cookies)
             same_access = self.settings and all(self.settings.get(key)==value for key,value in (("host",host),("cookies",cookie_header),("proxy",proxy)))
+            encoded_proxy = encode_collector_proxy(proxy)
             with self.store.connection() as db:
                 db.execute("INSERT INTO app_settings(key,value) VALUES('collector_interval',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(interval),))
+                db.execute("INSERT INTO app_settings(key,value) VALUES('collector_proxy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (encoded_proxy,))
+            self.saved_proxy, self.proxy_error = proxy, ""
             self.saved_interval = interval
             self.settings = {"host":host,"cookies":cookie_header,"proxy":proxy,"interval":interval,"refresh_days":days,"skip_existing":skip_existing,"collection_mode":mode,"batch_size":batch_size,"rating_priority":rating_priority}
             self.verified = bool(self.verified and same_access)

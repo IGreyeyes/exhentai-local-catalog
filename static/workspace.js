@@ -18,6 +18,20 @@
     const panel = maintenancePanel(target);
     if (!panel) return false;
     for (const item of panels) item.hidden = item !== panel;
+    const network = panel.id === "network-section";
+    document.querySelector(".maintenance-tabs").hidden = network;
+    document.querySelector(".maintenance-workspace").classList.toggle("network-workspace", network);
+    for (const link of document.querySelectorAll('.sidebar a[href="/maintenance"], .sidebar .nav-network')) {
+      const active = link.classList.contains("nav-network") === network;
+      link.classList.toggle("selected", active);
+      if (active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    }
+    const title = network ? "网络代理" : "资料库维护";
+    document.querySelector(".intro h1").textContent = title;
+    document.querySelector(".topbar strong").textContent = title;
+    document.querySelector(".intro p").textContent = network ? "设置客户端的网络连接方式，并测试连接。" : "按需选择维护工具，所有操作进度留在当前页面。";
+    document.title = `${title} · EX资料库`;
     for (const link of maintenanceLinks) {
       const active = link.hash === `#${panel.id}`;
       if (active) link.setAttribute("aria-current", "location");
@@ -53,11 +67,12 @@
     if (!selectTool(initial)) selectTool(panels[0]);
     // Keep fragment links (also in help text) and browser history working.
     document.addEventListener("click", event => {
-      const link = event.target.closest('a[href^="#"]');
+      const link = event.target.closest('a[href^="#"], .sidebar .nav-network, .sidebar a[href="/maintenance"]');
       if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-      if (maintenancePanel(link.hash.slice(1))) {
+      const target = link.hash.slice(1) || "cloud-sync-section";
+      if (maintenancePanel(target)) {
         event.preventDefault();
-        selectTool(link.hash.slice(1), {updateURL: true, focus: true});
+        selectTool(target, {updateURL: true, focus: true});
       }
     });
     addEventListener("hashchange", () => selectTool(location.hash.slice(1)));

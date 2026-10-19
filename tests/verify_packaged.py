@@ -30,6 +30,11 @@ def verify(program_directory=None):
     environment.pop("PYTHONPATH", None)
     report_path = PROJECT / "logs" / "desktop-exe-check.json"
     report_path.parent.mkdir(parents=True,exist_ok=True)
+    first_run_report = report_path.with_name("desktop-first-run-check.json")
+    result = subprocess.run([str(exe), "--verify-first-run", str(first_run_report)], env=environment, creationflags=subprocess.CREATE_NO_WINDOW, timeout=60)
+    first_run = json.loads(first_run_report.read_text(encoding="utf-8"))
+    if result.returncode or not first_run.get("passed") or not first_run.get("frozen"):
+        raise AssertionError(first_run)
     with tempfile.TemporaryDirectory(prefix="excatalog-desktop-check-",dir=PROJECT / "logs") as directory:
         for expected in ("extended","thumbnails"):
             result = subprocess.run([str(exe), "--verify-desktop", str(report_path), directory], env=environment, creationflags=subprocess.CREATE_NO_WINDOW, timeout=45)

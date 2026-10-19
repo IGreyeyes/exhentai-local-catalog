@@ -2,6 +2,7 @@
 (() => {
   let state=null,token="",actionBusy=false,pollBusy=false,settingsDirty=false;
   let preview=null,previewRevision=0,initialStatus=true,errorRowsKey="";
+  let proxyTimer=null,proxySaving=null,savedProxy=null;
   const ui=id=>document.getElementById(id);
   function acceptState(data){
     state=data;render();
@@ -11,6 +12,35 @@
   };
   const labels={running:"采集中",paused:"已暂停",awaiting_next:"本轮已结束 · 等待继续",completed:"采集完成",completed_with_errors:"已处理完 · 有失败项",cancelled:"任务已结束",preparing:"正在准备"};
   function feedback(text,error=false){ui("collector-feedback").textContent=text;ui("collector-feedback").classList.toggle("error",error);}
+  function credentialFeedback(text,error=false){
+    ui("credential-feedback").hidden=false;
+    ui("credential-feedback").textContent=text;
+    ui("credential-feedback").classList.toggle("error",error);
+    feedback(text,error);
+  }
+  function proxyFeedback(text,error=false){
+    ui("collector-proxy-status").textContent=text;
+    ui("collector-proxy-status").classList.toggle("error",error);
+  }
+  async function saveProxy(){
+    clearTimeout(proxyTimer);
+    if(!token||actionBusy)return;
+    if(proxySaving){await proxySaving;return saveProxy();}
+    const value=ui("collector-proxy").value.trim();
+    if(value===savedProxy){proxyFeedback(value?"采集代理已保存，下次打开会恢复；应用本次设置后生效。":"未设置采集代理，默认使用「网络代理」设置。");return;}
+    if(!ui("collector-proxy").validity.valid){proxyFeedback("代理地址尚未保存，请填写完整的 HTTP 地址。",true);return;}
+    proxyFeedback("正在保存采集代理…");
+    proxySaving=(async()=>{
+      try{
+        const response=await fetch("/api/collector/proxy",{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify({proxy:value}),keepalive:true});
+        const data=await response.json();if(!response.ok)throw new Error(data.error||"代理保存失败，请重试。");
+        savedProxy=data.proxy;
+        if(ui("collector-proxy").value.trim()===value)proxyFeedback(value?"采集代理已保存，下次打开会恢复；应用本次设置后生效。":"已保存清空状态，默认使用「网络代理」设置。");
+      }catch(error){proxyFeedback(error.message==="Failed to fetch"?"采集代理未保存，请检查本地服务后重试。":error.message,true);}
+    })();
+    await proxySaving;proxySaving=null;
+    if(ui("collector-proxy").value.trim()!==value)return saveProxy();
+  }
   function refreshDays(){return Number(ui("collector-refresh").value==="custom"?ui("collector-custom-days").value:ui("collector-refresh").value);}
   function batchSize(){return Number(ui("collector-batch-size").value==="custom"?ui("collector-custom-batch-size").value:ui("collector-batch-size").value);}
   function savedTask(){return Boolean(state?.job&&["paused","awaiting_next","completed_with_errors"].includes(state.job.state));}
@@ -148,7 +178,12 @@
     if(!state)return;
     const job=state.job;
     const jobLabel=job?.collection_mode==="batch"&&job.state==="completed"?"本批完成":job?.collection_mode==="batch"&&job.state==="completed_with_errors"?"本批完成 · 有失败项":job?(labels[job.state]||job.state):"";
-    ui("collector-config-state").textContent=settingsDirty?"设置已修改，请先应用":state.verified?`已验证 · ${state.host}`:state.configured?"设置已应用，可先预估耗时":"尚未配置";
+    ui("collector-config-state").textContent=settingsDirty?"设置已修改，请先应用":state.verified?`已验证 · ${state.host}`:state.configured?"设置已应用，请验证后开始采集":"尚未配置";
+    const sameHost=ui("collector-host").value===state.host;
+    const loaded=state.has_credentials&&sameHost;
+    ui("credential-state").textContent=loaded?`登录信息已载入 · ${state.host} · ${state.verified?"源站访问已验证":"待验证源站访问"}`:state.has_credentials?"源站已更改，请填写对应登录信息并应用设置":state.configured?"当前未使用登录信息 · E-Hentai 可尝试直接验证":"尚未载入登录信息，可填写 Cookie 或导入加密登录文件";
+    ui("credential-state").classList.toggle("loaded",Boolean(loaded));
+    ["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).placeholder=loaded?"登录信息已载入，留空沿用":id==="cookie-igneous"?"ExHentai 需要填写":"Cookie 的 Value");
     ui("collector-summary").textContent=job?jobLabel:"按轮逐步补充收藏数";
     ui("sidebar-collector").textContent=job?jobLabel:"采集工具已就绪";
     ui("collector-job").hidden=!job;
@@ -217,11 +252,13 @@
   }
   async function action(path,payload={}){
     if(actionBusy)return;
+    if(path==="settings"){await saveProxy();if(actionBusy)return;}
     let focusProgress=false;
     invalidatePreview();
     const revision=previewRevision,key=scopeKey();
     actionBusy=true;updateControls();feedback(path==="preview"?"正在统计待抓取数量和预计耗时，不访问源站…":path==="verify"?(payload.recover_cooldown?"正在单次验证客户端访问，成功后解除冷却…":"正在随机取样并验证源站访问，请稍候…"):"正在处理…");
     try{
+      if(path==="settings"){clearTimeout(proxyTimer);if(proxySaving)await proxySaving;}
       const response=await fetch(`/api/collector/${path}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify(payload)});
       const data=await response.json();
       if(!response.ok)throw new Error(data.error||"操作失败");
@@ -230,7 +267,7 @@
         else feedback("搜索或设置已变化，请重新预估。",true);
       }else if(path==="verify")feedback(data.no_request?data.message:`${data.unavailable?.length?`已跳过 ${number(data.unavailable.length)} 条不可访问作品，失败记录已保留。\n${data.unavailable.map(item=>`作品 ID ${item.gid}：${item.error}`).join("\n")}\n`:""}${data.cooldown_cleared?"冷却已解除，原任务保持暂停。":""}随机验证成功：ID ${data.gid} 的收藏数为 ${number(data.favorite_count)}。${data.verification_only?"本条仅用于访问验证，已有收藏数、来源和采集时间未改写。":"本条读取结果已保存。"}现在请预估耗时，再确认采集。`);
       else feedback({settings:"设置已应用。可先预估耗时，再确认采集。",start:data.job?.state==="completed"?data.job.message:"计划已保存，本轮已开始采集，可随时暂停。",next_round:"下一轮已开始。本轮结束后会再次自动停止。",next_batch:data.job?.state==="completed"?data.job.message:"下一批已开始采集，沿用上一批的搜索条件。",pause:"已请求暂停，正在发出的请求会等待结束。",resume:"已按预估继续采集。",retry:"已按预估重试失败项。",cancel:"任务已结束，已采集的收藏数保留。"}[path]||"操作完成。");
-      if(path==="settings") {settingsDirty=false;["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");}
+      if(path==="settings") {settingsDirty=false;savedProxy=data.proxy;proxyFeedback("采集代理已保存，下次打开会恢复。");["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");credentialFeedback(data.has_credentials?"登录信息已应用，输入框留空即可沿用；请验证源站访问。":"设置已应用，当前未使用登录信息。");}
       if(path==="skip_unavailable")feedback(data.message);
       if(path!=="preview"&&path!=="verify"){
         acceptState(data);
@@ -256,18 +293,21 @@
   }
   async function importCredentials(file){
     if(actionBusy||!file)return;
-    if(file.size<1||file.size>20000){feedback("请选择有效的 .ehcred 登录文件。",true);return;}
-    actionBusy=true;updateControls();feedback("正在解密并载入登录信息…");
+    if(file.size<1||file.size>32768){credentialFeedback("请选择有效的 .ehcred 登录文件。",true);ui("credential-file").value="";return;}
+    clearTimeout(proxyTimer);
+    actionBusy=true;updateControls();ui("credential-import").textContent="正在导入…";credentialFeedback("正在解密并载入登录信息…");
     try{
+      if(proxySaving)await proxySaving;
       const bytes=new Uint8Array(await file.arrayBuffer());
       let binary="";for(let offset=0;offset<bytes.length;offset+=8192)binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
       const response=await fetch("/api/credentials/import",{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify({file:btoa(binary),settings:settingsPayload(false)})});
       const data=await response.json();if(!response.ok)throw new Error(data.error||"登录文件导入失败。");
-      state=data;settingsDirty=false;ui("collector-host").value=data.host;ui("collector-proxy").value=data.proxy;
+      state=data;settingsDirty=false;savedProxy=data.proxy;ui("collector-host").value=data.host;ui("collector-proxy").value=data.proxy;
+      proxyFeedback("登录文件中的采集代理已保存，下次打开会恢复。");
       ["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");
-      invalidatePreview();render();feedback("加密登录信息已载入内存。请先随机验证源站访问，再开始采集。");
-    }catch(error){feedback(error.message==="Failed to fetch"?"无法连接本地服务，登录文件没有导入。":error.message,true);}
-    finally{ui("credential-file").value="";actionBusy=false;await refresh();updateControls();}
+      invalidatePreview();render();credentialFeedback("导入成功：登录信息已载入，输入框留空即可沿用。请先验证源站访问，再点击“开始采集”。");
+    }catch(error){credentialFeedback(error.message==="Failed to fetch"?"无法连接本地服务，登录文件没有导入。":error.message,true);}
+    finally{ui("credential-file").value="";ui("credential-import").textContent="导入加密登录文件";actionBusy=false;await refresh();updateControls();}
   }
   ui("collector-settings").onsubmit=event=>{
     event.preventDefault();
@@ -276,6 +316,12 @@
   ui("credential-export").onclick=exportCredentials;
   ui("credential-import").onclick=()=>ui("credential-file").click();
   ui("credential-file").onchange=event=>importCredentials(event.target.files?.[0]);
+  ui("credential-file").addEventListener("cancel",()=>credentialFeedback("已取消导入，当前登录状态保留。"));
+  ui("collector-proxy").addEventListener("input",()=>{clearTimeout(proxyTimer);proxyFeedback("代理地址已修改，正在等待保存…");proxyTimer=setTimeout(saveProxy,450);});
+  ui("collector-proxy").addEventListener("change",saveProxy);
+  ui("collector-proxy").addEventListener("blur",saveProxy);
+  document.addEventListener("visibilitychange",()=>{if(document.hidden)saveProxy();});
+  addEventListener("pagehide",saveProxy);
   ui("collector-verify").onclick=()=>action("verify",savedTask()?{use_job:true}:{query:submittedFilters.toString()});
   ui("collector-recover").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),recover_cooldown:true});
   ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),retry_unavailable:true,recover_cooldown:Boolean(state?.cooldown_until>Date.now()/1000)});
@@ -298,7 +344,10 @@
       const response=await fetch("/api/status");
       const data=await response.json();token=data.action_token||"";
       await refresh();
-      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=state.proxy;ui("collector-interval").value=String(state.interval);ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);updateControls();}
+      savedProxy=state?.proxy_error?null:(state?.saved_proxy??state?.proxy);
+      if(state?.proxy_error)proxyFeedback(state.proxy_error,true);
+      else if(savedProxy)proxyFeedback("已恢复上次保存的采集代理；应用本次设置后生效。");
+      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=savedProxy??state.proxy;ui("collector-interval").value=String(state.interval);ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);settingsDirty=Boolean(state.configured&&savedProxy!==null&&savedProxy!==state.proxy);render();}
     }catch(error){feedback("采集工具尚未连接，请重新启动服务后刷新页面。",true);}
   })();
   setInterval(()=>{if(!document.hidden)refresh();},3000);

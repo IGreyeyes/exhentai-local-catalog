@@ -7,6 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -250,12 +251,17 @@ class NetworkApiTests(unittest.TestCase):
         collector.verification_unavailable.add(1)
         collector.cooldown_until = time.time() + 1000
         cooldown = collector.cooldown_until
+        from covers import CoverUnavailable
+        with patch.object(self.server.cover_cache, "downloader", side_effect=CoverUnavailable("test timeout")):
+            with self.assertRaises(CoverUnavailable):
+                self.server.cover_cache.get("https://ehgt.org/test-cover.jpg")
         result = self.post("/api/network/settings", {**DEFAULTS, "fallback": "direct"})
         self.assertEqual(result["fallback"], "direct")
         self.assertFalse(collector.verified)
         self.assertIsNone(collector.preview_data)
         self.assertFalse(collector.verification_unavailable)
         self.assertEqual(collector.cooldown_until, cooldown)
+        self.assertEqual(self.server.cover_cache.stats()["failed"], 0)
         self.assertEqual(NetworkSettings(self.root).status()["fallback"], "direct")
         with self.assertRaises(HTTPError) as raised:
             self.post("/api/network/test", {"settings": DEFAULTS, "target": "exhentai"})
@@ -276,6 +282,18 @@ class NetworkApiTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             self.post("/api/network/test", {"settings": DEFAULTS, "target": "http://localhost/"})
         self.assertEqual(raised.exception.code, 400); raised.exception.close()
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI")
+    def test_cover_cache_error_does_not_leave_old_access_verification_active(self):
+        collector = self.server.collector
+        collector.verified = True
+        collector.preview_data = {"test": True}
+        with patch.object(self.server.cover_cache, "retry_failed", side_effect=sqlite3.OperationalError("test cache busy")):
+            with self.assertRaises(HTTPError) as raised:
+                self.post("/api/network/settings", {**DEFAULTS, "fallback": "direct"})
+        self.assertEqual(raised.exception.code, 503); raised.exception.close()
+        self.assertFalse(collector.verified)
+        self.assertIsNone(collector.preview_data)
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI")
     def test_collector_proxy_autosaves_without_login_and_survives_restart_and_clear(self):

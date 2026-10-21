@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/maintenance.css">
   <link rel="stylesheet" href="/client-updates.css">
   <script src="/maintenance.js" defer></script>
+  <script src="/cover-retry.js" defer></script>
   <script src="/cloud-sync.js" defer></script>
   <link rel="stylesheet" href="/network-settings.css">
   <script src="/network-settings.js" defer></script>
@@ -230,7 +231,10 @@
         <section class="maintenance-card maintenance-section" id="covers-section" aria-labelledby="covers-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">▧</span><div><h2 id="covers-title">封面缓存</h2><p>可见封面首次下载后保存在本机，再次查看直接读取缓存。</p></div></div>
           <div class="cover-cache-stats"><div><span>已缓存</span><strong id="cover-cache-count">—</strong></div><div><span>缓存大小</span><strong id="cover-cache-size">—</strong></div><div><span>暂时失败</span><strong id="cover-cache-failed">—</strong></div></div>
-          <p class="path-hint">缓存位置：<span id="cover-cache-path">—</span></p><p class="field-hint">封面请求不携带登录 Cookie。失败地址 24 小时内不会重复请求；封面缓存可重新生成，不包含在资料备份中。</p>
+          <p class="path-hint">缓存位置：<span id="cover-cache-path">—</span></p>
+          <button id="cover-retry" class="button secondary" type="button">重试失败封面</button>
+          <p id="cover-retry-feedback" class="field-hint cover-retry-feedback" role="status" hidden></p>
+          <p class="field-hint">网络失败后等待 1 分钟，再次加载时重试；网络恢复后也可主动重试，已下载封面保留。服务器限流时仍需等待冷却。封面使用「网络代理」页的设置，不携带登录 Cookie，也不包含在资料备份中。</p>
         </section>
         </div>
         </div>

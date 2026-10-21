@@ -67,7 +67,7 @@
     busy = true; controls();
     try {
       render(await request("/api/network/settings", settings));
-      message("代理设置已保存，后续请求使用新设置。采集前请重新验证源站访问。", "success");
+      message("代理设置已保存，普通封面失败等待已解除，返回列表可重试；服务器冷却仍保留。采集前请重新验证源站访问。", "success");
     } catch (error) { message(error.message || "保存失败，原设置已保留。", "error"); }
     finally { busy = false; controls(); }
   });

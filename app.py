@@ -22,6 +22,7 @@ from translations import Translations
 from favorites import Collector, FavoriteStore, JOIN_FAVORITES, JOIN_RATINGS, gallery_url
 from maintenance import LibraryMaintenance, MaintenanceManager, recover_import
 from covers import CoverCache, CoverUnavailable, download_public_cover
+from client_version import APP_VERSION
 from credentials import export_credentials, import_credentials
 from favorite_transfer import MAX_FILE_BYTES, snapshot_share_info
 from collector_identity import MAX_IDENTITY_BYTES, parse_identity
@@ -331,7 +332,7 @@ class Catalog:
                     item=dict(row)
                     item["favorite_rating"] = describe_favorite_rating(item)
                     item["metadata_available"]=item.pop("catalog_gid") is not None
-                    item["cover_path"] = f"/api/cover/{item['gid']}" if item["metadata_available"] else None
+                    item["cover_path"] = f"/api/cover/{item['gid']}?v={APP_VERSION}" if item["metadata_available"] else None
                     failure_token=item.pop("failure_token")
                     token=str((failure_token if item["collection_status"]=="failed" else None) or item.get("token") or "")
                     item.pop("token",None)
@@ -395,7 +396,7 @@ class Catalog:
                 for row in rows:
                     item = dict(row)
                     item["favorite_rating"] = describe_favorite_rating(item)
-                    item["cover_path"] = f"/api/cover/{row['gid']}"
+                    item["cover_path"] = f"/api/cover/{row['gid']}?v={APP_VERSION}"
                     item["tags"] = [t[0] for t in db.execute("SELECT t.name FROM gid_tid AS gt JOIN tag AS t ON t.id=gt.tid WHERE gt.gid=? ORDER BY t.name", (row["gid"],))]
                     token = str(item.pop("token"))
                     item["gallery_path"] = f"/g/{row['gid']}/{token}/" if re.fullmatch(r"[0-9a-fA-F]{10}", token) else None
@@ -568,7 +569,7 @@ class Handler(BaseHTTPRequestHandler):
                     path, content_type = self.server.cover_cache.get(source)
                     self.reply_file(path, content_type)
                 except (ValueError, CoverUnavailable):
-                    self.reply_file(STATIC_ROOT / "cover-placeholder.svg", "image/svg+xml", "private, max-age=3600")
+                    self.reply_file(STATIC_ROOT / "cover-placeholder.svg", "image/svg+xml", "no-store")
             elif request.path.startswith("/api/"):
                 with self.server.catalog_gate:
                     if request.path == "/api/status":
@@ -590,6 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                 files = {"/": ("index.html", "text/html"), "/records": ("records.html", "text/html"), "/records/": ("records.html", "text/html"), "/maintenance": ("maintenance.html", "text/html"), "/maintenance/": ("maintenance.html", "text/html"), "/maintenance.css": ("maintenance.css", "text/css"), "/service.js": ("service.js", "text/javascript"), "/records.js": ("records.js", "text/javascript"), "/records.css": ("records.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/collector.js": ("collector.js", "text/javascript"), "/maintenance.js": ("maintenance.js", "text/javascript"), "/style.css": ("style.css", "text/css"), "/favicon.svg": ("favicon.svg", "image/svg+xml"), "/cover-placeholder.svg": ("cover-placeholder.svg", "image/svg+xml")}
                 files["/platform.js"] = ("platform.js", "text/javascript")
                 files["/gallery-cards.js"] = ("gallery-cards.js", "text/javascript")
+                files["/cover-retry.js"] = ("cover-retry.js", "text/javascript")
                 files["/client-updates.css"] = ("client-updates.css", "text/css")
                 files["/cloud-sync.js"] = ("cloud-sync.js", "text/javascript")
                 files["/network-settings.js"] = ("network-settings.js", "text/javascript")
@@ -658,7 +660,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload,dict):
                 raise ValueError("请求格式不正确。")
-            if self.path == "/api/network/settings":
+            if self.path == "/api/covers/retry":
+                if payload:
+                    raise ValueError("重试封面不接受额外选项。")
+                if self.server.maintenance.stopping:
+                    raise ValueError("服务正在停止，请重新启动后再操作。")
+                result = self.server.cover_cache.retry_failed()
+            elif self.path == "/api/network/settings":
                 with self.server.catalog_gate, self.server.collector.lock:
                     collector = self.server.collector
                     if self.server.maintenance.stopping:
@@ -671,6 +679,7 @@ class Handler(BaseHTTPRequestHandler):
                     collector.response_times.clear()
                     collector.verification_unavailable.clear()
                     collector.verification_issues.clear()
+                    self.server.cover_cache.retry_failed(throttle=False)
             elif self.path == "/api/network/test":
                 if set(payload) != {"settings", "target"}:
                     raise ValueError("连接测试参数不正确。")

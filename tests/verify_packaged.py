@@ -106,10 +106,17 @@ def verify(program_directory=None):
             encrypted = (root / "data" / "network-settings.ehproxy").read_bytes()
             if b"test-packaged-proxy-password" in encrypted or b"test-packaged-proxy-user" in encrypted:
                 raise AssertionError("Packaged proxy preferences were not encrypted")
-            for asset in ("network-settings.js", "network-settings.css"):
+            for asset in ("network-settings.js", "network-settings.css", "cover-retry.js"):
                 with opener.open(base + "/" + asset, timeout=10) as response:
                     if response.status != 200 or not response.read():
-                        raise AssertionError("Packaged network settings asset missing")
+                        raise AssertionError("Packaged network or cover retry asset missing")
+            if post("/api/covers/retry", {}, token) != {"cleared": 0, "waiting": 0}:
+                raise AssertionError("Packaged cover retry API failed")
+            for page in ("/", "/records", "/maintenance"):
+                with opener.open(base + page, timeout=10) as response:
+                    if b'id="cover-retry"' not in response.read():
+                        raise AssertionError("Packaged cover retry button missing")
+            report["cover_retry"] = "retry API, script and all three page controls included"
             cloud = get("/api/cloud-sync")
             if cloud["enabled"] or cloud["upload_enabled"] or cloud["source_id"]:
                 raise AssertionError("Packaged cloud sync must start disabled without credentials")

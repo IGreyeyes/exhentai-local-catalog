@@ -1,7 +1,8 @@
 """Lazy, cookie-free cover downloads cached on local disk."""
 
 from contextlib import contextmanager
-from email.message import Message
+from email.utils import parsedate_to_datetime
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
@@ -16,11 +17,24 @@ import time
 SOURCE_HOSTS = {"ehgt.org", "s.exhentai.org", "exhentai.org"}
 PUBLIC_HOST = "ehgt.org"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-FAILURE_TTL = 24 * 60 * 60
+FAILURE_TTL = 60
+MANUAL_RETRY_INTERVAL = 5
 
 
 class CoverUnavailable(Exception):
-    pass
+    def __init__(self, message, retry_after=FAILURE_TTL, retry_blocked=False):
+        super().__init__(message)
+        self.retry_after = max(1, min(86400, int(retry_after)))
+        self.retry_blocked = retry_blocked
+
+
+def retry_delay(value, default):
+    """Honor a server's Retry-After without accepting an unbounded wait."""
+    try:
+        seconds = int(value) if str(value).strip().isdigit() else parsedate_to_datetime(value).timestamp() - time.time()
+        return max(FAILURE_TTL, min(86400, int(seconds)))
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return default
 
 
 def normalize_cover_url(value):
@@ -81,9 +95,12 @@ def download_public_cover(url, opener=None, network=None):
         return data, content_type, extension
     except HTTPError as error:
         code = error.code
+        retry_header = error.headers.get("Retry-After") if error.headers else None
+        blocked = code == 429 or bool(retry_header)
+        delay = retry_delay(retry_header, 300) if blocked else (3600 if code in {404, 410} else FAILURE_TTL)
         error.close()
-        raise CoverUnavailable(f"封面服务器返回 HTTP {code}。") from None
-    except (URLError, TimeoutError, ConnectionError, OSError):
+        raise CoverUnavailable(f"封面服务器返回 HTTP {code}。", delay, blocked) from None
+    except (URLError, TimeoutError, ConnectionError, OSError, HTTPException):
         raise CoverUnavailable("封面下载失败或超时。") from None
 
 
@@ -98,6 +115,9 @@ class CoverCache:
         self.rate_lock = threading.Lock()
         self.next_request_at = 0.0
         self.stripes = [threading.Lock() for _ in range(64)]
+        self.retry_lock = threading.Lock()
+        self.retry_generation = 0
+        self.next_manual_retry_at = 0.0
         with self.connection() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
@@ -109,6 +129,10 @@ class CoverCache:
                 );
                 CREATE INDEX IF NOT EXISTS covers_status_checked ON covers(status,checked_at DESC);
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(covers)")}
+            for name, default in (("retry_seconds", FAILURE_TTL), ("retry_blocked", 0)):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE covers ADD COLUMN {name} INTEGER NOT NULL DEFAULT {default}")
 
     @contextmanager
     def connection(self):
@@ -139,8 +163,8 @@ class CoverCache:
         if row is None:
             return None
         if row["status"] == "failed":
-            if now - row["checked_at"] < FAILURE_TTL:
-                raise CoverUnavailable(row["error"] or "封面暂时不可用。")
+            if now - row["checked_at"] < row["retry_seconds"]:
+                raise CoverUnavailable(row["error"] or "封面暂时不可用。", row["retry_seconds"], bool(row["retry_blocked"]))
             return None
         path = self._safe_path(row["relative_path"])
         if not path.is_file() or path.stat().st_size != row["size_bytes"]:
@@ -160,6 +184,8 @@ class CoverCache:
         key = self.key(url)
         lock = self.stripes[int(key[:2], 16) % len(self.stripes)]
         with lock:
+            with self.retry_lock:
+                generation = self.retry_generation
             now = int(time.time())
             cached = self._cached(key, now)
             if cached:
@@ -183,20 +209,41 @@ class CoverCache:
                         temporary.unlink()
                 with self.connection() as db:
                     db.execute("""
-                        INSERT INTO covers VALUES (?,?,?,?,?,'ok',?,'')
+                        INSERT INTO covers(source_hash,source_url,relative_path,content_type,size_bytes,status,checked_at,error)
+                        VALUES (?,?,?,?,?,'ok',?,'')
                         ON CONFLICT(source_hash) DO UPDATE SET source_url=excluded.source_url,
                         relative_path=excluded.relative_path,content_type=excluded.content_type,
                         size_bytes=excluded.size_bytes,status='ok',checked_at=excluded.checked_at,error=''
                     """, (key, url, str(relative), content_type, len(data), now))
                 return destination, content_type
             except CoverUnavailable as error:
-                with self.connection() as db:
-                    db.execute("""
-                        INSERT INTO covers(source_hash,source_url,status,checked_at,error) VALUES (?,?,'failed',?,?)
-                        ON CONFLICT(source_hash) DO UPDATE SET source_url=excluded.source_url,status='failed',
-                        checked_at=excluded.checked_at,error=excluded.error
-                    """, (key, url, now, str(error)))
+                with self.retry_lock:
+                    # An old request must not restore a failure cleared by retry or a proxy change.
+                    # Server-requested waits remain binding even for requests already in flight.
+                    if generation == self.retry_generation or error.retry_blocked:
+                        with self.connection() as db:
+                            db.execute("""
+                                INSERT INTO covers(source_hash,source_url,status,checked_at,error,retry_seconds,retry_blocked)
+                                VALUES (?,?,'failed',?,?,?,?)
+                                ON CONFLICT(source_hash) DO UPDATE SET source_url=excluded.source_url,status='failed',
+                                checked_at=excluded.checked_at,error=excluded.error,
+                                retry_seconds=excluded.retry_seconds,retry_blocked=excluded.retry_blocked
+                            """, (key, url, int(time.time()), str(error), error.retry_after, int(error.retry_blocked)))
                 raise
+
+    def retry_failed(self, throttle=True):
+        """Release ordinary failures; preserve successful images and server cooldowns."""
+        with self.retry_lock:
+            now = time.monotonic()
+            if throttle and now < self.next_manual_retry_at:
+                raise ValueError("请间隔至少 5 秒再重试封面。")
+            with self.connection() as db:
+                cleared = db.execute("DELETE FROM covers WHERE status='failed' AND (retry_blocked=0 OR checked_at+retry_seconds<=?)", (int(time.time()),)).rowcount
+                waiting = db.execute("SELECT COUNT(*) FROM covers WHERE status='failed'").fetchone()[0]
+            self.retry_generation += 1
+            if throttle:
+                self.next_manual_retry_at = now + MANUAL_RETRY_INTERVAL
+        return {"cleared": cleared, "waiting": waiting}
 
     def stats(self):
         with self.connection() as db:

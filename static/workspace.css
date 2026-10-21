@@ -287,3 +287,6 @@ footer { font-size: 10px; color: #7e8e81; margin-top: 28px; padding-top: 16px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+.cover-retry-feedback { margin: 8px 0 16px; overflow-wrap: anywhere; }
+.cover-retry-feedback.error { color: #a32929; }

@@ -1,14 +1,18 @@
 from contextlib import closing
 from pathlib import Path
+from http.client import IncompleteRead
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import sqlite3
+import json
 import tempfile
 import threading
 import time
 import unittest
 
 from app import Catalog, Server
+from client_version import APP_VERSION
 from covers import CoverCache, CoverUnavailable, MAX_IMAGE_BYTES, detect_image, download_public_cover, normalize_cover_url
 
 JPEG = b"\xff\xd8\xff\xe0" + b"test-jpeg-data" + b"\xff\xd9"
@@ -32,6 +36,21 @@ class FakeOpener:
 
 
 class CoverUnitTests(unittest.TestCase):
+    def test_partial_response_and_server_retry_after(self):
+        for error, delay, blocked in (
+            (IncompleteRead(b"partial"), 60, False),
+            (HTTPError("https://ehgt.org/test.jpg", 429, "limited", {"Retry-After": "600"}, None), 600, True),
+            (HTTPError("https://ehgt.org/test.jpg", 429, "limited", {}, None), 300, True),
+            (HTTPError("https://ehgt.org/test.jpg", 503, "busy", {"Retry-After": "invalid"}, None), 300, True),
+            (HTTPError("https://ehgt.org/test.jpg", 404, "missing", {}, None), 3600, False),
+        ):
+            with self.subTest(error=type(error).__name__, delay=delay):
+                opener = FakeOpener(None)
+                with patch.object(opener, "open", side_effect=error), self.assertRaises(CoverUnavailable) as raised:
+                    download_public_cover("https://ehgt.org/test.jpg", opener)
+                self.assertEqual(raised.exception.retry_after, delay)
+                self.assertEqual(raised.exception.retry_blocked, blocked)
+
     def test_hosts_are_rewritten_to_public_thumbnail_host(self):
         path="/t/aa/bb/example-image.jpg"
         for host in ("ehgt.org","s.exhentai.org","exhentai.org"):
@@ -98,6 +117,67 @@ class CoverCacheTests(unittest.TestCase):
         self.assertEqual(len(attempts),2)
         self.assertEqual(cache.stats()["failed"],1)
 
+    def test_transient_failure_recovers_after_one_minute(self):
+        success = self.cache.downloader
+        with patch("covers.time.time", return_value=1000), patch.object(self.cache, "downloader", side_effect=CoverUnavailable("timeout")):
+            with self.assertRaises(CoverUnavailable): self.cache.get(self.source)
+        with patch("covers.time.time", return_value=1059), patch.object(self.cache, "downloader", wraps=success) as downloader:
+            with self.assertRaises(CoverUnavailable): self.cache.get(self.source)
+            downloader.assert_not_called()
+        with patch("covers.time.time", return_value=1060):
+            self.assertEqual(self.cache.get(self.source)[0].read_bytes(), JPEG)
+
+    def test_manual_retry_preserves_success_and_server_waits(self):
+        saved = self.cache.get(self.source)[0]
+        with patch.object(self.cache, "downloader", side_effect=CoverUnavailable("timeout")):
+            with self.assertRaises(CoverUnavailable): self.cache.get("https://ehgt.org/failed.jpg")
+        with patch.object(self.cache, "downloader", side_effect=CoverUnavailable("limited", 600, True)):
+            with self.assertRaises(CoverUnavailable): self.cache.get("https://ehgt.org/limited.jpg")
+        self.assertEqual(self.cache.retry_failed(), {"cleared": 1, "waiting": 1})
+        self.assertEqual(saved.read_bytes(), JPEG)
+        with self.assertRaisesRegex(ValueError, "5 秒"): self.cache.retry_failed()
+        # Saving proxy settings must also preserve the server-requested cooldown.
+        self.assertEqual(self.cache.retry_failed(throttle=False), {"cleared": 0, "waiting": 1})
+        with self.assertRaisesRegex(CoverUnavailable, "limited"): self.cache.get("https://ehgt.org/limited.jpg")
+        self.cache.get("https://ehgt.org/failed.jpg")
+        self.assertEqual(self.cache.stats()["cached"], 2)
+        with self.cache.connection() as db: db.execute("UPDATE covers SET checked_at=1 WHERE status='failed'")
+        self.assertEqual(self.cache.retry_failed(throttle=False), {"cleared": 1, "waiting": 0})
+
+    def test_legacy_cache_migrates_without_discarding_images(self):
+        path = self.root / "legacy.sqlite3"
+        with closing(sqlite3.connect(path)) as db:
+            db.executescript("CREATE TABLE covers(source_hash TEXT PRIMARY KEY,source_url TEXT NOT NULL,relative_path TEXT,content_type TEXT,size_bytes INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL,checked_at INTEGER NOT NULL,error TEXT NOT NULL DEFAULT '');")
+            url = normalize_cover_url(self.source)
+            db.execute("INSERT INTO covers(source_hash,source_url,status,checked_at,error) VALUES (?,?,'failed',?,'old timeout')", (CoverCache.key(url), url, int(time.time()) - 61))
+            db.commit()
+        cache = CoverCache(self.root / "legacy", path, downloader=self.cache.downloader, interval=0)
+        self.assertEqual(cache.get(self.source)[0].read_bytes(), JPEG)
+        restored = CoverCache(self.root / "legacy", path, downloader=lambda url: self.fail("Successful cache must be retained"))
+        self.assertEqual(restored.get(self.source)[0].read_bytes(), JPEG)
+
+    def test_retry_during_download_does_not_restore_an_old_failure(self):
+        started, finish = threading.Event(), threading.Event()
+        def download(url):
+            started.set()
+            if not finish.wait(3): raise AssertionError("Test download was not released")
+            raise CoverUnavailable("old request failed")
+        self.cache.downloader = download
+        errors = []
+        def worker():
+            try: self.cache.get(self.source)
+            except CoverUnavailable as error: errors.append(str(error))
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(3))
+            self.cache.retry_failed()
+        finally:
+            finish.set(); thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, ["old request failed"])
+        self.assertEqual(self.cache.stats()["failed"], 0)
+
 
 class CoverRouteTests(unittest.TestCase):
     def setUp(self):
@@ -119,7 +199,7 @@ class CoverRouteTests(unittest.TestCase):
     def test_search_returns_only_local_cover_route(self):
         with urlopen(self.url+"/api/search?title=Cover") as response:
             payload=response.read().decode("utf-8")
-        self.assertIn('"cover_path": "/api/cover/1"',payload)
+        self.assertIn(f'"cover_path": "/api/cover/1?v={APP_VERSION}"',payload)
         self.assertNotIn("ehgt.org",payload)
         self.assertNotIn("exhentai.org/t/",payload)
 
@@ -134,6 +214,25 @@ class CoverRouteTests(unittest.TestCase):
     def test_malformed_cover_route_is_not_a_remote_fetch(self):
         with self.assertRaises(HTTPError) as failure:urlopen(self.url+"/api/cover/not-a-number")
         self.assertEqual(failure.exception.code,404);failure.exception.close();self.assertEqual(self.calls,[])
+
+    def test_retry_api_recovers_placeholder_without_browser_cache_or_collecting(self):
+        def post(payload, authorized=True):
+            headers = {"Content-Type": "application/json", "X-Catalog-Token": self.server.action_token if authorized else ""}
+            return urlopen(Request(self.url + "/api/covers/retry", data=json.dumps(payload).encode(), headers=headers))
+        with patch.object(self.server.cover_cache, "downloader", side_effect=CoverUnavailable("timeout")):
+            with urlopen(self.url + "/api/cover/1") as response:
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertEqual(response.headers.get_content_type(), "image/svg+xml")
+        for payload, authorized, code in (({}, False, 403), ({"source": "https://example.invalid/"}, True, 400)):
+            with self.assertRaises(HTTPError) as raised: post(payload, authorized)
+            self.assertEqual(raised.exception.code, code); raised.exception.close()
+        with post({}) as response: self.assertEqual(json.load(response), {"cleared": 1, "waiting": 0})
+        self.assertEqual(self.calls, [])  # The action only makes visible covers eligible again.
+        with urlopen(self.url + f"/api/cover/1?v={APP_VERSION}&retry=1") as response:
+            self.assertEqual(response.read(), JPEG)
+            self.assertEqual(response.headers["Cache-Control"], "private, max-age=86400")
+        with self.server.catalog.favorites.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM favorites").fetchone()[0], 0)
 
 
 if __name__=="__main__":unittest.main()

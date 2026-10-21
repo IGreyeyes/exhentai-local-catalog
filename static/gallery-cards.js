@@ -75,7 +75,7 @@
       const failed=item.collection_status==="failed",hasCount=item.favorite_count!=null;
       const card=node("article",`saved-card${failed?" failed":""}${options.selected?.has(item.gid)?" selected":""}`);const content=node("div","saved-content");
       if(["extended","thumbnails"].includes(view)){
-        const cover=node("div","saved-cover"),image=node("img");image.src=item.cover_path||"/cover-placeholder.svg";image.alt="";image.loading="lazy";image.decoding="async";image.width=176;image.height=235;image.onerror=()=>{if(!image.src.endsWith("/cover-placeholder.svg"))image.src="/cover-placeholder.svg";};cover.append(image);card.append(cover);
+        const cover=node("div","saved-cover"),image=node("img");image.src=item.cover_path||"/cover-placeholder.svg";if(item.cover_path)image.dataset.coverPath=item.cover_path;image.alt="";image.loading="lazy";image.decoding="async";image.width=176;image.height=235;image.onerror=()=>{if(!image.src.endsWith("/cover-placeholder.svg"))image.src="/cover-placeholder.svg";};cover.append(image);card.append(cover);
       }
       const head=node("div","saved-card-head");
       if(options.onSelect){

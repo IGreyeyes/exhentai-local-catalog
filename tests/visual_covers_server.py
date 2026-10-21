@@ -7,11 +7,13 @@ import sqlite3
 import struct
 import sys
 import zlib
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import Catalog, Handler, Server
 from covers import CoverUnavailable
 from initialize_catalog import initialize
+from tests.test_covers import FakeOpener, FakeResponse
 
 
 def image_bytes():
@@ -51,9 +53,18 @@ def main():
             raise CoverUnavailable("封面服务器返回 HTTP 429。", 300, True)
         return image_bytes(), "image/png", "png"
     server.cover_cache.downloader = download
+    probe_calls = []
+    original_test = server.network.test
+    def test_network(values, target, cover_url=None):
+        if target != "cover": raise AssertionError("Fixture only tests cover images")
+        probe_calls.append(cover_url)
+        with patch("network_settings.build_opener", return_value=FakeOpener(FakeResponse(image_bytes(), "image/png"))):
+            return original_test(values, target, cover_url)
+    server.network.test = test_network
     class FixtureHandler(Handler):
         def do_GET(self):
             if self.path == "/test/cover-attempts": self.reply(calls)
+            elif self.path == "/test/cover-probes": self.reply({"count": len(probe_calls)})
             else: super().do_GET()
     server.RequestHandlerClass = FixtureHandler
     print(json.dumps({"base": f"http://127.0.0.1:{server.server_port}"}), flush=True)

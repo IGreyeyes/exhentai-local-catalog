@@ -75,7 +75,24 @@
       const failed=item.collection_status==="failed",hasCount=item.favorite_count!=null;
       const card=node("article",`saved-card${failed?" failed":""}${options.selected?.has(item.gid)?" selected":""}`);const content=node("div","saved-content");
       if(["extended","thumbnails"].includes(view)){
-        const cover=node("div","saved-cover"),image=node("img");image.src=item.cover_path||"/cover-placeholder.svg";if(item.cover_path)image.dataset.coverPath=item.cover_path;image.alt="";image.loading="lazy";image.decoding="async";image.width=176;image.height=235;image.onerror=()=>{if(!image.src.endsWith("/cover-placeholder.svg"))image.src="/cover-placeholder.svg";};cover.append(image);card.append(cover);
+        const cover=node("div","saved-cover"),image=node("img"),help=node("a","cover-test-link","测试封面连接 →");
+        help.href=`/maintenance?cover_gid=${item.gid}#network-section`;help.hidden=true;
+        help.title="封面暂不可用，打开网络代理页测试这张图片";help.setAttribute("aria-label",`测试作品 ID ${item.gid} 的封面连接`);
+        image.alt="";image.loading="lazy";image.decoding="async";image.width=176;image.height=235;
+        if(item.cover_path)image.dataset.coverPath=item.cover_path;
+        image.onload=async()=>{
+          const loaded=image.src;
+          if(loaded.endsWith("/cover-placeholder.svg")){help.hidden=false;return;}
+          if(!image.isConnected)return;
+          try{
+            const response=await fetch(`/api/cover/${item.gid}/status`,{cache:"no-store",signal:AbortSignal.timeout(10000)});
+            if(!response.ok)throw new Error();
+            const status=await response.json();
+            if(image.src===loaded)help.hidden=status.status==="ok";
+          }catch(error){if(image.src===loaded)help.hidden=false;}
+        };
+        image.onerror=()=>{help.hidden=false;if(!image.src.endsWith("/cover-placeholder.svg"))image.src="/cover-placeholder.svg";};
+        image.src=item.cover_path||"/cover-placeholder.svg";cover.append(image,help);card.append(cover);
       }
       const head=node("div","saved-card-head");
       if(options.onSelect){

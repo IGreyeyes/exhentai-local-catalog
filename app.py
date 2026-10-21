@@ -21,7 +21,7 @@ from prepare_database import DEFAULT_DATABASE, inspect_database
 from translations import Translations
 from favorites import Collector, FavoriteStore, JOIN_FAVORITES, JOIN_RATINGS, gallery_url
 from maintenance import LibraryMaintenance, MaintenanceManager, recover_import
-from covers import CoverCache, CoverUnavailable, download_public_cover
+from covers import CoverCache, CoverUnavailable, download_public_cover, normalize_cover_url
 from client_version import APP_VERSION
 from credentials import export_credentials, import_credentials
 from favorite_transfer import MAX_FILE_BYTES, snapshot_share_info
@@ -139,7 +139,12 @@ class Catalog:
         if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
             raise ValueError("作品 ID 不正确。")
         with self.connection() as db:
-            row = db.execute("SELECT thumb FROM gallery WHERE gid=?", (gid,)).fetchone()
+            try:
+                row = db.execute("SELECT thumb FROM gallery WHERE gid=?", (gid,)).fetchone()
+            except sqlite3.OperationalError as error:
+                if "no such column: thumb" in str(error).lower():
+                    raise ValueError("当前作品目录没有封面地址，请先更新作品目录。") from None
+                raise
         if row is None or not row[0]:
             raise ValueError("当前作品目录没有这张封面。")
         return row[0]
@@ -440,6 +445,29 @@ class Server(ThreadingHTTPServer):
                                     lambda: self.maintenance.stopping or self.maintenance.state.get("busy", False),
                                     transport=lambda *args, **kwargs: request_json(*args, **kwargs, network=self.network))
 
+    def cover_test_url(self, gid=None):
+        with self.catalog_gate:
+            if gid is not None:
+                if not re.fullmatch(r"[1-9]\d{0,17}", str(gid)):
+                    raise ValueError("作品 ID 不正确。")
+                try:
+                    return normalize_cover_url(self.catalog.cover_source(int(gid)))
+                except CoverUnavailable as error:
+                    raise ValueError(str(error)) from None
+            recent = self.cover_cache.latest_failed_source()
+            if recent:
+                return recent
+            with self.catalog.connection() as db:
+                if "thumb" not in {row[1] for row in db.execute("PRAGMA table_info(gallery)")}:
+                    raise ValueError("当前作品目录没有封面地址，请先更新作品目录。")
+                rows = db.execute("SELECT thumb FROM gallery ORDER BY gid DESC LIMIT 20").fetchall()
+            for row in rows:
+                try:
+                    return normalize_cover_url(row[0])
+                except (CoverUnavailable, ValueError):
+                    continue
+        raise ValueError("当前没有可测试的封面，请从需要检查的作品旁进入测试。")
+
     @contextmanager
     def exclusive_maintenance(self):
         with self.catalog_gate:
@@ -555,12 +583,21 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(request.query, max_num_fields=64)
             if request.path == "/api/network":
                 self.reply(self.server.network.status())
+            elif request.path == "/api/network/cover":
+                self.reply({"url": self.server.cover_test_url(parse_qs(request.query).get("gid", [None])[0])})
             elif request.path == "/api/cloud-sync":
                 self.reply(self.server.cloud_sync.status())
             elif request.path == "/api/release-history":
                 self.reply(self.server.release_history.info())
             elif request.path == "/api/maintenance":
                 self.reply({**self.server.maintenance.status(), "cover_cache": self.server.cover_cache.stats()})
+            elif match := re.fullmatch(r"/api/cover/(\d{1,18})/status", request.path):
+                try:
+                    with self.server.catalog_gate:
+                        source = self.server.catalog.cover_source(int(match[1]))
+                    self.reply(self.server.cover_cache.info(source))
+                except (ValueError, CoverUnavailable):
+                    self.reply({"status": "unavailable", "retry_after": 0, "blocked": False})
             elif match := re.fullmatch(r"/api/cover/(\d{1,18})", request.path):
                 gid = int(match[1])
                 try:
@@ -681,8 +718,17 @@ class Handler(BaseHTTPRequestHandler):
                     collector.verification_issues.clear()
                     self.server.cover_cache.retry_failed(throttle=False)
             elif self.path == "/api/network/test":
-                if set(payload) != {"settings", "target"}:
+                if set(payload) not in ({"settings", "target"}, {"settings", "target", "cover_url"}) or "cover_url" in payload and payload["target"] != "cover":
                     raise ValueError("连接测试参数不正确。")
+                cover_url = None
+                if payload["target"] == "cover":
+                    try:
+                        cover_url = normalize_cover_url(payload["cover_url"]) if "cover_url" in payload else self.server.cover_test_url()
+                    except CoverUnavailable as error:
+                        raise ValueError(str(error)) from None
+                    cover_state = self.server.cover_cache.info(cover_url)
+                    if cover_state["blocked"]:
+                        raise ValueError(f"封面服务器仍要求等待，请约 {cover_state['retry_after']} 秒后再测试；可先核对代理设置。")
                 with self.server.collector.lock:
                     collector = self.server.collector
                     if payload["target"] in ("e-hentai", "exhentai"):
@@ -690,7 +736,7 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError("源站仍处于保护冷却，可选择 GitHub 测试网络；恢复源站请使用采集区的单次验证。")
                         if collector.thread and collector.thread.is_alive():
                             raise ValueError("请先暂停采集，再测试源站连接。")
-                result = self.server.network.test(payload["settings"], payload["target"])
+                result = self.server.network.test(payload["settings"], payload["target"], cover_url)
             elif self.path == "/api/release-history/refresh":
                 if payload:
                     raise ValueError("刷新发布记录不接受额外选项。")

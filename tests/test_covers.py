@@ -21,6 +21,7 @@ WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"test"
 
 class FakeResponse:
     def __init__(self, data, content_type="image/jpeg", content_length=None):
+        self.status = 200
         self.data = data
         self.headers = {"Content-Type": content_type}
         if content_length is not None:
@@ -202,6 +203,36 @@ class CoverRouteTests(unittest.TestCase):
         self.assertIn(f'"cover_path": "/api/cover/1?v={APP_VERSION}"',payload)
         self.assertNotIn("ehgt.org",payload)
         self.assertNotIn("exhentai.org/t/",payload)
+
+    def test_cover_target_and_failure_status_only_read_local_data(self):
+        with urlopen(self.url + "/api/network/cover?gid=1") as response:
+            self.assertEqual(json.load(response)["url"], "https://ehgt.org/t/a/b/c.jpg")
+        with urlopen(self.url + "/api/cover/1/status") as response:
+            self.assertEqual(json.load(response)["status"], "unknown")
+        self.assertEqual(self.calls, [])
+        with patch.object(self.server.cover_cache, "downloader", side_effect=CoverUnavailable("test timeout")):
+            with urlopen(self.url + "/api/cover/1") as response: response.read()
+        with urlopen(self.url + "/api/cover/1/status") as response:
+            state = json.load(response)
+        self.assertEqual(state["status"], "failed")
+        self.assertFalse(state["blocked"])
+        with urlopen(self.url + "/api/network/cover") as response:
+            self.assertEqual(json.load(response)["url"], "https://ehgt.org/t/a/b/c.jpg")
+        self.assertEqual(self.calls, [])
+        with self.assertRaises(HTTPError) as raised: urlopen(self.url + "/api/network/cover?gid=invalid")
+        self.assertEqual(raised.exception.code, 400); raised.exception.close()
+
+    def test_cover_test_does_not_bypass_download_rate_limit(self):
+        from network_settings import DEFAULTS
+        with patch.object(self.server.cover_cache, "downloader", side_effect=CoverUnavailable("limited", 300, True)):
+            with urlopen(self.url + "/api/cover/1") as response: response.read()
+        payload = {"settings": DEFAULTS, "target": "cover", "cover_url": "https://ehgt.org/t/a/b/c.jpg"}
+        request = Request(self.url + "/api/network/test", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json", "X-Catalog-Token":self.server.action_token})
+        with patch.object(self.server.network, "test") as probe, self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+        self.assertEqual(raised.exception.code, 400)
+        self.assertIn("仍要求等待", json.load(raised.exception)["error"]); raised.exception.close()
+        probe.assert_not_called()
 
     def test_route_serves_cache_and_unknown_gid_gets_placeholder(self):
         with urlopen(self.url+"/api/cover/1") as response:

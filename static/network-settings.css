@@ -20,6 +20,10 @@
 .network-result[data-state="error"] { background: #fff5f4; border-color: #e5c5c0; color: #974b42; }
 .network-result[data-state="warning"] { background: #fff9ed; border-color: #e3d1a7; color: #806020; }
 #network-reload { margin-top: 8px; font-size: 12px; }
+.network-cover-info { margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: #f7f9f8; font-size: 12px; line-height: 1.8; }
+.network-cover-info p { margin: 0 0 8px; }
+#network-cover-url { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }
+#network-cover-url[hidden] { display: none; }
 #network-form .maintenance-actions { margin-top: 18px; }
 @media (max-width: 640px) {
   .network-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }

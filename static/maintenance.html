@@ -84,7 +84,13 @@
               <textarea id="network-domains" rows="4" maxlength="8000" spellcheck="false" placeholder="留空：客户端所有联网请求使用代理&#10;按需填写，例如：&#10;e-hentai.org&#10;exhentai.org"></textarea>
               <p class="field-hint">填写后，仅这些域名及其子域名走代理，其余直接连接。HTTP 代理也可连接 HTTPS 站点，本机资料库页面始终直接连接。</p>
               <label class="network-fallback">关闭自定义代理时<select id="network-fallback"><option value="system">跟随系统代理（默认）</option><option value="direct">直接连接</option></select></label>
-              <div class="network-test-row"><label>连接测试<select id="network-target"><option value="github">GitHub</option><option value="e-hentai">E-Hentai</option><option value="exhentai">ExHentai</option></select></label><button class="button secondary" id="network-test" type="button">测试连接</button></div>
+              <div class="network-test-row"><label>连接测试<select id="network-target"><option value="github">GitHub</option><option value="e-hentai">E-Hentai</option><option value="exhentai">ExHentai</option><option value="cover">封面图片（ehgt.org）</option></select></label><button class="button secondary" id="network-test" type="button">测试连接</button></div>
+              <div id="network-cover-info" class="network-cover-info" hidden>
+                <p id="network-cover-hint">测试具体封面图片，使用当前表单的连接方式，不使用已下载的图片缓存。</p>
+                <a id="network-cover-url" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" hidden></a>
+                <button id="network-cover-reload" class="button secondary" type="button">重新读取测试图片</button>
+                <p class="field-hint">点击图片地址可在浏览器核对。浏览器和客户端可能使用不同的代理；若限制代理域名，请包含 ehgt.org。测试不会自动保存设置或采集收藏数。</p>
+              </div>
               <div id="network-result" class="network-result" role="status" aria-live="polite">测试使用当前表单，不会自动保存，也不会携带源站 Cookie。</div>
               <div class="maintenance-actions"><button class="button primary" id="network-save" type="submit">保存代理设置</button></div>
             </fieldset>
@@ -233,6 +239,7 @@
           <div class="cover-cache-stats"><div><span>已缓存</span><strong id="cover-cache-count">—</strong></div><div><span>缓存大小</span><strong id="cover-cache-size">—</strong></div><div><span>暂时失败</span><strong id="cover-cache-failed">—</strong></div></div>
           <p class="path-hint">缓存位置：<span id="cover-cache-path">—</span></p>
           <button id="cover-retry" class="button secondary" type="button">重试失败封面</button>
+          <a class="button secondary" href="/maintenance?test=cover#network-section">测试封面连接</a>
           <p id="cover-retry-feedback" class="field-hint cover-retry-feedback" role="status" hidden></p>
           <p class="field-hint">网络失败后等待 1 分钟，再次加载时重试；网络恢复后也可主动重试，已下载封面保留。服务器限流时仍需等待冷却。封面使用「网络代理」页的设置，不携带登录 Cookie，也不包含在资料备份中。</p>
         </section>

@@ -69,30 +69,39 @@ class PublicCoverRedirect(HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, newurl)
 
 
+def cover_request(url):
+    return Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/132.0.0.0 Safari/537.36",
+        "Accept": "image/webp,image/png,image/jpeg,image/gif;q=0.8,*/*;q=0.1",
+        "Accept-Encoding": "identity",
+    })
+
+
+def read_cover_response(response):
+    """Share the same bounded image checks between display and connection tests."""
+    declared = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if declared and not declared.startswith("image/"):
+        raise CoverUnavailable("封面服务器没有返回图片。")
+    content_length = response.headers.get("Content-Length", "")
+    if content_length.isdigit() and int(content_length) > MAX_IMAGE_BYTES:
+        raise CoverUnavailable("封面文件超过大小限制。")
+    data = response.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise CoverUnavailable("封面文件超过大小限制。")
+    content_type, extension = detect_image(data)
+    return data, content_type, extension
+
+
 def download_public_cover(url, opener=None, network=None):
     """Fetch a public thumbnail. The request intentionally has no Cookie or Authorization header."""
     handlers = [PublicCoverRedirect()]
     if network is not None:
         handlers.append(network.handler())
     opener = opener or build_opener(*handlers)
-    request = Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/132.0.0.0 Safari/537.36",
-        "Accept": "image/webp,image/png,image/jpeg,image/gif;q=0.8,*/*;q=0.1",
-        "Accept-Encoding": "identity",
-    })
+    request = cover_request(url)
     try:
         with opener.open(request, timeout=25) as response:
-            declared = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-            if declared and not declared.startswith("image/"):
-                raise CoverUnavailable("封面服务器没有返回图片。")
-            content_length = response.headers.get("Content-Length", "")
-            if content_length.isdigit() and int(content_length) > MAX_IMAGE_BYTES:
-                raise CoverUnavailable("封面文件超过大小限制。")
-            data = response.read(MAX_IMAGE_BYTES + 1)
-            if len(data) > MAX_IMAGE_BYTES:
-                raise CoverUnavailable("封面文件超过大小限制。")
-        content_type, extension = detect_image(data)
-        return data, content_type, extension
+            return read_cover_response(response)
     except HTTPError as error:
         code = error.code
         retry_header = error.headers.get("Retry-After") if error.headers else None
@@ -244,6 +253,25 @@ class CoverCache:
             if throttle:
                 self.next_manual_retry_at = now + MANUAL_RETRY_INTERVAL
         return {"cleared": cleared, "waiting": waiting}
+
+    def info(self, source):
+        key = self.key(normalize_cover_url(source))
+        with self.connection() as db:
+            row = db.execute("SELECT status,checked_at,retry_seconds,retry_blocked FROM covers WHERE source_hash=?", (key,)).fetchone()
+        if row is None:
+            return {"status": "unknown", "retry_after": 0, "blocked": False}
+        remaining = max(0, row["checked_at"] + row["retry_seconds"] - int(time.time())) if row["status"] == "failed" else 0
+        return {"status": row["status"], "retry_after": remaining, "blocked": bool(row["retry_blocked"] and remaining)}
+
+    def latest_failed_source(self):
+        with self.connection() as db:
+            rows = db.execute("SELECT source_url FROM covers WHERE status='failed' ORDER BY checked_at DESC LIMIT 10").fetchall()
+        for row in rows:
+            try:
+                return normalize_cover_url(row[0])
+            except (CoverUnavailable, ValueError):
+                continue
+        return None
 
     def stats(self):
         with self.connection() as db:

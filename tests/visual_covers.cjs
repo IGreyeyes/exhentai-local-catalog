@@ -31,9 +31,33 @@ let server, browser, page;
   const before = await (await page.request.get(base + "/test/cover-attempts")).json();
   assert(Object.values(before).every(count => count === 1), "Initial downloads were repeated");
   const originalURL = page.url();
+  const failedCover = page.locator('.saved-cover:has(img[data-cover-path^="/api/cover/1?"])');
+  await failedCover.locator(".cover-test-link").waitFor({state: "visible"});
+  await failedCover.screenshot({path: path.join(output, "cover-failure-guidance.png")});
+  assert(await page.locator('.saved-cover:has(img[data-cover-path^="/api/cover/3?"]) .cover-test-link').isHidden(), "Healthy cover shows failure guidance");
+  await failedCover.locator(".cover-test-link").click();
+  await page.waitForFunction(() => !document.querySelector("#network-fields").disabled && !document.querySelector("#network-test").disabled && !document.querySelector("#network-cover-url").hidden);
+  assert(await page.locator("#network-target").inputValue() === "cover", "Cover test was not selected");
+  assert(await page.locator("#network-cover-url").getAttribute("href") === "https://ehgt.org/test-1.png", "The failing image URL was not carried over");
+  assert((await (await page.request.get(base + "/test/cover-probes")).json()).count === 0, "Navigation automatically tested the source");
+  await page.locator("#network-test").click();
+  await page.waitForFunction(() => document.querySelector("#network-result").dataset.state === "success");
+  assert((await page.locator("#network-result").textContent()).includes("image/png"), "Image content was not validated");
+  assert((await (await page.request.get(base + "/test/cover-probes")).json()).count === 1, "The image test was not performed exactly once");
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({width, height: 1100});
+    await page.locator("#network-cover-info").scrollIntoViewIfNeeded();
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), "Cover test overflow at " + width);
+    await page.screenshot({path: path.join(output, `cover-connection-test-${width}.png`)});
+  }
+  await page.setViewportSize({width: 1440, height: 1100});
+  await page.goto(originalURL);
+  await page.locator(".saved-card").last().scrollIntoViewIfNeeded();
+  await failedCover.locator(".cover-test-link").waitFor({state: "visible"});
   await page.locator("#cover-retry").click();
   await page.waitForFunction(() => document.querySelector('img[data-cover-path^="/api/cover/1?"]').naturalWidth === 120);
   await page.waitForFunction(() => document.querySelector("#cover-retry-feedback").textContent.includes("1 张封面仍需等待"));
+  await failedCover.locator(".cover-test-link").waitFor({state: "hidden"});
   assert(page.url() === originalURL, "Retry changed the search or page");
   assert(await page.locator("#cover-retry").isDisabled(), "Retry button permits rapid repeat clicks");
   const after = await (await page.request.get(base + "/test/cover-attempts")).json();
@@ -69,7 +93,7 @@ let server, browser, page;
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), "Maintenance overflows");
   await page.screenshot({path: path.join(output, "covers-maintenance-390.png")});
   assert(!errors.length, "Browser errors: " + errors.join("; "));
-  console.log(JSON.stringify({passed: true, recovery: true, cachedImagesRetained: true, rateLimitRetained: true, searchPreserved: true, errorFeedback: true, responsiveWidths: [1440, 390], browserErrors: errors}));
+  console.log(JSON.stringify({passed: true, failureGuidance: true, exactImageProbe: true, noAutomaticProbe: true, recovery: true, cachedImagesRetained: true, rateLimitRetained: true, searchPreserved: true, errorFeedback: true, responsiveWidths: [1440, 390], browserErrors: errors}));
 })().catch(async error => {
   if (page) {
     console.error(await page.evaluate(() => ({feedback: document.getElementById("cover-retry-feedback")?.textContent, images: [...document.querySelectorAll(".saved-cover img")].map(image => ({source: image.getAttribute("src"), width: image.naturalWidth, complete: image.complete}))})));

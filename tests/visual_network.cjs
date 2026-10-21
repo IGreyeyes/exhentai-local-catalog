@@ -65,6 +65,10 @@ let server, browser;
   await page.locator("#network-fallback").selectOption("direct");
   await page.locator("#network-save").click();
   await page.waitForFunction(() => document.getElementById("network-saved-note").textContent.includes("直接连接"));
+  await page.locator("#network-target").selectOption("cover");
+  await page.waitForFunction(() => document.getElementById("network-cover-hint").textContent.includes("没有封面地址"));
+  assert(await page.locator("#network-test").isDisabled(), "Missing image target must not run a homepage test");
+  assert(await page.locator("#network-cover-url").isHidden(), "Missing image target exposes a stale URL");
   for (const route of ["/", "/records", "/changelog", "/contact"]) {
     await page.goto(config.base + route);
     assert(await page.locator("a.nav-network").isVisible(), "Network navigation missing on " + route);

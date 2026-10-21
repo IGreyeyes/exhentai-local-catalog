@@ -3,6 +3,9 @@
   const ui = id => document.getElementById(id);
   if (!ui("network-form")) return;
   let token = "", loaded = false, busy = false;
+  let coverURL = "", coverLoading = false, coverRevision = 0;
+  const parameters = new URLSearchParams(location.search), coverGid = parameters.get("cover_gid");
+  if (coverGid || parameters.get("test") === "cover") ui("network-target").value = "cover";
   const routeLabels = {proxy: "自定义代理", system: "跟随系统", direct: "直接连接"};
   const customFields = ["host", "port", "username", "password", "domains", "clear-password"];
 
@@ -13,9 +16,12 @@
   function controls() {
     ui("network-fields").disabled = !loaded || busy;
     ui("network-reload").disabled = busy;
+    ui("network-cover-reload").disabled = busy || coverLoading;
+    ui("network-cover-info").hidden = ui("network-target").value !== "cover";
+    ui("network-test").disabled = !loaded || busy || (ui("network-target").value === "cover" && (!coverURL || coverLoading));
     for (const id of customFields) ui(`network-${id}`).disabled = !ui("network-enabled").checked;
     ui("network-password").disabled ||= ui("network-clear-password").checked;
-    ui("network-test").textContent = busy ? "正在处理…" : "测试连接";
+    ui("network-test").textContent = busy ? "正在处理…" : ui("network-target").value === "cover" ? "测试封面图片" : "测试连接";
     ui("network-result").setAttribute("aria-busy", String(busy));
   }
   function values() {
@@ -35,11 +41,28 @@
     ui("network-saved-note").textContent = state.error ? "设置需要重新保存" : `${state.saved ? "已保存" : "默认设置"} · ${state.enabled ? "自定义代理" : routeLabels[state.fallback]}`;
   }
   async function request(path, payload) {
-    const response = await fetch(path, payload === undefined ? {cache: "no-store"} : {
+    const response = await fetch(path, payload === undefined ? {cache: "no-store", signal: AbortSignal.timeout(15000)} : {
       method: "POST", headers: {"Content-Type": "application/json", "X-Catalog-Token": token}, body: JSON.stringify(payload)});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "操作失败，请重试。");
     return data;
+  }
+  async function loadCoverTarget() {
+    const revision = ++coverRevision;
+    coverLoading = true; coverURL = ""; controls();
+    ui("network-cover-url").hidden = true; ui("network-cover-url").removeAttribute("href");
+    ui("network-cover-hint").textContent = "正在读取测试图片地址…";
+    try {
+      const result = await request("/api/network/cover" + (coverGid ? "?gid=" + encodeURIComponent(coverGid) : ""));
+      if (revision !== coverRevision) return;
+      const url = new URL(result.url);
+      if (url.protocol !== "https:" || url.hostname !== "ehgt.org" || url.username || url.password || url.port) throw new Error("测试图片地址无效，请重新读取。");
+      coverURL = url.href;
+      const link = ui("network-cover-url"); link.href = coverURL; link.textContent = coverURL + " ↗"; link.hidden = false;
+      ui("network-cover-hint").textContent = coverGid ? `测试作品 ID ${coverGid} 的封面，点击「测试封面图片」开始。` : "优先测试最近失败的封面，没有失败记录时使用目录中的一张封面。点击「测试封面图片」开始。";
+    } catch (error) {
+      if (revision === coverRevision) ui("network-cover-hint").textContent = error.message === "Failed to fetch" ? "无法读取图片地址，请重新连接本地服务后再试。" : error.message;
+    } finally { if (revision === coverRevision) { coverLoading = false; controls(); } }
   }
   async function load() {
     busy = true; controls();
@@ -48,12 +71,14 @@
       token = status.action_token;
       render(settings); loaded = true;
       message(settings.error || "测试使用当前表单，不会自动保存，也不会携带源站 Cookie。", settings.error ? "error" : "");
+      if (ui("network-target").value === "cover") await loadCoverTarget();
     } catch (error) { message(error.message || "无法读取代理设置，请重新读取。", "error"); }
     finally { busy = false; controls(); }
   }
   ui("network-form").addEventListener("input", event => {
     if (event.target.id === "network-target") {
       message("测试目标已变化，请重新测试。");
+      if (ui("network-target").value === "cover") loadCoverTarget();
     } else {
       ui("network-saved-note").textContent = "有未保存的修改";
       message("设置已修改，请重新测试；保存后用于后续联网请求。");
@@ -74,14 +99,19 @@
   ui("network-test").addEventListener("click", async () => {
     if (busy || !loaded || !ui("network-form").reportValidity()) return;
     const payload = {settings: values(), target: ui("network-target").value};
+    if (payload.target === "cover") {
+      if (!coverURL || coverLoading) return;
+      payload.cover_url = coverURL;
+    }
     busy = true; controls(); message("正在测试当前表单的连接方式，请稍候…");
     try {
       const result = await request("/api/network/test", payload);
-      const detail = `${result.target} · ${routeLabels[result.route]} · ${result.elapsed_ms} 毫秒${result.http_status ? ` · HTTP ${result.http_status}` : ""}`;
+      const detail = `${result.target} · ${routeLabels[result.route]} · ${result.elapsed_ms} 毫秒${result.http_status ? ` · HTTP ${result.http_status}` : ""}${result.content_type ? ` · ${result.content_type} · ${Number(result.size_bytes).toLocaleString("zh-CN")} 字节` : ""}${result.retry_after ? ` · 请等待 ${result.retry_after} 秒后再测试` : ""}`;
       message(`${result.message}\n${detail}`, result.ok ? "success" : result.reachable ? "warning" : "error");
     } catch (error) { message(error.message || "测试失败，请检查本地服务。", "error"); }
     finally { busy = false; controls(); }
   });
   ui("network-reload").addEventListener("click", load);
+  ui("network-cover-reload").addEventListener("click", loadCoverTarget);
   load();
 })();

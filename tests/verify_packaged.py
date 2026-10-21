@@ -114,8 +114,11 @@ def verify(program_directory=None):
                 raise AssertionError("Packaged cover retry API failed")
             for page in ("/", "/records", "/maintenance"):
                 with opener.open(base + page, timeout=10) as response:
-                    if b'id="cover-retry"' not in response.read():
+                    page_body = response.read()
+                    if b'id="cover-retry"' not in page_body:
                         raise AssertionError("Packaged cover retry button missing")
+                    if page == "/maintenance" and (b'value="cover"' not in page_body or b'id="network-cover-url"' not in page_body):
+                        raise AssertionError("Packaged cover connection test is missing")
             report["cover_retry"] = "retry API, script and all three page controls included"
             cloud = get("/api/cloud-sync")
             if cloud["enabled"] or cloud["upload_enabled"] or cloud["source_id"]:

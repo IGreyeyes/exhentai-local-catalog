@@ -16,11 +16,13 @@ import threading
 import time
 
 from credentials import _dpapi
+from covers import CoverUnavailable, PublicCoverRedirect, cover_request, normalize_cover_url, read_cover_response, retry_delay
 
 DEFAULTS = {"enabled": False, "fallback": "system", "host": "127.0.0.1", "port": 7890,
             "username": "", "password": "", "domains": []}
 TEST_TARGETS = {"e-hentai": ("E-Hentai", "https://e-hentai.org/"),
                 "exhentai": ("ExHentai", "https://exhentai.org/"),
+                "cover": ("封面图片（ehgt.org）", None),
                 "github": ("GitHub", "https://api.github.com/")}
 
 
@@ -136,6 +138,7 @@ class NetworkSettings:
         self.lock = threading.RLock()
         self.test_lock = threading.Lock()
         self.test_after = 0
+        self.cover_test_cooldowns = {}
         self._signature = None
         self._values = dict(DEFAULTS)
         self._error = ""
@@ -214,35 +217,61 @@ class NetworkSettings:
                 return ProxyHandler({})
         return proxy_handler(config)
 
-    def test(self, values, target):
+    def test(self, values, target, cover_url=None):
         if not isinstance(target, str) or target not in TEST_TARGETS:
-            raise ValueError("请选择 E-Hentai、ExHentai 或 GitHub 作为测试目标。")
+            raise ValueError("请选择 GitHub、E-Hentai、ExHentai 或封面图片作为测试目标。")
         config = self.candidate(values)
+        label, url = TEST_TARGETS[target]
+        if target == "cover":
+            try:
+                url = normalize_cover_url(cover_url)
+            except (CoverUnavailable, ValueError):
+                raise ValueError("当前没有有效的封面图片地址，请从失败作品旁进入测试，或重新读取测试图片。") from None
+        elif cover_url is not None:
+            raise ValueError("只有封面图片测试可指定图片地址。")
         if not self.test_lock.acquire(blocking=False):
             raise ValueError("连接测试正在进行，请稍候。")
         try:
             if time.monotonic() < self.test_after:
                 raise ValueError("请间隔至少 5 秒再测试。")
+            if target == "cover" and self.cover_test_cooldowns.get(url, 0) > time.monotonic():
+                raise ValueError("封面服务器仍处于测试冷却，请稍后再试。")
             self.test_after = time.monotonic() + 5
-            label, url = TEST_TARGETS[target]
             route = route_for(config, url)
             started = time.monotonic()
             result = {"target": label, "route": route, "ok": False, "reachable": False, "http_status": None}
+            if target == "cover": result["url"] = url
             try:
-                request = Request(url, headers={"User-Agent": "ExCatalog-Connection-Test/1", "Accept-Encoding": "identity"})
-                with build_opener(proxy_handler(config), NoTestRedirect()).open(request, timeout=15) as response:
+                request = cover_request(url) if target == "cover" else Request(url, headers={"User-Agent": "ExCatalog-Connection-Test/1", "Accept-Encoding": "identity"})
+                redirect = PublicCoverRedirect() if target == "cover" else NoTestRedirect()
+                with build_opener(proxy_handler(config), redirect).open(request, timeout=25 if target == "cover" else 15) as response:
                     result.update(http_status=response.status, reachable=True)
-                    body = response.read(16384).lower()
-                    blocked = any(marker in body for marker in (b"cf-chl-", b"just a moment...", b"excessive pageloads", b"temporarily banned"))
-                    result["ok"] = 200 <= response.status < 300 and not blocked
-                    result["message"] = "连接成功。此测试不检查账号登录或作品访问权限。" if result["ok"] else "已收到响应，但目标要求浏览器验证或限制了访问。"
+                    if target == "cover":
+                        data, content_type, _ = read_cover_response(response)
+                        result.update(ok=200 <= response.status < 300, content_type=content_type, size_bytes=len(data))
+                        result["message"] = "封面图片读取成功。若仍显示占位图，请保存需要使用的代理设置，再返回列表点击「重试封面」。"
+                    else:
+                        body = response.read(16384).lower()
+                        blocked = any(marker in body for marker in (b"cf-chl-", b"just a moment...", b"excessive pageloads", b"temporarily banned"))
+                        result["ok"] = 200 <= response.status < 300 and not blocked
+                        result["message"] = "连接成功。此测试不检查账号登录或作品访问权限。" if result["ok"] else "已收到响应，但目标要求浏览器验证或限制了访问。"
             except HTTPError as error:
                 code = error.code
+                if target == "cover" and (code == 429 or error.headers and error.headers.get("Retry-After")):
+                    delay = retry_delay(error.headers.get("Retry-After") if error.headers else None, 300)
+                    now = time.monotonic()
+                    self.cover_test_cooldowns = {key: until for key, until in self.cover_test_cooldowns.items() if until > now}
+                    self.cover_test_cooldowns[url] = now + delay
+                    result["retry_after"] = delay
                 error.close()
                 result.update(http_status=code, reachable=code != 407)
                 result["message"] = {407: "代理认证失败，请核对用户名和密码。", 401: "已连接到目标，目标要求登录。",
                                      403: "已收到目标响应，但访问被拒绝；可能需要登录或浏览器验证。",
                                      429: "目标正在限流，请稍后再试。"}.get(code, "目标返回跳转，尚未验证目标可用。" if 300 <= code < 400 else "目标返回错误响应，请稍后再试。")
+                if target == "cover" and code in (404, 410):
+                    result["message"] = "服务器已响应，但这张封面不存在或已失效；可在浏览器打开同一图片地址核对。"
+            except CoverUnavailable as error:
+                result["message"] = str(error) + " 可在浏览器打开下方图片地址核对。"
             except (URLError, OSError, HTTPException) as error:
                 reason = getattr(error, "reason", error)
                 if "407" in str(reason):

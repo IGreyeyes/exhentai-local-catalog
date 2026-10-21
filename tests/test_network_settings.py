@@ -44,6 +44,50 @@ def start_proxy():
 
 
 class NetworkTests(unittest.TestCase):
+    def test_cover_probe_validates_images_and_uses_the_form_without_cookies_or_saving(self):
+        from tests.test_covers import FakeOpener, FakeResponse, JPEG
+        opener = FakeOpener(FakeResponse(JPEG))
+        with patch("network_settings.build_opener", return_value=opener) as builder:
+            result = self.network.test(self.config, "cover", "https://s.exhentai.org/test.jpg?discarded=value")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["url"], "https://ehgt.org/test.jpg")
+        self.assertEqual(result["route"], "proxy")
+        self.assertEqual((result["content_type"], result["size_bytes"]), ("image/jpeg", len(JPEG)))
+        self.assertIsInstance(builder.call_args.args[0], ExplicitProxyHandler)
+        request, timeout = opener.requests[0]
+        self.assertEqual(timeout, 25)
+        self.assertNotIn("Cookie", dict(request.header_items()))
+        self.assertNotIn("Authorization", dict(request.header_items()))
+        self.assertFalse(self.network.path.exists())
+
+    def test_cover_probe_rejects_html_fake_images_missing_images_and_untrusted_urls(self):
+        from tests.test_covers import FakeOpener, FakeResponse
+        for response in (FakeResponse(b"<html>blocked</html>", "text/html"), FakeResponse(b"bad image", "image/jpeg")):
+            self.network.test_after = 0
+            with patch("network_settings.build_opener", return_value=FakeOpener(response)):
+                result = self.network.test(self.config, "cover", "https://ehgt.org/test.jpg")
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["reachable"])
+            self.assertEqual(result["http_status"], 200)
+        self.network.test_after = 0
+        with patch("network_settings.build_opener") as builder:
+            builder.return_value.open.side_effect = HTTPError("https://ehgt.org/test.jpg", 404, "missing", {}, None)
+            result = self.network.test(self.config, "cover", "https://ehgt.org/test.jpg")
+        self.assertFalse(result["ok"])
+        self.assertIn("不存在或已失效", result["message"])
+        for url in ("http://ehgt.org/test.jpg", "https://example.invalid/test.jpg", "https://user:pass@ehgt.org/test.jpg", None):
+            with self.assertRaises(ValueError): self.network.test(self.config, "cover", url)
+
+    def test_cover_probe_preserves_server_cooldown(self):
+        with patch("network_settings.build_opener") as builder:
+            builder.return_value.open.side_effect = HTTPError("https://ehgt.org/test.jpg", 429, "limited", {"Retry-After":"600"}, None)
+            result = self.network.test(self.config, "cover", "https://ehgt.org/test.jpg")
+            self.assertEqual(result["retry_after"], 600)
+            self.network.test_after = 0
+            with self.assertRaisesRegex(ValueError, "测试冷却"):
+                self.network.test(self.config, "cover", "https://ehgt.org/test.jpg")
+            self.assertEqual(builder.return_value.open.call_count, 1)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -217,6 +261,21 @@ class NetworkTests(unittest.TestCase):
 
 
 class NetworkApiTests(unittest.TestCase):
+    def test_cover_target_requires_a_picture_and_probe_authorization(self):
+        from tests.test_covers import FakeOpener, FakeResponse, JPEG
+        for path in ("/api/network/cover", "/api/network/cover?gid=1"):
+            with self.assertRaises(HTTPError) as raised:
+                self.opener.open(self.base + path)
+            self.assertEqual(raised.exception.code, 400); raised.exception.close()
+        payload = {"settings": DEFAULTS, "target": "cover", "cover_url": "https://ehgt.org/test.jpg"}
+        with self.assertRaises(HTTPError) as raised:
+            self.post("/api/network/test", payload, authorized=False)
+        self.assertEqual(raised.exception.code, 403); raised.exception.close()
+        with patch("network_settings.build_opener", return_value=FakeOpener(FakeResponse(JPEG))):
+            self.assertTrue(self.post("/api/network/test", payload)["ok"])
+        with self.assertRaises(HTTPError) as raised:
+            self.post("/api/network/test", {**payload, "target":"github"})
+        self.assertEqual(raised.exception.code, 400); raised.exception.close()
     def setUp(self):
         from app import Catalog, Server
         from tests.test_desktop import make_library

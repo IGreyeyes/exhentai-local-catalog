@@ -27,7 +27,7 @@
         image.src = url.pathname + url.search;
       }
       feedback.textContent = images.length
-        ? "正在重新加载可见封面；仍失败时，请检查「网络代理」能否访问 ehgt.org。"
+        ? "正在重新加载可见封面；仍失败时，可点击图片下方的「测试封面连接」，核对这张图片是否可访问。"
         : `已解除 ${result.cleared} 张封面的失败等待；返回搜索或已记录页面，使用扩展或缩略图视图加载封面。`;
       if (result.waiting) feedback.textContent += ` ${result.waiting} 张封面仍需等待服务器冷却结束。`;
     } catch (error) {

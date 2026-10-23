@@ -154,6 +154,17 @@ def verify(program_directory=None):
                     raise AssertionError("Packaged QQ QR image differs from the supplied asset")
             if get("/api/search?tag=language%3Aenglish")["total"] != 1:
                 raise AssertionError("Packaged search failed")
+            or_result = get("/api/search?tag=language%3Aenglish&tag_mode=or")
+            if or_result['total'] != 1 or or_result['tag_mode'] != 'or':
+                raise AssertionError('Packaged OR search failed')
+            interval_settings = post('/api/collector/settings', {'host':'e-hentai.org','interval':0.75}, token)
+            if interval_settings['interval'] != 0.75 or get('/api/collector')['interval'] != 0.75:
+                raise AssertionError('Packaged custom collection interval failed')
+            for asset, marker in (('app.js', b'catalog-search-session-v1'), ('collector.js', b'matchesSavedTask'), ('', b'id="collector-custom-interval"')):
+                with opener.open(base+'/'+asset, timeout=10) as response:
+                    if marker not in response.read():
+                        raise AssertionError('Packaged search recovery or custom interval asset missing')
+            report['search_workflow'] = 'OR search, custom interval and search/task recovery assets included'
             task = post("/api/maintenance/backup", {"include_catalog":False}, token)
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:

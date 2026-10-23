@@ -43,7 +43,31 @@
   }
   function refreshDays(){return Number(ui("collector-refresh").value==="custom"?ui("collector-custom-days").value:ui("collector-refresh").value);}
   function batchSize(){return Number(ui("collector-batch-size").value==="custom"?ui("collector-custom-batch-size").value:ui("collector-batch-size").value);}
+  function requestInterval(){return Number(ui("collector-interval").value==="custom"?ui("collector-custom-interval").value:ui("collector-interval").value);}
   function savedTask(){return Boolean(state?.job&&["paused","awaiting_next","completed_with_errors"].includes(state.job.state));}
+  function queryScope(query){
+    return JSON.stringify({tags:[...(query.tag||[])].sort(),excluded:[...(query.exclude_tag||[])].sort(),
+      mode:query.tag_mode?.[0]||"and",title:query.title?.[0]||"",categories:[...(query.category||[])].filter(Boolean).sort(),inactive:query.include_inactive?.[0]||"0"});
+  }
+  function matchesSavedTask(){
+    if(!submittedFilters||!responseData||!state?.job)return false;
+    return queryScope(state.job.query||{})===queryScope({tag:responseData.tags,exclude_tag:[...new Set([...(responseData.exclude_tags||[]),...(responseData.blacklist_tags||[])])],
+      tag_mode:[responseData.tag_mode||"and"],title:[submittedFilters.get("title")||""],category:responseData.categories,include_inactive:[responseData.include_inactive?"1":"0"]});
+  }
+  function searchOperation(){
+    if(matchesSavedTask()){
+      if(state.job.state==="paused")return "resume";
+      if(state.job.state==="awaiting_next")return "next_round";
+    }
+    return "start";
+  }
+  function scopeTerms(query){
+    const terms=[];
+    if(query.tag?.length)terms.push(query.tag.map(tagName).join(query.tag_mode?.[0]==="or"?" 或 ":" 且 "));
+    (query.exclude_tag||[]).forEach(tag=>terms.push("排除："+tagName(tag)));
+    if(query.title?.[0])terms.push("标题："+query.title[0]);
+    return terms;
+  }
   function failureURL(value){
     try{const url=new URL(value);return url.protocol==="https:"&&["exhentai.org","e-hentai.org"].includes(url.hostname)&&!url.username&&!url.password&&!url.port&&/^\/g\/[1-9]\d*\/[0-9a-fA-F]{10}\/$/.test(url.pathname)?url.href:null;}catch(error){return null;}
   }
@@ -72,7 +96,7 @@
   }
   function scopeKey(){
     if(!submittedFilters)return "";
-    return JSON.stringify({tags:submittedFilters.getAll("tag").sort(),excluded:submittedFilters.getAll("exclude_tag").sort(),blacklist:submittedFilters.get("use_blacklist")||"1",title:submittedFilters.get("title")||"",categories:submittedFilters.getAll("category").sort(),inactive:submittedFilters.get("include_inactive")||"0"});
+    return JSON.stringify({tags:submittedFilters.getAll("tag").sort(),mode:submittedFilters.get("tag_mode")||"and",excluded:submittedFilters.getAll("exclude_tag").sort(),blacklist:submittedFilters.get("use_blacklist")||"1",title:submittedFilters.get("title")||"",categories:submittedFilters.getAll("category").sort(),inactive:submittedFilters.get("include_inactive")||"0"});
   }
   function invalidatePreview(){preview=null;previewRevision++;ui("collector-estimate").hidden=true;}
   function duration(seconds){
@@ -85,9 +109,7 @@
     preview={...data,scopeKey:key,queryText};
     ui("collector-estimate").hidden=false;
     const operation={start:"新建采集",next_batch:"追加下一批",next_round:"继续下一轮",resume:"继续任务",retry:"重试失败项"}[data.operation];
-    const terms=(data.query.tag||[]).map(tagName);
-    (data.query.exclude_tag||[]).forEach(tag=>terms.push("排除："+tagName(tag)));
-    if(data.query.title?.[0])terms.push("标题："+data.query.title[0]);
+    const terms=scopeTerms(data.query);
     ui("estimate-scope").textContent=`${operation} · ${terms.join(" + ")} · ${data.host}`;
     ui("estimate-total").textContent=number(data.total)+" 条";
     const newTask=["start","next_batch"].includes(data.operation),batched=data.collection_mode==="batch",rounds=data.collection_mode==="rounds";
@@ -114,6 +136,10 @@
     const busy=actionBusy||Boolean(state?.busy)||Boolean(window.catalogMaintenanceActive)||Boolean(window.catalogStopped);
     const cooling=Boolean(state?.cooldown_until>Date.now()/1000);
     for(const control of ui("collector-settings").elements)control.disabled=busy;
+    const customInterval=ui("collector-interval").value==="custom";
+    ui("custom-interval-control").hidden=!customInterval;
+    ui("collector-custom-interval").disabled=busy||!customInterval;
+    ui("collector-custom-interval").required=customInterval;
     ui("credential-import").disabled=busy;
     ui("credential-export").disabled=busy||settingsDirty||!state?.has_credentials;
     const skip=ui("collector-skip-existing").checked,custom=ui("collector-refresh").value==="custom";
@@ -149,7 +175,9 @@
     ui("collector-access-issue-link").hidden=!issueURL;
     if(issueURL){ui("collector-access-issue-link").href=issueURL;ui("collector-access-issue-link").textContent=issueURL;}
     ui("collector-skip-unavailable").disabled=busy||cooling||settingsDirty||!state?.configured||!issue;
-    ui("collector-start").disabled=busy||settingsDirty||!state?.configured||!hasSearch||["paused","running","preparing","awaiting_next"].includes(job?.state);
+    const operation=searchOperation(),continuing=operation!=="start";
+    ui("collector-start").textContent=operation==="resume"?"继续采集":operation==="next_round"?"继续下一轮":"开始采集";
+    ui("collector-start").disabled=busy||settingsDirty||!state?.configured||!hasSearch||(!continuing&&["paused","running","preparing","awaiting_next"].includes(job?.state));
     ui("collector-pause").disabled=actionBusy||job?.state!=="running";
     ui("collector-resume").disabled=busy||settingsDirty||!state?.configured||job?.state!=="paused";
     ui("collector-retry").disabled=busy||settingsDirty||!state?.configured||!job?.failed||!["paused","awaiting_next","completed_with_errors"].includes(job?.state);
@@ -169,9 +197,11 @@
     ui("estimate-verification").hidden=!needsVerification&&!cooling;
     ui("estimate-verification").textContent=needsVerification?`请先点击“${ui("collector-verify").textContent}”，验证成功后重新预估，再确认采集。`:cooling?"源站冷却时间尚未结束，可先查看预估。":"";
     if(hasSearch){
-      const names=(responseData.tags||[]).map(tagName).join(" + ");
+      const names=(responseData.tags||[]).map(tagName).join(responseData.tag_mode==="or"?" 或 ":" 且 ");
       const title=submittedFilters.get("title");
       ui("collection-scope").textContent=`新计划候选范围：最近一次搜索的全部 ${number(responseData.total)} 条匹配记录${names?" · "+names:""}${title?" · 标题："+title:""}。`+(batchMode?`${roundMode?"每轮":"每批"}最多抓取 ${number(batchSize())} 条。`:"全量模式处理所有待采集作品。")+"修改筛选条件后，请先重新搜索。";
+      if(continuing)ui("collection-scope").textContent="本次搜索与保存的任务范围相同，可在这里直接"+(operation==="resume"?"继续采集":"继续下一轮")+"。将沿用原任务的队列、顺序和轮次，预估并确认后开始。";
+      else if(["paused","awaiting_next"].includes(job?.state))ui("collection-scope").textContent+="另有范围不同的未结束任务，请在进度区继续或结束原任务后再新建。";
     }else ui("collection-scope").textContent=savedTask()?"已找到保存的采集任务。应用并验证源站设置后，可直接继续，无需重新搜索；继续时沿用原队列和轮次。":"先完成一次有匹配结果的搜索，再建立采集计划。分轮抓取会保存完整队列，每轮结束自动停止。";
   }
   function render(){
@@ -195,9 +225,7 @@
     }
     if(job){
       ui("collector-job-state").textContent=jobLabel;
-      const terms=job.query?.tag?.map(tagName)||[];
-      (job.query?.exclude_tag||[]).forEach(tag=>terms.push("排除："+tagName(tag)));
-      if(job.query?.title?.[0]) terms.push("标题："+job.query.title[0]);
+      const terms=scopeTerms(job.query||{});
       const jobCategories=(job.query?.category||[]).filter(Boolean);
       if(jobCategories.length) terms.push("分类："+window.galleryCards.categoryNames(jobCategories));
       ui("collector-job-scope").textContent=`原任务范围：${terms.join(" + ")||"全部作品"} · ${job.host}`;
@@ -278,7 +306,7 @@
     finally{actionBusy=false;await refresh();updateControls();if(focusProgress)showJob();}
   }
   function settingsPayload(includeCredentials=false){
-    const values={interval:Number(ui("collector-interval").value),refresh_days:refreshDays()||state?.refresh_days||7,skip_existing:ui("collector-skip-existing").checked,collection_mode:ui("collector-mode").value,batch_size:batchSize(),rating_priority:ui("collector-rating-priority").checked};
+    const values={interval:requestInterval(),refresh_days:refreshDays()||state?.refresh_days||7,skip_existing:ui("collector-skip-existing").checked,collection_mode:ui("collector-mode").value,batch_size:batchSize(),rating_priority:ui("collector-rating-priority").checked};
     if(includeCredentials)Object.assign(values,{host:ui("collector-host").value,proxy:ui("collector-proxy").value,ipb_member_id:ui("cookie-member").value,ipb_pass_hash:ui("cookie-hash").value,igneous:ui("cookie-igneous").value});
     return values;
   }
@@ -326,7 +354,7 @@
   ui("collector-recover").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),recover_cooldown:true});
   ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),retry_unavailable:true,recover_cooldown:Boolean(state?.cooldown_until>Date.now()/1000)});
   ui("collector-skip-unavailable").onclick=()=>{if(state?.verification_issue)action("skip_unavailable",{issue_id:state.verification_issue.id});};
-  ui("collector-start").onclick=()=>action("preview",{query:submittedFilters.toString(),operation:"start"});
+  ui("collector-start").onclick=()=>action("preview",{query:submittedFilters.toString(),operation:searchOperation()});
   ["pause","cancel"].forEach(name=>ui(`collector-${name}`).onclick=()=>action(name));
   ["resume","retry"].forEach(name=>ui(`collector-${name}`).onclick=()=>action("preview",{operation:name}));
   ui("collector-next-batch").onclick=()=>action("preview",{operation:"next_batch"});
@@ -347,7 +375,7 @@
       savedProxy=state?.proxy_error?null:(state?.saved_proxy??state?.proxy);
       if(state?.proxy_error)proxyFeedback(state.proxy_error,true);
       else if(savedProxy)proxyFeedback("已恢复上次保存的采集代理；应用本次设置后生效。");
-      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=savedProxy??state.proxy;ui("collector-interval").value=String(state.interval);ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);settingsDirty=Boolean(state.configured&&savedProxy!==null&&savedProxy!==state.proxy);render();}
+      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=savedProxy??state.proxy;ui("collector-interval").value=[0.5,1,1.5,2,2.5,3].includes(state.interval)?String(state.interval):"custom";ui("collector-custom-interval").value=state.interval;ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);settingsDirty=Boolean(state.configured&&savedProxy!==null&&savedProxy!==state.proxy);render();}
     }catch(error){feedback("采集工具尚未连接，请重新启动服务后刷新页面。",true);}
   })();
   setInterval(()=>{if(!document.hidden)refresh();},3000);

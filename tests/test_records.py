@@ -45,6 +45,16 @@ class RecordedWorksTests(unittest.TestCase):
 
     def tearDown(self):self.directory.cleanup()
 
+    def test_or_tag_filter_keeps_record_scope_and_pagination(self):
+        query={'tag':['language:english','other:anthology'],'tag_mode':['or'],'limit':['1']}
+        first=self.catalog.recorded(query)
+        second=self.catalog.recorded({**query,'page':['2']})
+        self.assertEqual((first['total'],first['tag_mode']),(3,'or'))
+        self.assertNotEqual(first['items'][0]['gid'],second['items'][0]['gid'])
+        self.assertEqual(self.catalog.recorded({**query,'tag_mode':['and']})['total'],2)
+        self.assertEqual(self.catalog.recorded({**query,'category':['Manga']})['total'],0)
+        self.assertEqual(self.catalog.recorded({'tag':['language:chinese'],'tag_mode':['or']})['total'],1)
+
     def test_view_choice_survives_reopening_and_preserves_other_personal_data(self):
         self.assertIsNone(self.catalog.preferences()['records_view'])
         self.assertIsNone(self.catalog.preferences()['search_view'])

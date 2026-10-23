@@ -74,6 +74,7 @@
 
   function filters(){
     const params=new URLSearchParams();tags.forEach(tag=>params.append("tag",tag));
+    params.set("tag_mode",$("record-tag-mode").value);
     const text=$("record-query").value.trim();if(text)params.set("q",text);
     params.set("sort",$("record-sort").value);params.set("age",$("record-age").value);
     params.set("state",$("record-state").value);params.set("opened",$("record-opened").value);
@@ -176,6 +177,7 @@
   function restore(){
     $("records-form").reset();clearTimeout(suggestionTimer);suggestionRequest?.abort();hideSuggestions();
     const params=new URLSearchParams(location.search);tags=params.getAll("tag").slice(0,12);renderTags();
+    $("record-tag-mode").value=params.get("tag_mode")==="or"?"or":"and";
     collection=["all","success","failed"].includes(params.get("collection"))?params.get("collection"):"all";jobFilter=params.get("job_id")||"";
     $("record-query").value=params.get("q")||"";
     recordCategory.set(params.getAll("category"));

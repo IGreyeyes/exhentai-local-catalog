@@ -26,8 +26,20 @@ from collector_identity import read_identity, validate_collector
 from credentials import _dpapi
 
 HOSTS = {"exhentai.org", "e-hentai.org"}
-REQUEST_INTERVALS = (1, 1.5, 2, 2.5, 3)
+REQUEST_INTERVALS = (0.5, 1, 1.5, 2, 2.5, 3)
 DEFAULT_REQUEST_INTERVAL = 3
+
+
+def request_interval(value):
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError
+        interval = float(value)
+        if not math.isfinite(interval) or not 0.5 <= interval <= 3600:
+            raise ValueError
+        return interval
+    except (ValueError, TypeError, OverflowError) as error:
+        raise ValueError("请求间隔须为 0.5～3600 秒，可填写小数。") from error
 
 
 def validate_collector_proxy(value):
@@ -663,7 +675,10 @@ class Collector:
                 raw_interval = json.loads(previous[0]).get("interval") if previous else None
             else:
                 raw_interval = json.loads(saved[0])
-            self.saved_interval = raw_interval if not isinstance(raw_interval, bool) and raw_interval in REQUEST_INTERVALS else DEFAULT_REQUEST_INTERVAL
+            try:
+                self.saved_interval = request_interval(raw_interval)
+            except ValueError:
+                self.saved_interval = DEFAULT_REQUEST_INTERVAL
             db.execute("UPDATE jobs SET state='paused',message='服务重启后已暂停。请重新配置并验证登录信息，再继续。' WHERE state IN ('running','preparing')")
             row = db.execute("SELECT MAX(cooldown_until) FROM jobs").fetchone()
             self.cooldown_until = row[0] or 0
@@ -727,16 +742,11 @@ class Collector:
             if self.proxy_error and "proxy" not in values:
                 raise ValueError(self.proxy_error)
             proxy = validate_collector_proxy(values.get("proxy", self.saved_proxy))
-            raw_interval = values.get("interval",self.saved_interval)
-            if isinstance(raw_interval, bool):
-                raise ValueError("请求间隔请选择 1、1.5、2、2.5 或 3 秒。")
-            interval = float(raw_interval)
+            interval = request_interval(values.get("interval",self.saved_interval))
             raw_days = values.get("refresh_days",7)
             if isinstance(raw_days,bool) or not re.fullmatch(r"[0-9]+",str(raw_days)):
                 raise ValueError("缓存刷新天数须为整数。")
             days = int(raw_days)
-            if interval not in REQUEST_INTERVALS:
-                raise ValueError("请求间隔请选择 1、1.5、2、2.5 或 3 秒。")
             if not 1 <= days <= 3650:
                 raise ValueError("刷新周期须为 1～3650 天。")
             skip_existing = values.get("skip_existing",False)

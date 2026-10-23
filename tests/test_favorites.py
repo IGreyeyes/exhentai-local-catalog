@@ -218,7 +218,7 @@ class FavoriteCollectionTests(unittest.TestCase):
     def ready(self):
         self.collector.configure({'host':'exhentai.org','ipb_member_id':'123','ipb_pass_hash':'test-secret-hash','igneous':'test-igneous','interval':3})
         self.collector.verify(self.query)
-        # Only mocked requests use this tiny interval; the public API enforces >=1s.
+        # Only mocked requests use this tiny interval; the public API enforces >=0.5s.
         self.collector.settings['interval']=0.001
 
     def test_ambiguous_unavailable_page_preserves_saved_queue_and_successful_data(self):
@@ -637,14 +637,14 @@ class FavoriteCollectionTests(unittest.TestCase):
 
     def test_request_intervals_persist_after_restart_and_rejected_settings(self):
         self.assertEqual(self.collector.status()['interval'],3)
-        for seconds in (1,1.5,2,2.5,3,1.5):
+        for seconds in (0.5,1,1.5,2,2.5,3,3.5,4,60,0.75,3600,1.5):
             status = self.collector.configure({'host':'e-hentai.org','interval':seconds})
             self.assertEqual(status['interval'],seconds)
             restarted = Collector(Catalog(self.catalog.path),self.fetch)
             self.assertEqual(restarted.status()['interval'],seconds)
             self.assertFalse(restarted.status()['configured'])
             self.assertEqual(restarted.configure({'host':'e-hentai.org'})['interval'],seconds)
-        for seconds in (0.5,3.5,4,5,60,61,True,float('nan'),float('inf')):
+        for seconds in (0,0.49,-1,3601,True,None,[],{},'',float('nan'),float('inf')):
             with self.subTest(seconds=seconds),self.assertRaises(ValueError):
                 self.collector.configure({'host':'e-hentai.org','interval':seconds})
         with self.assertRaises(ValueError):
@@ -659,6 +659,9 @@ class FavoriteCollectionTests(unittest.TestCase):
         self.assertEqual(Collector(self.catalog,self.fetch).status()['interval'],2.5)
         with self.catalog.favorites.connection() as db:
             db.execute("UPDATE jobs SET selection_json=?",(json.dumps({'interval':4}),))
+        self.assertEqual(Collector(self.catalog,self.fetch).status()['interval'],4)
+        with self.catalog.favorites.connection() as db:
+            db.execute("UPDATE jobs SET selection_json=?",(json.dumps({'interval':0.1}),))
         self.assertEqual(Collector(self.catalog,self.fetch).status()['interval'],3)
 
     def finish(self):
@@ -707,6 +710,26 @@ class FavoriteCollectionTests(unittest.TestCase):
             ids={row[0] for row in db.execute('SELECT gid FROM tasks WHERE job_id=?',(job['id'],))}
         self.assertEqual(ids,{1,2,3})
         self.assertNotIn(4,self.calls)
+
+    def test_or_preview_and_saved_queue_agree_and_reject_changed_logic(self):
+        with closing(sqlite3.connect(self.catalog.path)) as db:
+            db.execute("INSERT INTO tag VALUES(2,'other:anthology')")
+            db.execute("INSERT INTO gid_tid VALUES(1,2)")
+            db.commit()
+        self.catalog=Catalog(self.catalog.path)
+        self.collector.catalog=self.catalog
+        self.ready()
+        query={'tag':['language:english','other:anthology'],'tag_mode':['or']}
+        preview=self.collector.preview(query)
+        self.assertEqual((preview['total'],preview['query']['tag_mode']),(4,['or']))
+        with self.assertRaisesRegex(ValueError,'范围'):
+            self.collector.start({**query,'tag_mode':['and']},preview['preview_id'])
+        preview=self.collector.preview(query)
+        self.collector.start(query,preview['preview_id'])
+        self.finish()
+        job=self.collector.store.latest()
+        self.assertEqual((job['total'],job['query']['tag_mode']),(4,['or']))
+        self.assertEqual(sorted(self.calls),[1,2,3,4])
 
     def test_start_includes_entire_query_and_reuses_fresh_cache(self):
         with self.assertRaises(ValueError):

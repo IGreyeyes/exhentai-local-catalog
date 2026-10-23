@@ -63,7 +63,7 @@ async function choose(page,id,value,api){
   data=await choose(page,'#search-category','','/api/search?');assert(data.total===97,'All types did not restore search matches');
   await page.locator('#collector-panel').evaluate(node=>{node.open=true;});
   await page.waitForFunction(()=>!document.querySelector('#collector-interval').disabled);
-  assert(JSON.stringify(await page.locator('#collector-interval option').evaluateAll(nodes=>nodes.map(node=>node.value)))==='["1","1.5","2","2.5","3"]','Unexpected interval options');
+  assert(JSON.stringify(await page.locator('#collector-interval option').evaluateAll(nodes=>nodes.map(node=>node.value)))==='["0.5","1","1.5","2","2.5","3","custom"]','Unexpected interval options');
   await page.locator('#collector-interval').selectOption('1.5');
   await page.locator('#collector-save').click();
   await page.waitForFunction(()=>document.querySelector('#collector-feedback').textContent.startsWith('设置已应用'));

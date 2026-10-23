@@ -64,6 +64,32 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "没有这个标签"):
             self.search(tag=["language:english", "no:such-tag"])
 
+    def test_or_tags_union_without_duplicates_and_keep_other_filters(self):
+        query = {"tag": ["l:english$", "合集"], "tag_mode": "or"}
+        first = self.search(**query, limit=1)
+        second = self.search(**query, limit=1, page=2)
+        self.assertEqual((first["total"], first["pages"], first["tag_mode"]), (2, 2, "or"))
+        self.assertEqual([first["items"][0]["gid"], second["items"][0]["gid"]], [2, 1])
+        self.assertEqual(self.search(**query, title="First")["items"][0]["gid"], 1)
+        union = {"tag": ["language:english", "language:chinese"], "tag_mode": "or"}
+        self.assertEqual(self.search(**union)["total"], 3)
+        self.assertEqual(self.search(**union, exclude_tag="other:anthology")["total"], 2)
+        self.assertEqual(self.search(**union, category="Manga")["total"], 1)
+        self.assertEqual(self.search(**union, include_inactive=1)["total"], 5)
+        self.catalog.set_preferences({"tag_blacklist": ["other:anthology"]})
+        try:
+            canonical, where, params = self.catalog.collection_plan({"tag": union["tag"], "tag_mode": ["or"]})
+            self.assertEqual(canonical["tag_mode"], ["or"])
+            self.catalog.set_preferences({"tag_blacklist": []})
+            self.assertEqual(self.catalog.collection_plan(canonical), (canonical, where, params))
+            self.assertEqual(self.catalog.search(canonical)["total"], 2)
+        finally:
+            self.catalog.set_preferences({"tag_blacklist": []})
+        with self.assertRaises(ValueError):
+            self.search(**{**query, "tag_mode": "or); DROP TABLE gallery"})
+        with self.assertRaises(ValueError):
+            self.search(tag=["language:english", "no:such-tag"], tag_mode="or")
+
     def test_excluded_tags_and_persistent_blacklist(self):
         self.catalog.set_preferences({"tag_blacklist": []})
         try:

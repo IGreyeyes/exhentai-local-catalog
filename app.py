@@ -85,6 +85,7 @@ class SearchSelection:
     include_inactive: bool
     categories: tuple
     use_blacklist: bool
+    tag_mode: str = "and"
 
 
 def normalized_tag(value):
@@ -174,7 +175,7 @@ class Catalog:
             raise ValueError("标签数量或长度超出限制。")
         return {"labels": self.translations.labels(tags)}
 
-    def build_filter(self, db, tags, title, include_inactive, categories, excluded_tags=()):
+    def build_filter(self, db, tags, title, include_inactive, categories, excluded_tags=(), tag_mode="and"):
         clauses, params, resolved = [], [], []
         for name in tags:
             row = db.execute("SELECT id, name FROM tag WHERE name = ?", (name,)).fetchone()
@@ -183,7 +184,11 @@ class Catalog:
             count = db.execute("SELECT COUNT(*) FROM gid_tid WHERE tid = ?", (row[0],)).fetchone()[0]
             resolved.append((count, row[0]))
         resolved.sort()
-        if resolved:
+        if resolved and tag_mode == "or":
+            placeholders = ",".join("?" for _ in resolved)
+            clauses.append(f"g.gid IN (SELECT gid FROM gid_tid WHERE tid IN ({placeholders}))")
+            params.extend(tid for _, tid in resolved)
+        elif resolved:
             clauses.append("g.gid IN (SELECT gid FROM gid_tid WHERE tid = ?)")
             params.append(resolved[0][1])
             for _, tid in resolved[1:]:
@@ -216,6 +221,9 @@ class Catalog:
             return db.execute("SELECT COUNT(*) FROM gallery AS g WHERE " + where, params).fetchone()[0]
 
     def selection(self, query, allow_empty=False, apply_blacklist=True):
+        tag_mode = query.get("tag_mode", ["and"])[0]
+        if tag_mode not in {"and", "or"}:
+            raise ValueError("标签匹配方式请选择 AND（全部满足）或 OR（任意满足）。")
         tags = tuple(sorted(set(normalized_tag(tag) for tag in query.get("tag", []) if tag.strip())))
         explicit_excluded = tuple(sorted(set(normalized_tag(tag) for tag in query.get("exclude_tag", []) if tag.strip())))
         title = query.get("title", [""])[0].strip()
@@ -242,7 +250,7 @@ class Catalog:
         if len(raw_categories) > 12 or any(not isinstance(value, str) or len(value) > 40 for value in raw_categories):
             raise ValueError("无效的作品分类。")
         categories = tuple(sorted(set(value for value in raw_categories if value)))
-        return SearchSelection(tags, excluded, explicit_excluded, blacklist, title, include_inactive, categories, use_blacklist)
+        return SearchSelection(tags, excluded, explicit_excluded, blacklist, title, include_inactive, categories, use_blacklist, tag_mode)
 
     def preferences(self):
         tags = tuple(tag for tag in self.favorites.get_tag_blacklist() if tag in self.available_tags)
@@ -266,7 +274,7 @@ class Catalog:
     def recorded(self, query):
         """List one record per collected work, retaining failures and earlier successful counts."""
         started=time.monotonic()
-        selection=self.selection({"tag":query.get("tag",[]),"category":query.get("category",[""])},allow_empty=True,apply_blacklist=False)
+        selection=self.selection({"tag":query.get("tag",[]),"category":query.get("category",[""]),"tag_mode":query.get("tag_mode",["and"])},allow_empty=True,apply_blacklist=False)
         tags=selection.tags
         text=query.get("q",[""])[0].strip()
         source=query.get("source",[""])[0]
@@ -309,7 +317,7 @@ class Catalog:
                     SUM(COALESCE(rs.opened_count,0)>0),
                     SUM(COALESCE(rs.state,'none')='none'),SUM(rs.state='planned'),SUM(rs.state='reading'),SUM(rs.state='watched'),SUM(rs.state='ignored'),
                     SUM(f.collection_status='success'),SUM(f.collection_status='failed'),MAX(f.recorded_at)"""+joined,(now-7*86400,)).fetchone()
-                where,values=self.build_filter(db,tags,"",True,selection.categories)
+                where,values=self.build_filter(db,tags,"",True,selection.categories,tag_mode=selection.tag_mode)
                 clauses=[where];params=list(values)
                 if text:
                     pattern="%"+like_literal(text)+"%"
@@ -348,7 +356,7 @@ class Catalog:
         finally:self.slots.release()
         return {
             "items":items,"total":total,"page":page,"pages":pages,"limit":limit,"tags":list(tags),"categories":list(selection.categories),"category":selection.categories[0] if len(selection.categories)==1 else "","sort":sort,"collection":collection,"job_id":job_id,
-            "collector_identity":self.favorites.collector_identity(),
+            "tag_mode":selection.tag_mode, "collector_identity":self.favorites.collector_identity(),
             "summary":{"total":summary_row[0],"recent_7_days":summary_row[1] or 0,"last_checked_at":summary_row[2],"missing_metadata":summary_row[3] or 0,"opened":summary_row[4] or 0,
                        "states":{"none":summary_row[5] or 0,"planned":summary_row[6] or 0,"reading":summary_row[7] or 0,"watched":summary_row[8] or 0,"ignored":summary_row[9] or 0},
                        "successful":summary_row[10] or 0,"failed":summary_row[11] or 0,"last_recorded_at":summary_row[12]},
@@ -362,12 +370,14 @@ class Catalog:
             where, params = self.build_filter(
                 db, selection.tags, selection.title, selection.include_inactive,
                 selection.categories, selection.excluded_tags,
+                selection.tag_mode,
             )
         canonical = {
             "tag":list(selection.tags), "exclude_tag":list(selection.excluded_tags),
             "use_blacklist":["0"], "title":[selection.title],
             "include_inactive":["1" if selection.include_inactive else "0"],
             "category":list(selection.categories),
+            "tag_mode":[selection.tag_mode],
         }
         return canonical, where, params
 
@@ -389,6 +399,7 @@ class Catalog:
                 where, params = self.build_filter(
                     db, selection.tags, selection.title, selection.include_inactive,
                     selection.categories, selection.excluded_tags,
+                    selection.tag_mode,
                 )
                 total = self.count(where, params)
                 coverage = db.execute("SELECT COUNT(f.favorite_count),SUM(CASE WHEN f.checked_at>=? THEN 1 ELSE 0 END),MIN(f.checked_at),MAX(f.checked_at),COUNT(" + FAVORITE_RATING_RATIO + ") FROM gallery AS g" + JOIN_FAVORITES + JOIN_RATINGS + "WHERE " + where, (int(time.time())-7*86400,*params)).fetchone()
@@ -413,7 +424,7 @@ class Catalog:
             "limit": limit, "tags": list(selection.tags), "categories": list(selection.categories),
             "exclude_tags": list(selection.explicit_excluded_tags),
             "blacklist_tags": list(selection.blacklist_tags),
-            "use_blacklist": selection.use_blacklist, "sort": sort,
+            "use_blacklist": selection.use_blacklist, "sort": sort, "tag_mode": selection.tag_mode,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "has_favorites": True, "include_inactive": selection.include_inactive,
             "collector_identity": self.favorites.collector_identity(),

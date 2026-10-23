@@ -181,6 +181,7 @@ function filters() {
   searchCategory.set(formCategory.selected());
   const params = new URLSearchParams();
   tags.forEach(tag => params.append("tag", tag));
+  params.set("tag_mode", $("tag-mode").value);
   excludeTags.forEach(tag => params.append("exclude_tag", tag));
   if(!$("use-tag-blacklist").checked)params.set("use_blacklist","0");
   const title = $("title-input").value.trim();
@@ -240,6 +241,7 @@ async function search(page = 1, fresh = true, updateHistory = true) {
     renderResults();
     params.set("page", String(data.page));
     if (updateHistory) history.pushState(null, "", `/?${params}`);
+    saveSearchSession();
   } catch (error) {
     if (error.name === "AbortError") return;
     responseData = null;
@@ -263,7 +265,7 @@ function renderResults() {
   $("results-summary").textContent = `共 ${number(data.total)} 条匹配记录 · ${(data.elapsed_ms/1000).toFixed(2)} 秒 · ${data.include_inactive ? "包含历史及不可见记录" : "已排除移除、隐藏及旧版本"}${excludedCount?` · 排除 ${number(excludedCount)} 个标签`:""}`;
   if (!data.total) {
     const empty = element("div", "empty-state");
-    empty.append(element("h3", "", "没有找到同时满足条件的作品"), element("p", "", "试着减少标签、移除标题关键词，或包含历史记录后重新搜索。"));
+    empty.append(element("h3", "", "没有找到符合条件的作品"), element("p", "", "试着调整标签匹配方式、移除标题关键词，或包含历史记录后重新搜索。"));
     $("results").replaceChildren(empty);
     $("pagination").hidden = true;
     return;
@@ -321,13 +323,54 @@ function resetForm() {
   $("pagination").hidden=true;setBusy(false);
   $("favorite-coverage").hidden=true;
 }
-$("reset-filters").onclick = () => {resetForm();history.pushState(null,"","/");};
-function restoreURL() {
+const searchSessionKey = "catalog-search-session-v1";
+function readSearchSession() {
+  try { return JSON.parse(sessionStorage.getItem(searchSessionKey)) || null; }
+  catch (error) { return null; }
+}
+function saveSearchSession() {
+  const query = submittedFilters && responseData ? new URLSearchParams(submittedFilters) : null;
+  if (query) query.set("page", String(responseData.page));
+  const draft = {
+    tags, excludeTags, categories:formCategory.selected(),
+    title:$("title-input").value, tagInput:$("tag-input").value, excludeInput:$("exclude-tag-input").value,
+    tagMode:$("tag-mode").value, sort:$("sort").value, inactive:$("include-inactive").checked,
+    blacklist:$("use-tag-blacklist").checked, advanced:$("search-advanced").open, linkTarget:$("link-target").value,
+    collectorOpen:$("collector-panel").open,
+  };
+  try { sessionStorage.setItem(searchSessionKey, JSON.stringify({query:query?.toString()||"", draft, scroll:scrollY})); }
+  catch (error) { /* Searching remains available when session storage is disabled. */ }
+}
+function restoreSearchDraft(draft) {
+  if (!draft || !Array.isArray(draft.tags) || !Array.isArray(draft.excludeTags)) return;
+  tags=draft.tags.slice(0,12);excludeTags=draft.excludeTags.slice(0,12);
+  formCategory.set(draft.categories||[]);
+  for (const [id,key] of [["title-input","title"],["tag-input","tagInput"],["exclude-tag-input","excludeInput"],["tag-mode","tagMode"],["sort","sort"],["link-target","linkTarget"]]) {
+    if (typeof draft[key] === "string") $(id).value=draft[key];
+  }
+  $("include-inactive").checked=Boolean(draft.inactive);$("use-tag-blacklist").checked=draft.blacklist!==false;
+  $("search-advanced").open=Boolean(draft.advanced);$("collector-panel").open=Boolean(draft.collectorOpen)||$("collector-panel").open;
+  renderTags();loadLabels([...tags,...excludeTags]);
+  if(responseData)renderResults();
+  document.dispatchEvent(new Event("catalog:filters-changed"));
+}
+function searchQueryKey(query) {
+  return JSON.stringify([...new URLSearchParams(query)].sort((a,b)=>a[0].localeCompare(b[0])||a[1].localeCompare(b[1])));
+}
+addEventListener("pagehide", saveSearchSession);
+document.addEventListener("visibilitychange",()=>{if(document.hidden)saveSearchSession();});
+$("tag-mode").onchange=()=>{window.collectorUI?.invalidatePreview();window.collectorUI?.updateControls();};
+$("reset-filters").onclick = () => {resetForm();history.pushState(null,"","/");saveSearchSession();};
+async function restoreURL(restoreSaved = false) {
+  const saved = restoreSaved ? readSearchSession() : null;
+  if (!location.search && saved?.query) history.replaceState(null,"",`/?${saved.query}${location.hash}`);
+  const useSaved = saved && searchQueryKey(location.search) === searchQueryKey(saved.query);
   resetForm();
   const params=new URLSearchParams(location.search);
   tags=params.getAll("tag").slice(0,12);excludeTags=params.getAll("exclude_tag").slice(0,12);renderTags();
   loadLabels([...tags,...excludeTags]);
   $("title-input").value=params.get("title")||"";
+  $("tag-mode").value=params.get("tag_mode")==="or"?"or":"and";
   $("sort").value=params.get("sort")||"newest";
   if(!$("sort").value) $("sort").value="newest";
   formCategory.set(params.getAll("category"));
@@ -335,9 +378,13 @@ function restoreURL() {
   $("include-inactive").checked=params.get("include_inactive")==="1";
   $("use-tag-blacklist").checked=params.get("use_blacklist")!=="0";
   document.dispatchEvent(new Event("catalog:filters-changed"));
-  if(tags.length||$("title-input").value) search(Number(params.get("page"))||1,true,false);
+  if(tags.length||$("title-input").value) await search(Number(params.get("page"))||1,true,false);
+  if (useSaved) {
+    restoreSearchDraft(saved.draft);
+    requestAnimationFrame(()=>requestAnimationFrame(()=>scrollTo({top:Number(saved.scroll)||0,behavior:"instant"})));
+  }
 }
-window.addEventListener("popstate",restoreURL);
+window.addEventListener("popstate",()=>restoreURL());
 async function start() {
   try {
     const [response,preferencesResponse]=await Promise.all([fetch("/api/status"),fetch("/api/preferences")]);
@@ -356,7 +403,7 @@ async function start() {
       ? `中文词库已加载 · 本地 ${number(translation.matched_tag_count)} 个标签有译文；未翻译项显示原文。`
       : "中文词库未加载，当前使用英文标签。";
     $("connection").replaceChildren(element("i"),document.createTextNode("本地资料库已就绪"));
-    restoreURL();
+    await restoreURL(true);
   } catch(error) {$("connection").textContent="本地服务未连接";message("无法读取数据库信息，请重新启动搜索服务。");}
 }
 start();

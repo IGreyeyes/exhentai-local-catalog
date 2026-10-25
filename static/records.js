@@ -15,6 +15,7 @@
   let request,current=null,applied=new URLSearchParams(),loading=false,actionToken="",actionBusy=false;
   let collection="all",jobFilter="";
   const selected=new Set();
+  const pendingStates=new Set(),recordWrites=new Set();
 
   function node(tag,className,text){const result=document.createElement(tag);if(className)result.className=className;if(text!==undefined)result.textContent=text;return result;}
   const dateParts=window.galleryCards.dateParts;
@@ -87,26 +88,70 @@
     const response=await fetch(`/api/records/${path}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":actionToken},body:JSON.stringify(payload),keepalive:path==="view"});
     const data=await response.json();if(!response.ok)throw new Error(data.error||"操作失败");return data;
   }
+  async function writeRecord(path,payload){
+    const write=post(path,payload);recordWrites.add(write);
+    try{return await write;}finally{recordWrites.delete(write);}
+  }
+  function updateCards(){
+    const items=new Map((current?.items||[]).map(item=>[String(item.gid),item]));
+    $("records-list").querySelectorAll(".saved-card").forEach(card=>{
+      const item=items.get(card.dataset.gid);if(!item)return;
+      window.galleryCards.updateRecord(card,item,pendingStates.has(item.gid));
+      card.classList.toggle("selected",selected.has(item.gid));
+      const checkbox=card.querySelector(".record-select");if(checkbox)checkbox.checked=selected.has(item.gid);
+    });
+    renderBulk();
+  }
+  function savedFeedback(message){
+    const deferred=applied.get("state")!=="all"||applied.get("opened")!=="all"||applied.get("sort")==="state_updated_desc";
+    $("record-action-feedback").textContent=message+(deferred?" 当前列表保留位置，刷新记录后更新筛选和排序。":"");
+  }
   async function markOpened(item){
+    const snapshot=current;
     try{
-      await post("opened",{gid:item.gid});await load(current?.page||1,false,false);
+      const saved=await writeRecord("opened",{gid:item.gid});
+      if(current!==snapshot||loading)return;
+      if(saved.opened_count>=item.opened_count){
+        if(!item.opened_count)current.summary.opened++;
+        for(const key of ["opened_count","first_opened_at","last_opened_at"])item[key]=saved[key];
+        updateCards();renderOverview();savedFeedback("已保存点开记录。");
+      }
     }catch(failure){error(`源站页面已经打开，但“已点开”记录保存失败：${failure.message}`);}
   }
-  async function setState(gids,state){
-    if(actionBusy)return;actionBusy=true;busy(loading);error();
+  async function setState(gids,state,bulk=false){
+    if(loading||gids.some(gid=>pendingStates.has(gid)))return;
+    const snapshot=current,focused=document.activeElement;
+    gids.forEach(gid=>pendingStates.add(gid));actionBusy=true;updateCards();error();
     try{
-      await post("state",{gids,state});selected.clear();await load(current?.page||1,false,false);
+      const saved=await writeRecord("state",{gids,state});
+      if(bulk)gids.forEach(gid=>selected.delete(gid));
+      if(current!==snapshot||loading)return;
+      const items=new Map(saved.items.map(item=>[item.gid,item]));
+      for(const item of current.items){
+        const updated=items.get(item.gid);if(!updated)continue;
+        item.reading_state=updated.state;item.state_updated_at=updated.state_updated_at;
+      }
+      for(const [value,change] of Object.entries(saved.state_changes))current.summary.states[value]+=change;
+      renderOverview();savedFeedback(`已保存 ${number(saved.updated)} 条阅读状态。`);
     }catch(failure){error(failure.message);}
-    finally{actionBusy=false;busy(false);}
+    finally{
+      gids.forEach(gid=>pendingStates.delete(gid));actionBusy=pendingStates.size>0;updateCards();
+      if(focused?.isConnected&&document.activeElement===document.body)focused.focus({preventScroll:true});
+    }
   }
   function recordCard(item){
     return window.galleryCards.render(item,{
-      view,tags:current.tags,labels,collectorIdentity:current.collector_identity,selected,recordControls:true,
+      view,tags:current.tags,labels,collectorIdentity:current.collector_identity,selected,recordControls:true,recordBusy:pendingStates.has(item.gid),
       tagHint:"在已记录作品中筛选此标签",
       onTag:tag=>{addTag(tag);load(1,true);$("record-filter-title").scrollIntoView({block:"start",behavior:"smooth"});},
-      onSelect:(item,checked)=>{checked?selected.add(item.gid):selected.delete(item.gid);render();},
+      onSelect:(item,checked)=>{checked?selected.add(item.gid):selected.delete(item.gid);updateCards();},
       onOpen:markOpened,onState:setState,
     });
+  }
+  function renderOverview(){
+    const {summary}=current;
+    const overview=[{value:"all",label:"全部记录",count:summary.total},{value:"none",label:"未分类",count:summary.states.none},{value:"planned",label:"待看",count:summary.states.planned},{value:"reading",label:"在看",count:summary.states.reading},{value:"watched",label:"看过",count:summary.states.watched},{value:"ignored",label:"不看",count:summary.states.ignored},{opened:"yes",label:"已点开",count:summary.opened},{opened:"no",label:"从未点开",count:summary.total-summary.opened}];
+    $("record-state-overview").replaceChildren(...overview.map(item=>{const active=item.opened?$("record-opened").value===item.opened:item.value==="all"?$("record-state").value==="all"&&$("record-opened").value==="all":$("record-state").value===item.value;const button=node("button",`state-summary-button${active?" active":""}`);button.type="button";button.append(node("span","",item.label),node("strong","",number(item.count)));button.onclick=()=>{if(item.opened)$("record-opened").value=item.opened;else if(item.value==="all"){$("record-state").value="all";$("record-opened").value="all";}else $("record-state").value=item.value;load();};return button;}));
   }
   function render(){
     const {summary}=current,latest=dateParts(summary.last_recorded_at||summary.last_checked_at);
@@ -123,8 +168,7 @@
     $("record-job-label").textContent=jobFilter?`只查看采集任务 #${jobFilter} 的失败作品`:"";
     $("records-connection").replaceChildren(node("i"),document.createTextNode("本地记录已读取"));
     $("record-summary").textContent=`筛选出 ${number(current.total)} 条 · 全部已记录 ${number(summary.total)} 条 · ${(current.elapsed_ms/1000).toFixed(2)} 秒`;
-    const overview=[{value:"all",label:"全部记录",count:summary.total},{value:"none",label:"未分类",count:summary.states.none},{value:"planned",label:"待看",count:summary.states.planned},{value:"reading",label:"在看",count:summary.states.reading},{value:"watched",label:"看过",count:summary.states.watched},{value:"ignored",label:"不看",count:summary.states.ignored},{opened:"yes",label:"已点开",count:summary.opened},{opened:"no",label:"从未点开",count:summary.total-summary.opened}];
-    $("record-state-overview").replaceChildren(...overview.map(item=>{const active=item.opened?$("record-opened").value===item.opened:item.value==="all"?$("record-state").value==="all"&&$("record-opened").value==="all":$("record-state").value===item.value;const button=node("button",`state-summary-button${active?" active":""}`);button.type="button";button.append(node("span","",item.label),node("strong","",number(item.count)));button.onclick=()=>{if(item.opened)$("record-opened").value=item.opened;else if(item.value==="all"){$("record-state").value="all";$("record-opened").value="all";}else $("record-state").value=item.value;load();};return button;}));
+    renderOverview();
     renderBulk();
     if(!current.total){
       const empty=node("div","empty-state");empty.append(node("div","empty-icon","✓"));
@@ -158,12 +202,14 @@
     error();hideSuggestions();busy(true);$("records-pagination").hidden=true;
     $("records-list").replaceChildren(node("div","loading","正在读取已保存的作品…"));
     try{
+      await Promise.allSettled([...recordWrites]);if(active.signal.aborted)return;
       const response=await fetch(`/api/records?${params}`,{signal:active.signal});const data=await response.json();
       if(!response.ok)throw new Error(data.error||"记录读取失败，请重试。");if(active.signal.aborted)return;
       remember(data.tag_labels);
       const sent=applied.getAll("tag");if(tags.length===sent.length&&tags.every((tag,index)=>tag===sent[index])){tags=[...data.tags];renderTags();}
       applied.delete("tag");params.delete("tag");data.tags.forEach(tag=>{applied.append("tag",tag);params.append("tag",tag);});
       current=data;render();params.set("page",String(data.page));
+      $("record-action-feedback").textContent="点击爱心标记看过，点击划线圆圈标记不看；再次点击取消。";
       const url="/records?"+params;
       if(updateHistory&&location.pathname+location.search!==url)history.pushState(null,"",url);
     }catch(failure){
@@ -196,9 +242,9 @@
   $("records-previous").onclick=()=>pageTo(current.page-1);$("records-next").onclick=()=>pageTo(current.page+1);
   $("records-jump").onclick=()=>pageTo($("records-page").value);
   $("records-page").onkeydown=event=>{if(event.key==="Enter"){event.preventDefault();pageTo(event.target.value);}};
-  $("select-record-page").onchange=event=>{for(const item of current?.items||[]){event.target.checked?selected.add(item.gid):selected.delete(item.gid);}render();};
-  $("clear-record-selection").onclick=()=>{selected.clear();render();};
-  $("apply-bulk-state").onclick=()=>setState([...selected],$("bulk-record-state").value);
+  $("select-record-page").onchange=event=>{for(const item of current?.items||[]){event.target.checked?selected.add(item.gid):selected.delete(item.gid);}updateCards();};
+  $("clear-record-selection").onclick=()=>{selected.clear();updateCards();};
+  $("apply-bulk-state").onclick=()=>setState([...selected],$("bulk-record-state").value,true);
   $("record-view").value=view;
   $("record-view").disabled=true;
   $("record-view").onchange=()=>{

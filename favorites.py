@@ -580,16 +580,21 @@ class FavoriteStore:
         placeholders = ",".join("?" for _ in unique)
         now = int(time.time())
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             found = {row[0] for row in db.execute(f"SELECT gid FROM favorites WHERE gid IN ({placeholders}) UNION SELECT gid FROM collection_failures WHERE gid IN ({placeholders})", (*unique,*unique))}
             missing = [gid for gid in unique if gid not in found]
             if missing:
                 raise ValueError(f"有 {len(missing)} 条作品还没有采集记录。")
+            previous = dict(db.execute(f"SELECT state,COUNT(*) FROM record_status WHERE gid IN ({placeholders}) GROUP BY state", unique))
+            previous["none"] = previous.get("none", 0) + len(unique) - sum(previous.values())
+            state_changes = {value: (len(unique) if value == state else 0) - previous.get(value, 0)
+                             for value in sorted(READING_STATES)}
             db.executemany("""
                 INSERT INTO record_status(gid,state,state_updated_at) VALUES (?,?,?)
                 ON CONFLICT(gid) DO UPDATE SET state=excluded.state,state_updated_at=excluded.state_updated_at
             """, ((gid, state, now) for gid in unique))
             rows = [dict(row) for row in db.execute(f"SELECT * FROM record_status WHERE gid IN ({placeholders}) ORDER BY gid", unique)]
-        return {"updated": len(rows), "state": state, "items": rows}
+        return {"updated": len(rows), "state": state, "items": rows, "state_changes": state_changes}
 
     def remember_cooldown(self, until):
         with self.connection() as db:

@@ -6,6 +6,28 @@
   const sources={"exhentai.org":"ExHentai","e-hentai.org":"E-Hentai"};
   const stateNames={none:"未分类",planned:"待看",reading:"在看",watched:"看过",ignored:"不看"};
   function node(tag,className,text){const result=document.createElement(tag);if(className)result.className=className;if(text!==undefined)result.textContent=text;return result;}
+  function stateIcon(state){
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("viewBox","0 0 24 24");svg.setAttribute("aria-hidden","true");svg.setAttribute("focusable","false");
+    const path=document.createElementNS(svg.namespaceURI,"path");
+    path.setAttribute("d",state==="watched"?"M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z":"M5.6 5.6l12.8 12.8M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z");
+    svg.append(path);return svg;
+  }
+  function updateRecord(card,item,busy=false){
+    const state=item.reading_state||"none",badge=card.querySelector(".reading-badge"),opened=card.querySelector(".opened-badge");
+    if(badge){badge.className=`reading-badge reading-${state}`;badge.textContent=stateNames[state];}
+    if(opened)opened.textContent=item.opened_count?`已点开 ${number(item.opened_count)} 次`:"从未点开";
+    const controls=card.querySelector(".saved-reading-controls");
+    if(!controls)return;
+    controls.setAttribute("aria-busy",String(busy));
+    controls.querySelectorAll("button,select").forEach(control=>control.disabled=busy);
+    controls.querySelector("select").value=state;
+    controls.querySelectorAll("[data-reading-state]").forEach(button=>{
+      const value=button.dataset.readingState,pressed=state===value;
+      const action=pressed?`取消${stateNames[value]}，恢复未分类`:`标记为${stateNames[value]}`;
+      button.setAttribute("aria-pressed",String(pressed));button.setAttribute("aria-label",`作品 ID ${item.gid}：${action}`);button.title=action;
+    });
+  }
   function dateParts(timestamp){
     if(!timestamp)return {date:"—",time:"尚无采集记录"};
     const value=new Date(timestamp*1000);
@@ -73,7 +95,7 @@
     }
     function recordCard(item){
       const failed=item.collection_status==="failed",hasCount=item.favorite_count!=null;
-      const card=node("article",`saved-card${failed?" failed":""}${options.selected?.has(item.gid)?" selected":""}`);const content=node("div","saved-content");
+      const card=node("article",`saved-card${failed?" failed":""}${options.selected?.has(item.gid)?" selected":""}`);card.dataset.gid=item.gid;const content=node("div","saved-content");
       if(["extended","thumbnails"].includes(view)){
         const cover=node("div","saved-cover"),image=node("img"),help=node("a","cover-test-link","测试封面连接 →");
         help.href=`/maintenance?cover_gid=${item.gid}#network-section`;help.hidden=true;
@@ -142,16 +164,23 @@
       count.append(value);
       if(ratingInfo?.state==="insufficient")count.append(node("span","saved-rating-sample",`评分人数 ${number(item.rating_count)} / 20`));
       if(options.recordControls){
-        const stateControl=node("label","saved-state-control","阅读状态"),stateSelect=node("select");stateSelect.setAttribute("aria-label",`作品 ID ${item.gid} 的阅读状态`);
+        const controls=node("div","saved-state-control saved-reading-controls"),quick=node("div","saved-state-shortcuts");
+        quick.setAttribute("role","group");quick.setAttribute("aria-label",`作品 ID ${item.gid} 的快捷标记`);
+        for(const state of ["watched","ignored"]){
+          const button=node("button",`reading-shortcut shortcut-${state}`);button.type="button";button.dataset.readingState=state;
+          button.append(stateIcon(state),node("span","",stateNames[state]));
+          button.onclick=()=>options.onState([item.gid],item.reading_state===state?"none":state);quick.append(button);
+        }
+        const stateControl=node("label","saved-state-more"),stateSelect=node("select");stateSelect.setAttribute("aria-label",`作品 ID ${item.gid} 的阅读状态`);
         for(const [value,label] of Object.entries(stateNames)){const option=node("option","",label);option.value=value;option.selected=value===item.reading_state;stateSelect.append(option);}
-        stateSelect.onchange=()=>options.onState([item.gid],stateSelect.value);stateControl.append(stateSelect);count.append(stateControl);
+        stateSelect.onchange=()=>options.onState([item.gid],stateSelect.value);stateControl.append(node("span","","更多状态"),stateSelect);controls.append(quick,stateControl);count.append(controls);
       }
       card.append(count);
       const footer=node("div","saved-card-footer"),saved=dateParts(item.recorded_at||item.checked_at),stamp=node("div","",item.recorded_at||item.checked_at?`${failed?"失败记录于":"采集于"} ${saved.date} ${saved.time}`:"尚无收藏数采集记录");
       if(item.source)stamp.append(node("span","saved-source",sources[item.source]||"来源未知"));footer.append(stamp);
       const actions=node("div","saved-footer-actions");
       if(link){const open=node("a","","查看源站 ↗");open.href=link;open.target="_blank";open.rel="noopener noreferrer";trackLink(open,item);actions.append(open);}footer.append(actions);
-      card.append(footer);return card;
+      card.append(footer);if(options.recordControls)updateRecord(card,item,options.recordBusy);return card;
     }
     return recordCard(item);
   }
@@ -181,5 +210,5 @@
     const control={selected,set,write(params){params.delete("category");selected().forEach(value=>params.append("category",value));},onchange:null};
     set([]);return control;
   }
-  window.galleryCards={render,dateParts,renderRatingGuide,categoryFilter,categoryNames:values=>values.map(value=>categories[value]||value).join("、")};
+  window.galleryCards={render,updateRecord,dateParts,renderRatingGuide,categoryFilter,categoryNames:values=>values.map(value=>categories[value]||value).join("、")};
 })();

@@ -208,6 +208,22 @@ class RecordedWorksTests(unittest.TestCase):
         self.catalog.favorites.set_reading_state([1,2],'none')
         self.assertEqual(self.query(state='none')['total'],2)
 
+    def test_state_changes_match_summary_and_failed_batch_is_atomic(self):
+        store=self.catalog.favorites
+        store.mark_opened(1)
+        store.set_reading_state([2],'planned')
+        store.set_reading_state([3],'watched')
+        before=self.query()['summary']['states']
+        updated=store.set_reading_state([1,2,2,3,99],'watched')
+        after=self.query()['summary']['states']
+        self.assertEqual(updated['updated'],4)
+        self.assertEqual(updated['state_changes'],{key:after[key]-before[key] for key in before})
+        self.assertEqual(updated['state_changes'],{'none':-2,'planned':-1,'reading':0,'watched':3,'ignored':0})
+        self.assertTrue(all(change==0 for change in store.set_reading_state([1,2,3,99],'watched')['state_changes'].values()))
+        with self.assertRaises(ValueError):store.set_reading_state([1,123456],'ignored')
+        self.assertEqual(self.query()['summary']['states'],after)
+        self.assertEqual(next(item for item in self.query()['items'] if item['gid']==1)['opened_count'],1)
+
     def test_state_and_open_validation(self):
         for options in ({'state':'later'},{'opened':'maybe'}):
             with self.assertRaises(ValueError):self.query(**options)

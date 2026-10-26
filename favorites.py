@@ -758,7 +758,7 @@ class Collector:
             if not isinstance(skip_existing,bool):
                 raise ValueError("跳过已采集选项须为开关值。")
             mode=values.get("collection_mode",self.settings.get("collection_mode","full") if self.settings else "full")
-            if mode not in {"rounds","batch","full"}:raise ValueError("请选择分轮、分批或全量采集。")
+            if mode not in {"rounds","batch","full","rating_full"}:raise ValueError("请选择分轮、分批、全量或评分全库采集。")
             raw_batch=values.get("batch_size",100)
             if isinstance(raw_batch,bool) or not re.fullmatch(r"[0-9]+",str(raw_batch)) or not 1 <= int(raw_batch) <= 100000:
                 raise ValueError("每轮 / 每批数量须为 1～100000 的整数。")
@@ -766,6 +766,8 @@ class Collector:
             rating_priority=values.get("rating_priority",False)
             if not isinstance(rating_priority,bool):
                 raise ValueError("评分优先选项须为开关值。")
+            if mode == "rating_full":
+                rating_priority = True
             cookie_header = self.settings["cookies"] if reuse else "; ".join(cookies)
             same_access = self.settings and all(self.settings.get(key)==value for key,value in (("host",host),("cookies",cookie_header),("proxy",proxy)))
             encoded_proxy = encode_collector_proxy(proxy)
@@ -848,6 +850,8 @@ class Collector:
             scope="SELECT t.gid,t.token,CASE WHEN t.state IN ('pending','failed') AND "+eligible+" THEN 1 ELSE 0 END AS needs_collection,t.job_id,t.state AS task_state FROM tasks AS t LEFT JOIN favorites AS f ON f.gid=t.gid WHERE t.job_id=? AND t.round_no<=? UNION ALL SELECT g.gid,g.token,0 AS needs_collection,0 AS job_id,'' AS task_state FROM catalog.gallery AS g JOIN main.favorites AS f ON f.gid=g.gid WHERE ("+where+") AND NOT EXISTS(SELECT 1 FROM tasks AS queued WHERE queued.job_id=? AND queued.gid=g.gid)"
             scope_params=(*eligibility_params,job["id"],target,*params,job["id"])
         else:
+            if self.settings.get("collection_mode") == "rating_full":
+                query = {"scope": ["library"]}
             _,where,params=self.catalog.collection_plan(query)
             scope="SELECT g.gid,g.token,("+eligible+") AS needs_collection,0 AS job_id,'' AS task_state FROM catalog.gallery AS g LEFT JOIN main.favorites AS f ON f.gid=g.gid WHERE ("+where+")"
             scope_params=(*eligibility_params,*params)
@@ -990,6 +994,8 @@ class Collector:
                 if not job or job["collection_mode"]!="batch" or self.settings.get("collection_mode")!="batch":
                     raise ValueError("请先完成一批采集，并使用分批模式追加下一批。")
                 query=job["query"]
+            elif self.settings.get("collection_mode") == "rating_full":
+                query = {"scope": ["library"]}
             canonical,where,params = self.catalog.collection_plan(query)
             source = "catalog.gallery AS g LEFT JOIN main.favorites AS f ON f.gid=g.gid"
         else:
@@ -1048,7 +1054,7 @@ class Collector:
             cutoff = int(time.time())-self.settings["refresh_days"]*86400
             plan = self._plan(query,operation,cutoff)
             if operation in {"start","next_batch"} and not plan["total"]:
-                raise ValueError("当前搜索没有匹配作品。")
+                raise ValueError("整个目录没有符合采集规则的作品，请检查目录和标签黑名单。" if plan["collection_mode"]=="rating_full" else "当前搜索没有匹配作品。")
             samples = list(self.response_times)
             response_seconds = sum(samples)/len(samples) if samples else 2.0
             interval = self.settings["interval"]
@@ -1100,6 +1106,11 @@ class Collector:
                     db.execute("INSERT INTO tasks(job_id,gid,token,priority,round_no) SELECT ?,gid,token,priority,CAST(priority / ? AS INTEGER)+1 FROM ("+sql+")",(job_id,plan["batch_size"],*params,*plan["eligibility_params"]))
                 elif batched:
                     db.executemany("INSERT INTO tasks(job_id,gid,token,priority) VALUES (?,?,?,?)",[(job_id,item["gid"],item["token"],index) for index,item in enumerate(plan["candidates"])])
+                elif plan["collection_mode"] == "rating_full":
+                    db.execute("""INSERT INTO tasks(job_id,gid,token,priority)
+                        SELECT ?,g.gid,g.token,ROW_NUMBER() OVER (ORDER BY CAST(g.rating AS REAL) DESC,g.gid DESC)
+                        FROM catalog.gallery AS g LEFT JOIN main.favorites AS f ON f.gid=g.gid
+                        WHERE ("""+where+") AND "+plan["eligible"],(job_id,*params,*plan["eligibility_params"]))
                 elif plan["rating_priority"]:
                     db.execute("""INSERT INTO tasks(job_id,gid,token,priority)
                         SELECT ?,g.gid,g.token,ROW_NUMBER() OVER (

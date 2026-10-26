@@ -44,12 +44,16 @@
   function refreshDays(){return Number(ui("collector-refresh").value==="custom"?ui("collector-custom-days").value:ui("collector-refresh").value);}
   function batchSize(){return Number(ui("collector-batch-size").value==="custom"?ui("collector-custom-batch-size").value:ui("collector-batch-size").value);}
   function requestInterval(){return Number(ui("collector-interval").value==="custom"?ui("collector-custom-interval").value:ui("collector-interval").value);}
+  function libraryMode(){return ui("collector-mode").value==="rating_full";}
+  function collectionQuery(){return libraryMode()?"":submittedFilters?.toString()||"";}
   function savedTask(){return Boolean(state?.job&&["paused","awaiting_next","completed_with_errors"].includes(state.job.state));}
   function queryScope(query){
     return JSON.stringify({tags:[...(query.tag||[])].sort(),excluded:[...(query.exclude_tag||[])].sort(),
       mode:query.tag_mode?.[0]||"and",title:query.title?.[0]||"",categories:[...(query.category||[])].filter(Boolean).sort(),inactive:query.include_inactive?.[0]||"0"});
   }
   function matchesSavedTask(){
+    if(libraryMode())return state?.job?.collection_mode==="rating_full";
+    if(state?.job?.query?.scope?.[0]==="library")return false;
     if(!submittedFilters||!responseData||!state?.job)return false;
     return queryScope(state.job.query||{})===queryScope({tag:responseData.tags,exclude_tag:[...new Set([...(responseData.exclude_tags||[]),...(responseData.blacklist_tags||[])])],
       tag_mode:[responseData.tag_mode||"and"],title:[submittedFilters.get("title")||""],category:responseData.categories,include_inactive:[responseData.include_inactive?"1":"0"]});
@@ -63,6 +67,7 @@
   }
   function scopeTerms(query){
     const terms=[];
+    if(query.scope?.[0]==="library")terms.push("整个作品目录");
     if(query.tag?.length)terms.push(query.tag.map(tagName).join(query.tag_mode?.[0]==="or"?" 或 ":" 且 "));
     (query.exclude_tag||[]).forEach(tag=>terms.push("排除："+tagName(tag)));
     if(query.title?.[0])terms.push("标题："+query.title[0]);
@@ -95,6 +100,7 @@
     ui("collector-job").scrollIntoView({block:"start",behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});
   }
   function scopeKey(){
+    if(libraryMode())return "rating_full";
     if(!submittedFilters)return "";
     return JSON.stringify({tags:submittedFilters.getAll("tag").sort(),mode:submittedFilters.get("tag_mode")||"and",excluded:submittedFilters.getAll("exclude_tag").sort(),blacklist:submittedFilters.get("use_blacklist")||"1",title:submittedFilters.get("title")||"",categories:submittedFilters.getAll("category").sort(),inactive:submittedFilters.get("include_inactive")||"0"});
   }
@@ -119,7 +125,7 @@
     ui("estimate-skipped").textContent=number(data.skipped)+" 条";
     ui("estimate-duration").textContent=duration(data.estimated_seconds);
     ui("estimate-detail").textContent=`其中首次采集 ${number(data.never_seen)} 条、过期刷新 ${number(data.refresh_count)} 条。`+(data.skip_existing?"本次跳过所有已成功采集的作品，缓存天数不生效。":`本次复用 ${data.refresh_days} 天内的缓存。`)+(batched&&newTask?`另有 ${number(data.deferred)} 条需要处理，但未纳入本批，留待后续。`:"");
-    ui("estimate-detail").textContent+=data.rating_priority?"队列按平均评分从高到低排列；持续失败项延后。":data.collection_mode==="full"?"队列使用作品 ID 顺序。":"队列使用年份均衡顺序。";
+    ui("estimate-detail").textContent+=data.collection_mode==="rating_full"?"全库队列按数据库平均评分从高到低排列，同分时作品 ID 较大的优先；无评分作品排在后面，持续处理到队列完成。":data.rating_priority?"队列按平均评分从高到低排列；持续失败项延后。":data.collection_mode==="full"?"队列使用作品 ID 顺序。":"队列使用年份均衡顺序。";
     if(rounds)ui("estimate-detail").textContent+=newTask?`将保存 ${number(data.queue_total)} 条待抓取作品，分为 ${number(data.round_count)} 轮，每轮最多 ${number(data.batch_size)} 条。本次只执行第 1 轮，后续由你手动继续。`:`本次处理第 ${number(data.round_number)} / ${number(data.round_count)} 轮；另有 ${number(data.deferred)} 条留在后续轮次。`;
     ui("estimate-coverage").textContent=(data.scope_known!=null?`全范围 ${number(data.scope_total)} 条，预估时已有收藏数 ${number(data.scope_known)} 条。`:`这是原任务的剩余队列；原搜索范围共 ${number(data.scope_total)} 条。`)+(batched?"覆盖完成前，分批结果不能代表完整收藏榜。":"最新覆盖情况可在刷新搜索结果后查看。");
     ui("estimate-years").hidden=!data.year_breakdown?.length;
@@ -127,12 +133,14 @@
     const basis=data.estimate_basis==="measured"?`网页读取平均约 ${data.response_seconds.toFixed(2)} 秒，来自最近 ${data.response_samples} 条成功请求。`:"尚无网页耗时测量，暂按每条读取 2 秒估算；验证成功后可重新预估。";
     ui("estimate-basis").textContent=data.pending?`请求间隔 ${data.interval} 秒，间隔耗时约 ${duration(data.interval_seconds).replace(/^约 /,"")}。${basis}估计未包含重试、限流和暂停，实际可能更久。`:"全部符合跳过条件，确认后不会向源站发起抓取请求。";
     ui("collector-confirm").textContent=data.pending===0?"确认跳过，无需抓取":data.operation==="next_round"?`确认抓取第 ${data.round_number} 轮`:data.operation==="next_batch"?"确认采集下一批":data.operation==="start"?(rounds?"保存计划并开始第 1 轮":batched?"确认采集本批":"确认开始全量采集"):data.operation==="resume"?"确认继续采集":"确认重试";
+    if(data.operation==="start"&&data.collection_mode==="rating_full"&&data.pending)ui("collector-confirm").textContent="确认按评分全库采集";
     ui("collector-estimate").scrollIntoView({block:"nearest",behavior:"smooth"});
   }
   function updateControls(){
     const job=state?.job;
     const searching=ui("results").getAttribute("aria-busy")==="true";
     const hasSearch=Boolean(responseData?.total&&submittedFilters&&!searching);
+    const fullLibrary=libraryMode(),hasScope=fullLibrary||hasSearch;
     const busy=actionBusy||Boolean(state?.busy)||Boolean(window.catalogMaintenanceActive)||Boolean(window.catalogStopped);
     const cooling=Boolean(state?.cooldown_until>Date.now()/1000);
     for(const control of ui("collector-settings").elements)control.disabled=busy;
@@ -147,7 +155,9 @@
     ui("custom-refresh").hidden=!custom;
     ui("collector-custom-days").disabled=busy||skip||!custom;
     ui("collector-custom-days").required=custom&&!skip;
-    const mode=ui("collector-mode").value,batchMode=mode!=="full",roundMode=mode==="rounds",customBatch=ui("collector-batch-size").value==="custom";
+    const mode=ui("collector-mode").value,batchMode=["rounds","batch"].includes(mode),roundMode=mode==="rounds",customBatch=ui("collector-batch-size").value==="custom";
+    if(fullLibrary)ui("collector-rating-priority").checked=true;
+    ui("collector-rating-priority").disabled=busy||fullLibrary;
     const ratingPriority=ui("collector-rating-priority").checked;
     ui("collector-batch-size").disabled=busy||!batchMode;
     ui("custom-batch-control").hidden=!batchMode||!customBatch;
@@ -156,14 +166,18 @@
     ui("collector-round-hint").hidden=!roundMode;
     ui("collector-rating-hint").textContent=ratingPriority?"开启后，待抓取候选按数据库平均评分降序；评分相同时作品 ID 较新的优先。持续失败项仍会延后。":"关闭时，分批模式按年份均衡挑选，并在各年份内优先高评分作品；全量模式沿用作品 ID 顺序。";
     ui("collector-batch-hint").textContent=roundMode?"确认时保存全部待抓取作品及其顺序，按设定数量分轮。每轮结束自动停止；修改此处的数量仅影响新计划，已保存计划继续使用原来的每轮数量。":batchMode?(ratingPriority?"从全历史匹配记录中直接选择评分最高的本批候选，不再平均分配年份。分批结果仍不代表完整收藏榜。":"从全历史匹配记录中按发布年份轮流挑选，年份内评分高的优先；先补未记录、未尝试的作品。分批排名不代表完整收藏榜。"):(ratingPriority?"全量采集所有待处理作品，并按平均评分从高到低排列队列。":"全量采集所有符合缓存规则的待处理作品；数量较大时可能需要较长时间。");
+    if(fullLibrary){
+      ui("collector-rating-hint").textContent="此模式固定按数据库平均评分降序，同分时作品 ID 较大的优先，无评分作品排在后面。源站访问验证仍采用随机取样。";
+      ui("collector-batch-hint").textContent="无需先搜索，采集整个作品目录；搜索标签、标题、作品分类及临时排除条件不限制范围。沿用已保存的标签黑名单，排除已移除、已隐藏和旧版本作品，按缓存规则跳过已有数据，连续处理到队列完成，可随时暂停。";
+    }
     ui("collector-policy-hint").textContent=skip?"只补缺失的收藏数；已成功采集的作品即使过期也跳过，缓存天数此时不生效。失败或未知项仍可抓取。":"超过缓存天数后，再次创建任务时才会刷新；不会自动重新抓取。";
-    ui("collector-verify").disabled=busy||cooling||settingsDirty||!state?.configured||(!hasSearch&&!savedTask());
+    ui("collector-verify").disabled=busy||cooling||settingsDirty||!state?.configured||(!hasScope&&!savedTask());
     ui("collector-reverify").hidden=!(state?.verification_unavailable||state?.verification_deferred);
     ui("collector-reverify").disabled=ui("collector-verify").disabled;
     ui("collector-verify").textContent=savedTask()?"验证原任务的源站访问":"随机验证源站访问";
     ui("collector-recover").hidden=!cooling;
     const probeWait=Math.max(0,Math.ceil((state?.cooldown_probe_after||0)-Date.now()/1000));
-    ui("collector-recover").disabled=busy||settingsDirty||!state?.configured||(!hasSearch&&!savedTask())||probeWait>0;
+    ui("collector-recover").disabled=busy||settingsDirty||!state?.configured||(!hasScope&&!savedTask())||probeWait>0;
     ui("collector-recover").textContent=probeWait?`恢复验证请等 ${probeWait} 秒`:"浏览器已恢复，单次验证";
     if(cooling)ui("collector-reverify").disabled=ui("collector-recover").disabled;
     ui("collector-cooldown-note").hidden=!cooling;
@@ -177,7 +191,8 @@
     ui("collector-skip-unavailable").disabled=busy||cooling||settingsDirty||!state?.configured||!issue;
     const operation=searchOperation(),continuing=operation!=="start";
     ui("collector-start").textContent=operation==="resume"?"继续采集":operation==="next_round"?"继续下一轮":"开始采集";
-    ui("collector-start").disabled=busy||settingsDirty||!state?.configured||!hasSearch||(!continuing&&["paused","running","preparing","awaiting_next"].includes(job?.state));
+    if(fullLibrary&&operation==="start")ui("collector-start").textContent="开始评分全库采集";
+    ui("collector-start").disabled=busy||settingsDirty||!state?.configured||!hasScope||(!continuing&&["paused","running","preparing","awaiting_next"].includes(job?.state));
     ui("collector-pause").disabled=actionBusy||job?.state!=="running";
     ui("collector-resume").disabled=busy||settingsDirty||!state?.configured||job?.state!=="paused";
     ui("collector-retry").disabled=busy||settingsDirty||!state?.configured||!job?.failed||!["paused","awaiting_next","completed_with_errors"].includes(job?.state);
@@ -196,13 +211,17 @@
     ui("collector-confirm").disabled=busy||!preview||settingsDirty||needsVerification||Boolean(preview?.pending&&cooling);
     ui("estimate-verification").hidden=!needsVerification&&!cooling;
     ui("estimate-verification").textContent=needsVerification?`请先点击“${ui("collector-verify").textContent}”，验证成功后重新预估，再确认采集。`:cooling?"源站冷却时间尚未结束，可先查看预估。":"";
-    if(hasSearch){
+    if(fullLibrary){
+      ui("collection-scope").textContent="新计划范围：整个作品目录，按平均评分从高到低连续采集；无需搜索，不受搜索条件限制。沿用已保存的标签黑名单，排除已移除、已隐藏和旧版本作品，按缓存规则跳过已有数据。开始前会显示准确数量与耗时预估。";
+      if(continuing)ui("collection-scope").textContent="已找到保存的评分全库任务。应用并验证源站设置后，可直接继续原队列，无需搜索；评分顺序与进度继续保留。";
+      else if(["paused","awaiting_next"].includes(job?.state))ui("collection-scope").textContent+="另有未结束任务，请在进度区继续或结束原任务后再新建。";
+    }else if(hasSearch){
       const names=(responseData.tags||[]).map(tagName).join(responseData.tag_mode==="or"?" 或 ":" 且 ");
       const title=submittedFilters.get("title");
       ui("collection-scope").textContent=`新计划候选范围：最近一次搜索的全部 ${number(responseData.total)} 条匹配记录${names?" · "+names:""}${title?" · 标题："+title:""}。`+(batchMode?`${roundMode?"每轮":"每批"}最多抓取 ${number(batchSize())} 条。`:"全量模式处理所有待采集作品。")+"修改筛选条件后，请先重新搜索。";
       if(continuing)ui("collection-scope").textContent="本次搜索与保存的任务范围相同，可在这里直接"+(operation==="resume"?"继续采集":"继续下一轮")+"。将沿用原任务的队列、顺序和轮次，预估并确认后开始。";
       else if(["paused","awaiting_next"].includes(job?.state))ui("collection-scope").textContent+="另有范围不同的未结束任务，请在进度区继续或结束原任务后再新建。";
-    }else ui("collection-scope").textContent=savedTask()?"已找到保存的采集任务。应用并验证源站设置后，可直接继续，无需重新搜索；继续时沿用原队列和轮次。":"先完成一次有匹配结果的搜索，再建立采集计划。分轮抓取会保存完整队列，每轮结束自动停止。";
+    }else ui("collection-scope").textContent=savedTask()?"已找到保存的采集任务。应用并验证源站设置后，可直接继续，无需重新搜索；继续时沿用原队列和轮次。":"先完成一次有匹配结果的搜索，再建立采集计划；也可选择「评分全库采集」，无需搜索即可按评分采集整个目录。";
   }
   function render(){
     if(!state)return;
@@ -232,6 +251,7 @@
       const selection=job.selection||{},batched=job.collection_mode==="batch",rounds=job.collection_mode==="rounds",plan=job.round_progress;
       const ordering=selection.rating_priority?"评分从高到低":"年份均衡";
       ui("collector-job-selection").textContent=batched?`分批采集 · ${ordering} · 本批 ${number(job.total)} 条 · 全范围 ${number(selection.scope_total)} 条 · 建立本批时已有收藏数 ${number(selection.scope_known)} 条，另有 ${number(selection.deferred)} 条待后续。`:`全量采集 · ${selection.rating_priority?"评分从高到低":"作品 ID 顺序"} · 进度包含已复用的缓存。`;
+      if(job.collection_mode==="rating_full")ui("collector-job-selection").textContent=`评分全库采集 · 平均评分从高到低 · 建立计划时全范围 ${number(selection.scope_total)} 条 · 连续处理到队列完成，进度包含已复用的缓存。`;
       ui("collector-round-plan").hidden=!rounds;
       ui("collector-active-heading").hidden=!rounds;
       ui("collector-save-note").hidden=!rounds;
@@ -301,12 +321,13 @@
         acceptState(data);
         focusProgress=["start","next_round","next_batch","resume","retry"].includes(path);
       }
-      if(path==="verify"&&submittedFilters) await search(responseData?.page||1,false,false);
+      if(path==="start"&&data.job?.collection_mode==="rating_full"&&data.job.state!=="completed")feedback("评分全库计划已保存，正在按平均评分连续采集，可随时暂停。");
+      if(path==="verify"&&submittedFilters&&!libraryMode()) await search(responseData?.page||1,false,false);
     }catch(error){feedback(error.message==="Failed to fetch"?"无法连接本地服务，请重新启动。":error.message,true);}
     finally{actionBusy=false;await refresh();updateControls();if(focusProgress)showJob();}
   }
   function settingsPayload(includeCredentials=false){
-    const values={interval:requestInterval(),refresh_days:refreshDays()||state?.refresh_days||7,skip_existing:ui("collector-skip-existing").checked,collection_mode:ui("collector-mode").value,batch_size:batchSize(),rating_priority:ui("collector-rating-priority").checked};
+    const values={interval:requestInterval(),refresh_days:refreshDays()||state?.refresh_days||7,skip_existing:ui("collector-skip-existing").checked,collection_mode:ui("collector-mode").value,batch_size:libraryMode()?1000:batchSize(),rating_priority:libraryMode()||ui("collector-rating-priority").checked};
     if(includeCredentials)Object.assign(values,{host:ui("collector-host").value,proxy:ui("collector-proxy").value,ipb_member_id:ui("cookie-member").value,ipb_pass_hash:ui("cookie-hash").value,igneous:ui("cookie-igneous").value});
     return values;
   }
@@ -350,11 +371,11 @@
   ui("collector-proxy").addEventListener("blur",saveProxy);
   document.addEventListener("visibilitychange",()=>{if(document.hidden)saveProxy();});
   addEventListener("pagehide",saveProxy);
-  ui("collector-verify").onclick=()=>action("verify",savedTask()?{use_job:true}:{query:submittedFilters.toString()});
-  ui("collector-recover").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),recover_cooldown:true});
-  ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:submittedFilters.toString()}),retry_unavailable:true,recover_cooldown:Boolean(state?.cooldown_until>Date.now()/1000)});
+  ui("collector-verify").onclick=()=>action("verify",savedTask()?{use_job:true}:{query:collectionQuery()});
+  ui("collector-recover").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:collectionQuery()}),recover_cooldown:true});
+  ui("collector-reverify").onclick=()=>action("verify",{...(savedTask()?{use_job:true}:{query:collectionQuery()}),retry_unavailable:true,recover_cooldown:Boolean(state?.cooldown_until>Date.now()/1000)});
   ui("collector-skip-unavailable").onclick=()=>{if(state?.verification_issue)action("skip_unavailable",{issue_id:state.verification_issue.id});};
-  ui("collector-start").onclick=()=>action("preview",{query:submittedFilters.toString(),operation:searchOperation()});
+  ui("collector-start").onclick=()=>action("preview",{query:collectionQuery(),operation:searchOperation()});
   ["pause","cancel"].forEach(name=>ui(`collector-${name}`).onclick=()=>action(name));
   ["resume","retry"].forEach(name=>ui(`collector-${name}`).onclick=()=>action("preview",{operation:name}));
   ui("collector-next-batch").onclick=()=>action("preview",{operation:"next_batch"});

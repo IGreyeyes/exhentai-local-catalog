@@ -284,6 +284,8 @@ py -3.14 -m unittest discover -s tests -v
 
 `tests/visual_*.cjs` 与 `tests/visual_collector_server.py` 是浏览器回归辅助脚本，使用 Node.js / Playwright 等额外开发工具，不属于普通运行依赖，也不会随上述 `unittest` 命令执行。部分脚本包含本机测试环境路径，运行前需按自己的环境调整。
 
+`tests/test_rating_library_collection.py` 与 `tests/visual_rating_library.cjs` 验证无需搜索的 `rating_full` 模式：固定全库范围及黑名单快照、评分和同分顺序、无评分位置、缓存跳过、预估确认、随机验证、暂停重启、原队列恢复及窄窗口。队列通过 SQLite 排序写入，完整候选不载入 Python 列表；恢复任务使用已保存的 `scope=library` 范围和任务优先级。
+
 `tests/visual_favorites_share.cjs` 在 Git 忽略的 `logs/` 下创建独立模拟资料库并保留截图，验证折叠教程、导出文件对应的数量与原抓取时间范围、复制标题 / 正文、手动复制回退、取消 / 保存失败后清除旧信息、空文件、旧后台兼容及小窗口排版。收藏数 JSON 继续采用 version 2；分享摘要通过导出响应的 `X-Favorite-Share-Info` 传回浏览器或桌面保存桥接，不重新读取可能已变化的资料库。
 
 ## 发布新版客户端

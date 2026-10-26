@@ -147,6 +147,16 @@ def verify(program_directory=None):
             history=get('/api/release-history')
             if history['current_version'] != APP_VERSION:
                 raise AssertionError('Packaged client version does not match this release')
+            configured=post('/api/collector/settings',{'host':'e-hentai.org','collection_mode':'rating_full','rating_priority':False,'skip_existing':True},token)
+            if configured['collection_mode']!='rating_full' or not configured['rating_priority']:
+                raise AssertionError('Packaged full-library rating mode is unavailable')
+            preview=post('/api/collector/preview',{},token)
+            if preview['query'].get('scope')!=['library'] or (preview['total'],preview['pending'],preview['skipped'])!=(1,0,1):
+                raise AssertionError('Packaged library preview must work without a search and honor cached data')
+            completed=post('/api/collector/start',{'preview_id':preview['preview_id']},token)
+            if completed['job']['state']!='completed' or completed['job']['cached']!=1:
+                raise AssertionError('Packaged cached-only library plan should complete without source requests')
+            report['rating_library']='empty-query full-library preview, fixed rating order and cached-only confirmation passed'
             if not any(item['version']=='1.1.10' for item in history['entries']) or not any(item['version']==history['current_version'] for item in history['entries']):
                 raise AssertionError("Packaged offline history is incomplete")
             with opener.open(base+"/qq-group-qr.png",timeout=10) as response:
@@ -235,6 +245,11 @@ def verify(program_directory=None):
                 # This is only our process with a disposable fixture, never a user's service.
                 process.terminate()
                 process.wait(timeout=10)
+            if sys.exception() is not None:
+                for name in ('desktop-output.log','desktop.log'):
+                    diagnostic=root/'logs'/name
+                    if diagnostic.is_file():
+                        shutil.copy2(diagnostic,PROJECT/'logs'/('packaged-check-failure-'+name))
     print("Packaged WebView2 and service checks passed with Python removed from PATH.")
 
 

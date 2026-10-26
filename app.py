@@ -365,7 +365,12 @@ class Catalog:
         }
 
     def collection_plan(self, query):
-        selection = self.selection(query)
+        library = query.get("scope", ["search"])[0] == "library"
+        if library:
+            # A saved full-library plan keeps its resolved blacklist, independently
+            # of the search form and later blacklist edits.
+            query = {key: query[key] for key in ("exclude_tag", "use_blacklist") if key in query}
+        selection = self.selection(query, allow_empty=library)
         with self.connection() as db:
             where, params = self.build_filter(
                 db, selection.tags, selection.title, selection.include_inactive,
@@ -379,6 +384,8 @@ class Catalog:
             "category":list(selection.categories),
             "tag_mode":[selection.tag_mode],
         }
+        if library:
+            canonical["scope"] = ["library"]
         return canonical, where, params
 
     def search(self, query):

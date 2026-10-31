@@ -34,7 +34,7 @@ async function main(){
   const payload=JSON.parse(fs.readFileSync(file,'utf8'));
   await page.locator('#favorites-share-generated').waitFor({state:'visible'});
   const title=await page.inputValue('#favorites-share-title'),body=await page.inputValue('#favorites-share-body');
-  assert(payload.version===2&&Object.keys(payload).length===4,'Transfer format changed');
+  assert(payload.version===3&&Object.keys(payload).length===5&&Array.isArray(payload.failures),'Transfer format invalid');
   assert(payload.records.length===6&&title.includes('6 条')&&body.includes('v'+version),'Wrong count or version');
   const times=payload.records.map(item=>item.checked_at);
   assert(body.includes(stamp(Math.min(...times)))&&body.includes(stamp(Math.max(...times)))&&body.includes('UTC+8'),'Capture range does not describe exported file');

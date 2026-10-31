@@ -65,7 +65,7 @@ class FavoriteTransferTests(unittest.TestCase):
     def prepare(self, raw):
         return self.engine.prepare_favorites(self.engine.stage_favorites(raw), "test-task")
 
-    def test_export_only_contains_successful_counts_ids_original_times_and_sources(self):
+    def test_export_contains_successes_and_portable_failures_without_personal_settings(self):
         self.save(1, 0, 10)
         self.save(2, 123, 20)
         self.store.set_reading_state([1], "watched")
@@ -78,13 +78,16 @@ class FavoriteTransferTests(unittest.TestCase):
         payload = parse_snapshot(raw)
         self.assertEqual(total, 2)
         self.assertEqual(payload["records"], [self.item(1, 0, 10, "exhentai.org"), self.item(2, 123, 20, "exhentai.org")])
-        self.assertEqual(set(payload), {"format", "version", "exported_at", "records"})
-        for forbidden in ("token", "title", "tag_blacklist", "reading_state", "opened_count", "cookies", "job_id", "failed_at"):
+        self.assertEqual(set(payload), {"format", "version", "exported_at", "records", "failures"})
+        self.assertEqual([item['gid'] for item in payload['failures']], [2,3])
+        self.assertTrue(all(item['reason']=='unknown' for item in payload['failures']))
+        for forbidden in ("error", "title", "tag_blacklist", "reading_state", "opened_count", "cookies", "job_id"):
             self.assertNotIn('"' + forbidden + '"', raw.decode())
         self.assertNotIn(str(self.root), raw.decode())
         # Metadata must describe the file, even if collection has advanced since export.
         self.save(4, 500, 999)
-        self.assertEqual(snapshot_share_info(raw), {"record_count": 2, "oldest_checked_at": 10, "newest_checked_at": 20, "exported_at": payload["exported_at"], "client_version": APP_VERSION})
+        failed_times=[item['failed_at'] for item in payload['failures']]
+        self.assertEqual(snapshot_share_info(raw), {"record_count": 2, "oldest_checked_at": 10, "newest_checked_at": 20, "failure_count":2, "oldest_failed_at":min(failed_times), "newest_failed_at":max(failed_times), "exported_at": payload["exported_at"], "client_version": APP_VERSION})
 
     def test_empty_export_share_info_has_no_invented_capture_time(self):
         raw, total = export_snapshot(self.store.path)
@@ -102,7 +105,7 @@ class FavoriteTransferTests(unittest.TestCase):
         incoming = [self.item(1, 101, 101), self.item(2, 99, 101), self.item(3, 100, 101), self.item(4, 200, 100), self.item(5, 200, 99), self.item(6, 0, 90), self.item(7, 1, 101), self.item(999, 20, 80)]
         before = self.rows()
         summary = preview_snapshot(self.store.path, self.catalog, incoming)
-        self.assertEqual(summary, {"total": 8, "added": 2, "updated": 2, "kept": 4, "kept_older_or_equal_time": 2, "kept_count_not_increased": 2, "missing_catalog": 1, "own_records": 0, "other_records": 0, "unknown_records": 8})
+        self.assertEqual(summary, {"total": 8, "added": 2, "updated": 2, "kept": 4, "kept_older_or_equal_time": 2, "kept_count_not_increased": 2, "missing_catalog": 1, "own_records": 0, "other_records": 0, "unknown_records": 8, "failures":{"total":0,"added":0,"updated":0,"kept":0,"kept_newer_success":0,"kept_newer_or_equal_failure":0}})
         self.assertEqual(self.rows(), before)
         result = merge_snapshot(self.store.path, incoming)
         self.assertEqual(result["added"], 2)
@@ -173,7 +176,7 @@ class FavoriteTransferTests(unittest.TestCase):
 
     def test_invalid_json_versions_and_repeated_json_fields_reject(self):
         payload = json.loads(self.raw([]))
-        payload["version"] = 3
+        payload["version"] = 4
         for raw in (b"invalid", b'{"format":"x","format":"y"}', json.dumps(payload).encode()):
             with self.assertRaises(ValueError):
                 parse_snapshot(raw)

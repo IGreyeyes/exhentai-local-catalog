@@ -212,15 +212,24 @@ def verify(program_directory=None):
                 if not state['result']['same_archive'] or last['result']['backup']!=saved:
                     raise AssertionError('Recheck lost the packaged application result')
             snapshot = post('/api/maintenance/favorites-export', {}, token)
+            if snapshot['version']!=3 or snapshot['failures']!=[]:
+                raise AssertionError('Packaged snapshot must include a portable failure list')
             snapshot['records'].append({'gid':999, 'favorite_count':456, 'checked_at':1712345678, 'source':'e-hentai.org', 'collector_id':'', 'collector_name':''})
+            snapshot['failures'].append({'gid':998,'token':'abcdef0123','source':'e-hentai.org','failed_at':1712345679,'attempts':3,'reason':'network'})
             request = Request(base+'/api/maintenance/favorites-prepare', data=json.dumps(snapshot).encode(), headers={'Content-Type':'application/octet-stream', 'X-Catalog-Token':token}, method='POST')
             with opener.open(request, timeout=10) as response:
                 task = json.load(response)
             state = wait_task(task)
             state = wait_task(post('/api/maintenance/favorites-import', {'prepared_id':state['prepared_favorites']['id']}, token))
             imported = state['result']
-            if imported['summary']['added'] != 1 or imported['backup']['include_catalog']:
+            if imported['summary']['added'] != 1 or imported['summary']['failures']['added']!=1 or imported['backup']['include_catalog']:
                 raise AssertionError('Packaged favorites import did not create a light protection backup')
+            failed=get('/api/records?collection=failed')['items']
+            if len(failed)!=1 or failed[0]['gid']!=998 or failed[0]['source_url']!='https://e-hentai.org/g/998/abcdef0123/':
+                raise AssertionError('Packaged failure import did not preserve the missing-work source link')
+            exported=post('/api/maintenance/favorites-export',{},token)
+            if exported['failures']!=snapshot['failures']:
+                raise AssertionError('Packaged failure export did not retain original timestamps and attempts')
             with closing(sqlite3.connect(Path(imported['backup']['path'])/'data/favorites.sqlite3')) as db:
                 if db.execute('SELECT COUNT(*) FROM favorites WHERE gid=999').fetchone()[0] != 0 or db.execute('SELECT favorite_count FROM favorites WHERE gid=1').fetchone()[0] != 123:
                     raise AssertionError('Import backup must contain the original favorites before merging')
@@ -237,6 +246,9 @@ def verify(program_directory=None):
                     raise AssertionError("Personal records changed")
                 if db.execute('SELECT favorite_count,checked_at FROM favorites WHERE gid=999').fetchone() != (456,1712345678):
                     raise AssertionError('Packaged favorites import did not persist the new count and original timestamp')
+                if db.execute('SELECT failed_at,attempts,job_id FROM collection_failures WHERE gid=998').fetchone()!=(1712345679,3,0):
+                    raise AssertionError('Packaged imported failure did not persist independently from task queues')
+            report['failure_transfer']='v3 success/failure import with protection backup, missing-work link, stable re-export and original failure timestamp passed'
             report["packaged_service"] = "version, search, runtime backup, direct and full-backup catalog updates, inventory, recheck results, favorites import with protection backup, graceful shutdown and record preservation passed"
             report["python_on_path"] = False
             report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

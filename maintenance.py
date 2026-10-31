@@ -218,14 +218,14 @@ class LibraryMaintenance:
         raw = path.read_bytes()
         payload = parse_snapshot(raw)
         progress("正在按采集者身份对比收藏数与原抓取时间…")
-        summary = preview_snapshot(self.data/"favorites.sqlite3", self.catalog_path, payload["records"])
-        result = {"id": secrets.token_hex(12), "task_id": task_id, "stage": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "exported_at": payload["exported_at"], "summary": summary, "rules_version": 2}
+        summary = preview_snapshot(self.data/"favorites.sqlite3", self.catalog_path, payload["records"], payload["failures"])
+        result = {"id": secrets.token_hex(12), "task_id": task_id, "stage": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "exported_at": payload["exported_at"], "summary": summary, "rules_version": 3}
         save_json(self.prepared_favorites_file, result)
         return result
 
     def prepared_favorites(self):
         result = read_json(self.prepared_favorites_file)
-        if result and result.get("rules_version") == 2 and contained(result["stage"], self.staging).is_file():
+        if result and result.get("rules_version") == 3 and contained(result["stage"], self.staging).is_file():
             return result
         return None
 
@@ -241,10 +241,11 @@ class LibraryMaintenance:
         progress("合并前正在备份当前收藏资料…")
         backup = self.backup(False, "收藏数合并前自动备份", progress)
         progress("正在按作品 ID、采集者身份和收藏数合并…")
-        summary = merge_snapshot(self.data/"favorites.sqlite3", payload["records"])
+        summary = merge_snapshot(self.data/"favorites.sqlite3", payload["records"], payload["failures"])
         on_merged()
         self.prepared_favorites_file.unlink(missing_ok=True)
-        return {"summary": summary, "backup": backup, "message": f"收藏数合并完成：新增 {summary['added']:,} 条，更新 {summary['updated']:,} 条，保留现有 {summary['kept']:,} 条。原抓取时间已保留，当前采集计划保持暂停。"}
+        failures = summary["failures"]
+        return {"summary": summary, "backup": backup, "message": f"收藏数合并完成：成功收藏数新增 {summary['added']:,} 条，更新 {summary['updated']:,} 条，保留现有 {summary['kept']:,} 条；失败记录新增 {failures['added']:,} 条，更新 {failures['updated']:,} 条，跳过 {failures['kept']:,} 条。原抓取与失败时间已保留，当前采集计划保持暂停。"}
 
     def translation_status(self):
         paths = [self.data/"tag-translations.json", self.data/"tag-translations-info.json"]

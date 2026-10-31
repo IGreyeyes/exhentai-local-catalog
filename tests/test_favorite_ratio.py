@@ -110,7 +110,7 @@ class FavoriteRatioTests(unittest.TestCase):
         self.assertEqual(self.catalog.search(self.query)["items"][0]["favorite_rating_ratio"],12/5)
         raw, count = export_snapshot(self.catalog.favorites.path)
         snapshot = parse_snapshot(raw)
-        self.assertEqual((snapshot["version"],count),(2,1))
+        self.assertEqual((snapshot["version"],count),(3,1))
         self.assertNotIn("rating_count",snapshot["records"][0])
         snapshot["records"][0].update(favorite_count=200,checked_at=snapshot["records"][0]["checked_at"]+1)
         self.assertEqual(merge_snapshot(self.catalog.favorites.path,snapshot["records"])["updated"],1)

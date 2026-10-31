@@ -286,7 +286,9 @@ py -3.14 -m unittest discover -s tests -v
 
 `tests/test_rating_library_collection.py` 与 `tests/visual_rating_library.cjs` 验证无需搜索的 `rating_full` 模式：固定全库范围及黑名单快照、评分和同分顺序、无评分位置、缓存跳过、预估确认、随机验证、暂停重启、原队列恢复及窄窗口。队列通过 SQLite 排序写入，完整候选不载入 Python 列表；恢复任务使用已保存的 `scope=library` 范围和任务优先级。
 
-`tests/visual_favorites_share.cjs` 在 Git 忽略的 `logs/` 下创建独立模拟资料库并保留截图，验证折叠教程、导出文件对应的数量与原抓取时间范围、复制标题 / 正文、手动复制回退、取消 / 保存失败后清除旧信息、空文件、旧后台兼容及小窗口排版。收藏数 JSON 继续采用 version 2；分享摘要通过导出响应的 `X-Favorite-Share-Info` 传回浏览器或桌面保存桥接，不重新读取可能已变化的资料库。
+`tests/visual_favorites_share.cjs` 在 Git 忽略的 `logs/` 下创建独立模拟资料库并保留截图，验证折叠教程、导出文件对应的数量与原抓取时间范围、复制标题 / 正文、手动复制回退、取消 / 保存失败后清除旧信息、空文件、旧后台兼容及小窗口排版。收藏数 JSON 采用 version 3，保留 v2 的 `records` 成功快照并新增 `failures` 列表，仍导入 v1 / v2。失败仅包含 GID、源站、作品 token、原失败时间、尝试次数和固定失败类型，不复制原始报错或原设备 job_id。分享摘要分别描述成功与失败数量和时间，通过 `X-Favorite-Share-Info` 传回浏览器或桌面保存桥接，不重新读取可能已变化的资料库。
+
+`tests/test_failure_transfer.py` 与 `tests/visual_failure_transfer.cjs` 使用两份独立临时资料库验证成功 / 失败共同迁移、刷新失败保留成功值、仅失败文件、目录暂缺链接、重复导入、旧文件、严格字段校验、跨列表同 GID、成功与失败冲突及同事务回滚。预览和写入均计算合并后实际保留的成功快照，再只接受时间严格更新的失败；导入预览的 `rules_version` 为 3，旧预览需重查。新建失败记录使用 job_id=0，不创建或复制任务队列。
 
 ## 发布新版客户端
 

@@ -27,12 +27,14 @@
   function renderShareInfo(info){
     if(!info)return false;
     const shareDate=shareTime(info.exported_at).slice(0,10);
+    const failures=Number(info.failure_count||0);
     const range=info.record_count?`${shareTime(info.oldest_checked_at)} ～ ${shareTime(info.newest_checked_at)}（UTC+8，北京时间 / 香港时间）`:"无成功收藏数记录";
-    ui("favorites-share-title").value=`收藏数分享｜${number(info.record_count)} 条｜${shareDate}`;
-    ui("favorites-share-body").value=`- 记录数量：${number(info.record_count)} 条\n- 原抓取时间范围：${range}\n- 导出时的客户端版本：v${info.client_version}\n- 分享日期：${shareDate}\n- 补充说明：（选填，发布前补充）\n\n附件：请将本次导出的 .ehfavorites.json 文件压缩为 ZIP 后上传。`;
+    const failedRange=failures?`${shareTime(info.oldest_failed_at)} ～ ${shareTime(info.newest_failed_at)}（UTC+8，北京时间 / 香港时间）`:"无失败记录";
+    ui("favorites-share-title").value=`收藏数分享｜${failures?`成功 ${number(info.record_count)} 条 + 失败 ${number(failures)} 条`:`${number(info.record_count)} 条`}｜${shareDate}`;
+    ui("favorites-share-body").value=`- 记录数量：${number(info.record_count)} 条成功收藏数\n- 抓取失败记录：${number(failures)} 条\n- 原抓取时间范围：${range}\n- 失败时间范围：${failedRange}\n- 导出时的客户端版本：v${info.client_version}\n- 分享日期：${shareDate}\n- 补充说明：（选填，发布前补充）\n\n附件：请将本次导出的 .ehfavorites.json 文件压缩为 ZIP 后上传。接收新版文件请使用 v1.2.8 或更高版本。`;
     ui("favorites-share-generated").hidden=false;ui("favorites-share-placeholder").hidden=true;
     ui("favorites-share-guide").open=true;
-    if(!info.record_count)ui("favorites-share-copy-status").textContent="本次导出为 0 条，无原抓取时间范围。可先采集或合并收藏数，再导出分享。";
+    if(!info.record_count)ui("favorites-share-copy-status").textContent=failures?`本次包含 ${number(failures)} 条失败记录，没有成功收藏数；失败时间和通用失败类型可一同迁移。`:"本次导出为 0 条，无原抓取时间范围。可先采集或合并收藏数，再导出分享。";
     return true;
   }
   async function copyShareInfo(id,label){
@@ -106,7 +108,9 @@
       const summary=ready.summary;
       ui("favorites-file-name").textContent=selectedFavoritesFile()?.name||"上次已校验的收藏数文件";
       for(const [id,key] of [["favorites-total","total"],["favorites-added","added"],["favorites-updated","updated"],["favorites-kept","kept"]])ui(id).textContent=number(summary[key]);
-      ui("favorites-preview-detail").textContent=`采集者：我的记录 ${number(summary.own_records)} 条，他人的记录 ${number(summary.other_records)} 条，未知采集者 ${number(summary.unknown_records)} 条。保留现有：${number(summary.kept_older_or_equal_time)} 条自己的或未知采集者记录抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条收藏数未增加。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 条当前作品目录暂缺，收藏数仍会按作品 ID 保存，可在「已记录」查看；以后通过维护页更新到包含相同作品 ID 的目录，会自动匹配标题和标签，无需再次导入收藏数。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
+      const failures=summary.failures||{};
+      for(const [id,key] of [["favorites-failed-total","total"],["favorites-failed-added","added"],["favorites-failed-updated","updated"],["favorites-failed-kept","kept"]])ui(id).textContent=number(failures[key]);
+      ui("favorites-preview-detail").textContent=`采集者：我的记录 ${number(summary.own_records)} 条，他人的记录 ${number(summary.other_records)} 条，未知采集者 ${number(summary.unknown_records)} 条。保留现有：${number(summary.kept_older_or_equal_time)} 条自己的或未知采集者记录抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条收藏数未增加。失败记录跳过：${number(failures.kept_newer_success)} 条已有同时或较新的成功结果，${number(failures.kept_newer_or_equal_failure)} 条已有同时或较新的失败记录。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 个作品在当前目录暂缺，成功和失败记录仍按作品 ID 保存，可在「已记录」查看；以后更新目录会自动匹配标题和标签。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
     }
     const task=state.kind?.startsWith("favorites-")?state:[...(state.recent_tasks||[])].reverse().find(item=>item.kind?.startsWith("favorites-"));
     if(favoritesLocalMessage){ui("favorites-feedback").textContent=favoritesLocalMessage.text;ui("favorites-feedback").classList.toggle("error",favoritesLocalMessage.error);}
@@ -317,7 +321,7 @@
       if(result.cancelled)favoritesMessage("已取消导出，本次未生成分享信息。");
       else{
         const ready=renderShareInfo(result.share_info);
-        favoritesMessage(`已导出 ${number(result.record_count)} 条收藏数。${window.catalogExportLocation()}文件保留原始抓取时间和原采集者。${ready?"下方已生成分享标题和正文，可复制到 GitHub。":"当前后台未提供分享信息，请重启应用后重新导出。"}`);
+        favoritesMessage(`已导出 ${number(result.record_count)} 条成功收藏数和 ${number(result.share_info?.failure_count)} 条失败记录。${window.catalogExportLocation()}文件保留原始抓取与失败时间，成功记录保留原采集者。${ready?"下方已生成分享标题和正文，可复制到 GitHub。":"当前后台未提供分享信息，请重启应用后重新导出。"}`);
       }
     }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导出。":error.message,true);}
     finally{busy=false;controls();}

@@ -20,7 +20,7 @@ async function scenario(base,{available=false,unread=false,offline=false,delayed
     if(operation==='start'){if(!state.started){state.started=true;state.checks++;}return status();}
     if(operation==='status')return status();
     if(operation==='take'){if(state.phase==='completed'&&available&&!state.prompted){state.prompted=true;return {prompt:true,release};}return {prompt:false};}
-    if(operation==='manual'){state.manualChecks++;return checkFailure?{error:'模拟 GitHub 连接中断，已自动重试 3 次。'}:release;}
+    if(operation==='manual'){state.manualChecks++;return checkFailure&&state.manualChecks===1?{error:'HTTP Error 403: rate limit exceeded'}:{...release,...(checkFailure?{check_message:'已通过本项目公开发布页完成更新检查。'}:{})};}
     if(operation==='download'){state.downloads++;return {phase:'downloading'};}
     if(operation==='progress')return downloadFailure&&state.downloads===1?{phase:'error',percent:0,message:'下载更新包失败：GitHub 连接中断，已自动重试 3 次。请启用系统代理或手动下载，保留 data、logs、backups 和作品目录压缩包。'}:{phase:'ready',percent:100,message:'新版已经准备好'};
     return {};
@@ -75,6 +75,18 @@ async function scenario(base,{available=false,unread=false,offline=false,delayed
   if(checkFailure){
     await page.locator('#client-manual-download').waitFor({state:'visible'});
     assert(await page.locator('#client-manual-download').getAttribute('href')===releasesUrl,'Check failure did not link the official releases page');
+    assert((await page.locator('#client-update-title').textContent()).includes('暂时无法检查'),'Failed check still claims to be checking');
+    assert((await page.locator('#client-update-message').textContent()).includes('访问限额'),'Rate limit should use a Chinese explanation');
+    await page.locator('#client-retry-check').waitFor({state:'visible'});
+    await page.setViewportSize({width:760,height:560});
+    await page.locator('#client-update-dialog').screenshot({path:path.join(project,'logs/update-rate-limit-v'+metadata.version+'.png')});
+    await page.locator('#client-retry-check').click();
+    await page.waitForFunction(()=>document.querySelector('#client-update-title').textContent.startsWith('当前版本')&&!document.querySelector('#client-check-update').disabled);
+    assert(state.manualChecks===2,'Retry did not start another check');
+    assert(!await page.locator('#client-retry-check').isVisible(),'Retry action remained after successful check');
+    assert(!await page.locator('#client-manual-download').isVisible(),'Stale manual link remained after success');
+    assert((await page.locator('#client-update-message').textContent()).includes('公开发布页'),'Fallback result not explained');
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Update error overflows a narrow window');
   }
   if(available&&!checkFailure){
     await page.locator('#client-install-update').click();

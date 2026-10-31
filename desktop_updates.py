@@ -24,6 +24,7 @@ import zipfile
 
 from client_version import APP_VERSION, PACKAGE_NAME, RELEASE_NOTES, REPOSITORY
 from release_history import ReleaseHistory, announcement_notes
+from github_release_page import parse_latest_page, parse_package_asset
 
 UPLOAD_GUIDE_URL = "/maintenance?upload-guide=1#cloud-sync-section"
 
@@ -186,6 +187,7 @@ class ClientUpdater:
         self.opener = build_opener(ProxyHandler())
         self.direct_opener = build_opener(ProxyHandler({}))
         self.history = ReleaseHistory(network=self.network)
+        self._api_limited_until = 0
 
     def _network_opener(self, attempt):
         config = self.network.snapshot()
@@ -272,34 +274,94 @@ class ClientUpdater:
             self._save_notes_state(state)
             return {"acknowledged": True}
 
+    def _remember_api_limit(self, error):
+        headers=error.headers or {}
+        limited=error.code==429 or headers.get('X-RateLimit-Remaining')=='0' or 'rate limit' in str(error.reason).lower()
+        if limited:
+            now=time.time()
+            reset=str(headers.get('X-RateLimit-Reset','') or '')
+            retry=str(headers.get('Retry-After','') or '')
+            until=float(reset) if reset.isdecimal() else now+float(retry) if retry.isdecimal() else now+300
+            self._api_limited_until=max(now+60,min(until,now+3600))
+
+    def _public_request(self, url, method='GET', limit=2*1024**2):
+        for attempt in range(NETWORK_ATTEMPTS):
+            self._retry_delay(attempt)
+            request=Request(url,method=method,headers={'User-Agent':'ExCatalog/'+APP_VERSION,'Accept-Encoding':'identity'})
+            try:
+                with self._network_opener(attempt).open(request,timeout=25) as response:
+                    final_url=response.geturl()
+                    if method=='HEAD':
+                        if getattr(response,'status',200)!=200 or response.headers.get('Content-Type','').split(';')[0].strip().lower()=='text/html':
+                            raise ValueError('客户端大小查询返回了无效响应，请打开发布页手动核对。')
+                        return None,response.headers,final_url
+                    raw=response.read(limit+1)
+                    length=response.headers.get('Content-Length','')
+                    if length.isdecimal() and len(raw)<min(int(length),limit+1):
+                        raise IncompleteRead(b'',int(length)-len(raw))
+                    if len(raw)>limit:raise ValueError('公开发布信息超过大小限制，未继续处理。')
+                    return raw,response.headers,final_url
+            except Exception as error:
+                if not retryable_network_error(error):raise
+                if isinstance(error,HTTPError):error.close()
+                if attempt==NETWORK_ATTEMPTS-1:raise ValueError(network_failure_message('读取公开发布页')) from error
+
+    def _check_public_release(self):
+        try:
+            raw,_,url=self._public_request(f'https://github.com/{REPOSITORY}/releases/latest')
+            document=parse_latest_page(raw,url)
+            if version_tuple(document['tag_name'])>version_tuple(APP_VERSION):
+                tag=document['tag_name']
+                raw,_,assets_url=self._public_request(f'https://github.com/{REPOSITORY}/releases/expanded_assets/{tag}')
+                if assets_url!=f'https://github.com/{REPOSITORY}/releases/expanded_assets/{tag}':
+                    raise ValueError('发布附件地址与本项目不符，未继续处理。')
+                package=parse_package_asset(raw,tag)
+                _,headers,_=self._public_request(asset_url(package['browser_download_url']),method='HEAD')
+                size=headers.get('Content-Length','')
+                if not size.isdecimal() or not 0<int(size)<=MAX_PACKAGE_BYTES:
+                    raise ValueError('无法核对客户端压缩包的实际大小，请打开发布页手动下载。')
+                package['size']=int(size)
+                document['assets']=[package]
+            release=release_info(document)
+            release['check_message']='已通过本项目公开发布页完成更新检查。'
+            return release
+        except UnicodeError:
+            raise ValueError('公开发布页内容无法读取，请稍后重新检查，或打开发布页手动下载。') from None
+        except ValueError:
+            raise
+        except (HTTPError,URLError,OSError,UnicodeError) as error:
+            if isinstance(error,HTTPError):error.close()
+            raise ValueError('GitHub 更新接口暂时受限，公开发布页也未能完成检查。请稍后重新检查，或打开本项目发布页手动下载完整客户端包。') from None
+
+    def _check_api_release(self):
+        for attempt in range(NETWORK_ATTEMPTS):
+            self._retry_delay(attempt)
+            request = Request(f"https://api.github.com/repos/{REPOSITORY}/releases/latest", headers={
+                "Accept": "application/vnd.github+json", "User-Agent": "ExCatalog/" + APP_VERSION})
+            try:
+                with self._network_opener(attempt).open(request, timeout=25) as response:
+                    raw = response.read(1024**2 + 1)
+                    length = getattr(response, "headers", {}).get("Content-Length", "")
+                    if length.isdecimal() and len(raw) < min(int(length), 1024**2 + 1):
+                        raise IncompleteRead(b"", int(length) - len(raw))
+                break
+            except Exception as error:
+                if isinstance(error,HTTPError) and error.code in {403,429}:
+                    self._remember_api_limit(error)
+                    error.close()
+                    return self._check_public_release()
+                if not retryable_network_error(error):raise
+                if isinstance(error,HTTPError):error.close()
+                if attempt==NETWORK_ATTEMPTS-1:raise ValueError(network_failure_message('检查更新')) from error
+        if len(raw)>1024**2:raise ValueError('发布信息超过大小限制。')
+        return release_info(json.loads(raw))
+
     def check(self):
         if not self.lock.acquire(blocking=False):
             raise ValueError("客户端更新正在处理，请稍候。")
         try:
             self.release = None
-            for attempt in range(NETWORK_ATTEMPTS):
-                self._retry_delay(attempt)
-                # Proxy handlers mutate Request when establishing HTTPS tunnels.
-                # A retry must start from the original destination and headers.
-                request = Request(f"https://api.github.com/repos/{REPOSITORY}/releases/latest", headers={
-                    "Accept": "application/vnd.github+json", "User-Agent": "ExCatalog/" + APP_VERSION})
-                try:
-                    with self._network_opener(attempt).open(request, timeout=25) as response:
-                        raw = response.read(1024**2 + 1)
-                        length = getattr(response, "headers", {}).get("Content-Length", "")
-                        if length.isdecimal() and len(raw) < min(int(length), 1024**2 + 1):
-                            raise IncompleteRead(b"", int(length) - len(raw))
-                    break
-                except Exception as error:
-                    if not retryable_network_error(error):
-                        raise
-                    if isinstance(error, HTTPError):
-                        error.close()
-                    if attempt == NETWORK_ATTEMPTS - 1:
-                        raise ValueError(network_failure_message("检查更新")) from error
-            if len(raw) > 1024**2:
-                raise ValueError("发布信息超过大小限制。")
-            self.release = release_info(json.loads(raw))
+            self.release = self._check_public_release() if time.time()<self._api_limited_until else self._check_api_release()
             if self.release["available"]:
                 self.release["history_message"] = ""
                 self.release["notes"], self.release["included_versions"] = announcement_notes(

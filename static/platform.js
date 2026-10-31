@@ -42,9 +42,10 @@
     const header=make("div","client-update-header"),icon=make("span","client-update-icon","✓"),heading=make("div","client-update-heading"),eyebrow=make("p","client-update-eyebrow","客户端更新");
     const title=make("h2"),body=make("div","client-update-body"),notes=make("div","client-release-notes"),message=make("p","client-update-message"),progress=make("progress"),actions=make("div","client-update-actions"),close=make("button","button secondary","关闭"),install=make("button","button primary","下载并更新");
     const manual=make("a","button secondary","打开发布页手动下载");manual.id="client-manual-download";manual.target="_blank";manual.rel="noopener noreferrer";manual.hidden=true;
+    const retry=make("button","button secondary","重新检查");retry.id="client-retry-check";retry.hidden=true;
     title.id="client-update-title";message.id="client-update-message";dialog.setAttribute("aria-labelledby",title.id);dialog.setAttribute("aria-describedby",message.id);icon.setAttribute("aria-hidden","true");
     progress.max=100;progress.hidden=true;install.hidden=true;install.id="client-install-update";close.id="client-notes-read";
-    heading.append(eyebrow,title);header.append(icon,heading);body.append(notes,message,manual,progress);actions.append(close,install);dialog.append(header,body,actions);document.body.append(dialog);
+    heading.append(eyebrow,title);header.append(icon,heading);body.append(notes,message,manual,progress);actions.append(retry,close,install);dialog.append(header,body,actions);document.body.append(dialog);
     let info=null,release=null,currentNotes=false,busy=false,phase="idle",poll=null,startupPending=false,startupTimer=null,startupPolling=false,navigating=false;
     const guideLocation=()=>location.pathname==="/maintenance"&&new URLSearchParams(location.search).get("upload-guide")==="1";
     const guideVisible=()=>{const card=document.getElementById("cloud-upload-guide");return card&&!card.hidden;};
@@ -55,7 +56,7 @@
     const show=()=>{if(!dialog.open)dialog.showModal();};
     const offerManualDownload=()=>{const url=release?.release_url||info?.releases_url;manual.hidden=!url;if(url)manual.href=url;};
     const result=async promise=>{const value=await promise;if(value.error)throw new Error(value.error);return value;};
-    function buttons(){check.disabled=busy||startupPending||phase==="ready";update.disabled=busy||!release?.available||!info?.can_install;install.disabled=busy;install.hidden=!release?.available||!info?.can_install||currentNotes;update.textContent=phase==="ready"?"安装客户端更新":"更新客户端";install.textContent=phase==="ready"?"安装并重新打开":"下载并更新";close.classList.toggle("primary",currentNotes);close.classList.toggle("secondary",!currentNotes);}
+    function buttons(){check.disabled=busy||startupPending||phase==="ready";retry.disabled=busy||startupPending;update.disabled=busy||!release?.available||!info?.can_install;install.disabled=busy;install.hidden=!release?.available||!info?.can_install||currentNotes;update.textContent=phase==="ready"?"安装客户端更新":"更新客户端";install.textContent=phase==="ready"?"安装并重新打开":"下载并更新";close.classList.toggle("primary",currentNotes);close.classList.toggle("secondary",!currentNotes);}
     async function pollStartupCheck(){
       if(!api.startup_client_update_status||startupPolling)return;
       startupPolling=true;clearTimeout(startupTimer);
@@ -83,18 +84,19 @@
         }catch(error){clearInterval(poll);poll=null;busy=false;buttons();fail(error);}
       },750);
     }
-    function showRelease(){manual.hidden=true;currentNotes=false;icon.textContent=release.available?"↑":"✓";close.textContent=release.available?"稍后更新":"关闭";title.textContent=release.available?`发现新版 v${release.latest_version}`:`当前版本 v${info.version}`;renderNotes(release.notes);message.textContent=release.available?(info.can_install?"是否现在更新？更新将保留本地资料；安装时安全退出，并自动重新打开客户端。":"当前正在运行源码，请用 GitHub Desktop 更新源码或从 Releases 下载完整客户端。"):"当前客户端已是最新发布版本，或比最新发布版本更新。";if(release.history_message)message.textContent+=" "+release.history_message;show();buttons();}
+    function showRelease(){manual.hidden=true;retry.hidden=true;currentNotes=false;icon.textContent=release.available?"↑":"✓";close.textContent=release.available?"稍后更新":"关闭";title.textContent=release.available?`发现新版 v${release.latest_version}`:`当前版本 v${info.version}`;renderNotes(release.notes);message.textContent=release.available?(info.can_install?"是否现在更新？更新将保留本地资料；安装时安全退出，并自动重新打开客户端。":"当前正在运行源码，请用 GitHub Desktop 更新源码或从 Releases 下载完整客户端。"):"当前客户端已是最新发布版本，或比最新发布版本更新。";if(release.history_message)message.textContent+=" "+release.history_message;if(release.check_message)message.textContent+=" "+release.check_message;show();buttons();}
     function fail(error){message.textContent=error.message||String(error);message.classList.add("error");offerManualDownload();show();}
     close.onclick=async()=>{
       if(currentNotes){try{const value=await result(api.acknowledge_client_notes());info.show_notes=false;window.dispatchEvent(new Event("catalog-client-notes-read"));if(visitGuide(value.upload_guide_url))return;}catch(error){fail(error);return;}}
       dialog.close();
     };
     check.onclick=async()=>{
-      manual.hidden=true;currentNotes=false;icon.textContent="↻";close.textContent="关闭";title.textContent="正在检查客户端更新";renderNotes("");message.classList.remove("error");message.textContent="正在连接本项目的 GitHub Releases…";busy=true;show();buttons();
-      try{release=await result(api.check_client_update());if(api.take_startup_update_prompt)await result(api.take_startup_update_prompt());showRelease();}catch(error){release=null;fail(error);}finally{busy=false;buttons();}
+      manual.hidden=true;retry.hidden=true;progress.hidden=true;currentNotes=false;icon.textContent="↻";close.textContent="关闭";title.textContent="正在检查客户端更新";renderNotes("");message.classList.remove("error");message.textContent="正在连接本项目的 GitHub Releases…";busy=true;show();buttons();
+      try{release=await result(api.check_client_update());if(api.take_startup_update_prompt)await result(api.take_startup_update_prompt());showRelease();}catch(error){release=null;title.textContent="暂时无法检查客户端更新";icon.textContent="!";retry.hidden=false;if(/rate limit exceeded|HTTP(?: Error)? (?:403|429)/i.test(error.message||""))error=new Error("GitHub 更新接口已达到当前网络的访问限额。请稍后重新检查，或打开本项目发布页手动下载完整客户端包。");fail(error);}finally{busy=false;buttons();}
     };
+    retry.onclick=()=>check.onclick();
     const performUpdate=async()=>{
-      manual.hidden=true;currentNotes=false;message.classList.remove("error");show();busy=true;buttons();
+      manual.hidden=true;retry.hidden=true;currentNotes=false;message.classList.remove("error");show();busy=true;buttons();
       try{
         if(phase==="ready"){
           await result(api.install_client_update());message.textContent="正在保存采集进度、退出并安装更新，请稍候…";watchUpdate();return;

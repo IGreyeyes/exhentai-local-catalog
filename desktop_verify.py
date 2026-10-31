@@ -227,7 +227,7 @@ def verify_desktop(report_path, fixture_root=None):
                         raise AssertionError(state)
                     report["checks"].append({"page": page, **state})
                     if page == "/contact":
-                        contact = promise("document.querySelector('#contact-qq-qr').decode().then(()=>{const image=document.querySelector('#contact-qq-qr'),link=document.querySelector('#contact-github');return {width:image.naturalWidth,height:image.naturalHeight,url:link.href,target:link.target,selected:document.querySelector('.nav-contact').getAttribute('aria-current'),overflow:document.documentElement.scrollWidth>innerWidth+1};})")
+                        contact = promise("new Promise(resolve=>{const image=document.querySelector('#contact-qq-qr'),link=document.querySelector('#contact-github');let tries=0;const timer=setInterval(()=>{if(image.complete||++tries>100){clearInterval(timer);resolve({width:image.naturalWidth,height:image.naturalHeight,url:link.href,target:link.target,selected:document.querySelector('.nav-contact').getAttribute('aria-current'),overflow:document.documentElement.scrollWidth>innerWidth+1});}},50);})")
                         if (contact["width"] != 840 or contact["height"] != 840
                                 or contact["url"] != "https://github.com/IGreyeyes/exhentai-local-catalog"
                                 or contact["target"] != "_blank" or contact["selected"] != "page" or contact["overflow"]):
@@ -348,6 +348,45 @@ def verify_desktop(report_path, fixture_root=None):
                 if startup["phase"] != "completed" or len(startup_requests) != 1 or startup["release"]["available"]:
                     raise AssertionError({"state":startup,"requests":len(startup_requests)})
                 report["checks"].append("one automatic release check per process; page navigation does not repeat it")
+                stage("rate-limited release check")
+                from urllib.error import HTTPError
+                from client_version import REPOSITORY, PACKAGE_NAME
+                future='.'.join([*APP_VERSION.split('.')[:2],str(int(APP_VERSION.split('.')[2])+1)])
+                release_base='https://github.com/'+REPOSITORY
+                fake_digest=hashlib.sha256(b'verified-client').hexdigest()
+                public_requests=[]
+                class PublicResponse(io.BytesIO):
+                    def __init__(self,raw,url,headers=None):
+                        super().__init__(raw)
+                        self.url=url;self.headers=headers or {};self.status=200
+                    def geturl(self):return self.url
+                def mock_public_release(request,timeout):
+                    address=request.full_url
+                    public_requests.append(address)
+                    if address.startswith('https://api.github.com/'):
+                        raise HTTPError(address,403,'rate limit exceeded',{'X-RateLimit-Remaining':'0'},None)
+                    if address.endswith('/releases/latest'):
+                        body=f'<span class="Label">Latest</span><div data-test-selector="body-content"><h2>v{future} · 本次更新</h2><p>模拟发布说明。</p></div><include-fragment src="{release_base}/releases/expanded_assets/v{future}"></include-fragment>'
+                        return PublicResponse(body.encode(),release_base+'/releases/tag/v'+future)
+                    if '/expanded_assets/' in address:
+                        body=f'<li><a href="/{REPOSITORY}/releases/download/v{future}/{PACKAGE_NAME}">client</a><clipboard-copy value="sha256:{fake_digest}"></clipboard-copy></li>'
+                        return PublicResponse(body.encode(),address)
+                    if request.get_method()=='HEAD':return PublicResponse(b'',address,{'Content-Length':'15','Content-Type':'application/octet-stream'})
+                    raise AssertionError('Unexpected simulated release request')
+                updater=api._updates
+                old_release,old_limit=updater.release,updater._api_limited_until
+                try:
+                    with patch.object(updater,'_network_opener') as public_opener:
+                        public_opener.return_value.open.side_effect=mock_public_release
+                        for _ in range(2):
+                            public=updater.check()
+                            if not public['available'] or public['latest_version']!=future or public['sha256']!=fake_digest or public['size']!=15:
+                                raise AssertionError('Packaged public release fallback failed')
+                    if sum(address.startswith('https://api.github.com/') for address in public_requests)!=1:
+                        raise AssertionError('Packaged updater repeated a rate-limited API request')
+                finally:
+                    updater.release,updater._api_limited_until=old_release,old_limit
+                report["checks"].append("packaged updater recovers from API 403 through formal public releases, checks GitHub digest and byte size, and skips the limited API on retry")
                 result = promise("fetch('/api/search?tag=language%3Aenglish').then(r=>r.json()).then(d=>({total:d.total}))")
                 if result["total"] != 1:
                     raise AssertionError(result)

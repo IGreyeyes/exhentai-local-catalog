@@ -27,6 +27,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed.' }
 foreach ($documentationName in @('README.md', 'DESKTOP.md', 'DEVELOPMENT.md', 'THIRD_PARTY_NOTICES.md', 'RELEASE_NOTES.md')) {
     Copy-Item -LiteralPath $documentationName -Destination $releaseDirectory
 }
+# Guide images live in static/ in source and _internal/static/ in the portable client.
+$readmePath = Join-Path $releaseDirectory 'README.md'
+$readme = [IO.File]::ReadAllText($readmePath).Replace('(static/readme/', '(_internal/static/readme/')
+[IO.File]::WriteAllText($readmePath, $readme, [Text.UTF8Encoding]::new($false))
 & $desktopPython -X utf8 package_desktop.py --program-directory $releaseDirectory
 if ($LASTEXITCODE -ne 0) { throw 'Could not create the public desktop archive.' }
 $releasePackage = Join-Path $PSScriptRoot 'dist\ExCatalog-Windows-x64.zip'

@@ -43,6 +43,14 @@
 
 收藏数文件的检查、导出和合并会在操作区显示当前状态与结果。**文件检查成功仍需确认合并**；合并时显示处理中，完成后显示「合并成功」，失败时显示原因。若提示结果待确认，请等待重新连接并核对结果，避免重复操作。
 
+### 评分全库采集与失败项
+
+无需先搜索，在 **收藏数采集 → 采集策略** 选择「评分全库采集」，应用设置、验证源站访问，再预估并确认开始。队列按平均评分从高到低排列。
+
+「重新采集之前的失败项（评分全库）」**默认关闭**，应用设置后记住选择。关闭时沿用同一源站、同一作品链接的失败记录；预估单列「沿用失败记录（未请求）」，进度区分别显示本次失败和沿用失败记录。重启、结束后新建计划或升级后继续旧队列，都不会自动重新请求这些失败项。新遇到的不可访问作品仍会增加本次失败数。
+
+需要接着上次进度时，使用 **暂停／继续采集**；**结束任务** 后再开始会重新建立队列。确认作品恢复访问后，可开启重采开关并应用设置，再预估、验证和确认，或点击 **重试失败项** 单独再试。开关只影响符合本次范围及缓存规则的项目；切换源站或作品链接变化时，按新的访问目标处理。普通访问验证会避开已保存的失败项；需要主动再验证时，可使用 **重新验证失败作品**。
+
 ## 升级与保留资料
 
 点击客户端的 **检查客户端更新**，按提示下载并安装；仅检查版本不会自动安装。
@@ -65,6 +73,6 @@
 
 ---
 
-[v1.2.11 更新说明](RELEASE_NOTES.md) · [源码与构建](DEVELOPMENT.md) · [桌面高级选项](DESKTOP.md) · [同步服务部署](https://github.com/IGreyeyes/exhentai-local-catalog/blob/master/cloudflare/README.md)
+[v1.2.12 更新说明](RELEASE_NOTES.md) · [源码与构建](DEVELOPMENT.md) · [桌面高级选项](DESKTOP.md) · [同步服务部署](https://github.com/IGreyeyes/exhentai-local-catalog/blob/master/cloudflare/README.md)
 
 数据来源：[URenko/e-hentai-db](https://github.com/URenko/e-hentai-db)；中文标签：[EhTagTranslation/Database](https://github.com/EhTagTranslation/Database)。译文归 EhTagTranslation 全体编辑者所有，采用 [CC BY-NC-SA 3.0 CN](https://creativecommons.org/licenses/by-nc-sa/3.0/cn/) 许可。详见 [第三方说明](THIRD_PARTY_NOTICES.md)。

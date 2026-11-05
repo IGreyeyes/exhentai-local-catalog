@@ -876,7 +876,7 @@ class Handler(BaseHTTPRequestHandler):
                 except (binascii.Error,ValueError):
                     raise ValueError("登录文件编码不正确。") from None
                 credentials=import_credentials(raw)
-                allowed={"interval","refresh_days","skip_existing","collection_mode","batch_size","rating_priority"}
+                allowed={"interval","refresh_days","skip_existing","collection_mode","batch_size","rating_priority","retry_previous_failures"}
                 if any(key not in allowed for key in options):
                     raise ValueError("采集设置包含不支持的字段。")
                 with self.server.catalog_gate:

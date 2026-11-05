@@ -400,6 +400,8 @@ class FavoriteStore:
                 db.execute("ALTER TABLE jobs ADD COLUMN current_round INTEGER NOT NULL DEFAULT 1")
             if "round_no" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
                 db.execute("ALTER TABLE tasks ADD COLUMN round_no INTEGER NOT NULL DEFAULT 1")
+            if "failure_reused" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
+                db.execute("ALTER TABLE tasks ADD COLUMN failure_reused INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE INDEX IF NOT EXISTS task_priority_queue ON tasks(job_id,state,priority,gid DESC)")
             db.execute("CREATE INDEX IF NOT EXISTS task_round_queue ON tasks(job_id,round_no,state,priority)")
             db.execute("CREATE INDEX IF NOT EXISTS task_attempted_gid ON tasks(gid,attempts)")
@@ -615,8 +617,10 @@ class FavoriteStore:
             if row is None:
                 return None
             result = dict(row)
-            counts = {entry[0]: entry[1] for entry in db.execute("SELECT state,COUNT(*) FROM tasks WHERE job_id=? GROUP BY state", (row["id"],))}
-            result.update(pending=counts.get("pending",0), succeeded=counts.get("done",0), failed=counts.get("failed",0))
+            states = list(db.execute("SELECT state,COUNT(*),SUM(failure_reused) FROM tasks WHERE job_id=? GROUP BY state", (row["id"],)))
+            counts = {entry[0]: entry[1] for entry in states}
+            result.update(pending=counts.get("pending",0), succeeded=counts.get("done",0), failed=counts.get("failed",0),
+                          reused_failures=sum(entry[2] for entry in states if entry[0]=="failed"))
             result["cached"] += counts.get("skipped",0)
             result["query"] = json.loads(result.pop("query_json"))
             result["selection"] = json.loads(result.pop("selection_json","{}"))
@@ -637,7 +641,7 @@ class FavoriteStore:
                     "completed":min(total_rounds,row["current_round"])-unfinished,"remaining":remaining,
                 }
             result["recent_errors"] = []
-            for entry in db.execute("SELECT gid,token,error,attempts,round_no FROM tasks WHERE job_id=? AND state='failed' ORDER BY gid DESC LIMIT 5", (row["id"],)):
+            for entry in db.execute("SELECT gid,token,error,attempts,round_no,failure_reused FROM tasks WHERE job_id=? AND state='failed' ORDER BY failure_reused ASC,gid DESC LIMIT 5", (row["id"],)):
                 item=dict(entry)
                 item["source_url"]=gallery_url(row["host"],item["gid"],item.pop("token"))
                 result["recent_errors"].append(item)
@@ -684,6 +688,8 @@ class Collector:
                 self.saved_interval = request_interval(raw_interval)
             except ValueError:
                 self.saved_interval = DEFAULT_REQUEST_INTERVAL
+            saved = db.execute("SELECT value FROM app_settings WHERE key='collector_retry_previous_failures'").fetchone()
+            self.saved_retry_previous_failures = bool(saved and saved[0]=='true')
             db.execute("UPDATE jobs SET state='paused',message='服务重启后已暂停。请重新配置并验证登录信息，再继续。' WHERE state IN ('running','preparing')")
             row = db.execute("SELECT MAX(cooldown_until) FROM jobs").fetchone()
             self.cooldown_until = row[0] or 0
@@ -710,6 +716,7 @@ class Collector:
                 "collection_mode": settings.get("collection_mode","rounds"),
                 "batch_size": settings.get("batch_size",1000),
                 "rating_priority": settings.get("rating_priority",False),
+                "retry_previous_failures": (self.settings or {}).get("retry_previous_failures",self.saved_retry_previous_failures),
                 "busy": bool(self.thread and self.thread.is_alive()),
                 "cooldown_until": self.cooldown_until, "cooldown_probe_after": self.cooldown_probe_after, "job": job,
             }
@@ -766,6 +773,9 @@ class Collector:
             rating_priority=values.get("rating_priority",False)
             if not isinstance(rating_priority,bool):
                 raise ValueError("评分优先选项须为开关值。")
+            retry_previous_failures=values.get("retry_previous_failures",self.saved_retry_previous_failures)
+            if not isinstance(retry_previous_failures,bool):
+                raise ValueError("重新采集之前的失败项须为开关值。")
             if mode == "rating_full":
                 rating_priority = True
             cookie_header = self.settings["cookies"] if reuse else "; ".join(cookies)
@@ -774,9 +784,11 @@ class Collector:
             with self.store.connection() as db:
                 db.execute("INSERT INTO app_settings(key,value) VALUES('collector_interval',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(interval),))
                 db.execute("INSERT INTO app_settings(key,value) VALUES('collector_proxy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (encoded_proxy,))
+                db.execute("INSERT INTO app_settings(key,value) VALUES('collector_retry_previous_failures',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(retry_previous_failures),))
             self.saved_proxy, self.proxy_error = proxy, ""
             self.saved_interval = interval
-            self.settings = {"host":host,"cookies":cookie_header,"proxy":proxy,"interval":interval,"refresh_days":days,"skip_existing":skip_existing,"collection_mode":mode,"batch_size":batch_size,"rating_priority":rating_priority}
+            self.saved_retry_previous_failures = retry_previous_failures
+            self.settings = {"host":host,"cookies":cookie_header,"proxy":proxy,"interval":interval,"refresh_days":days,"skip_existing":skip_existing,"collection_mode":mode,"batch_size":batch_size,"rating_priority":rating_priority,"retry_previous_failures":retry_previous_failures}
             self.verified = bool(self.verified and same_access)
             self.preview_data = None
             if not same_access:
@@ -795,6 +807,21 @@ class Collector:
         if self.settings.get("skip_existing"):
             return "f.gid IS NULL", ()
         return "(f.checked_at IS NULL OR f.checked_at < ?)", (cutoff,)
+
+    @staticmethod
+    def _matching_failure(alias):
+        return f"EXISTS(SELECT 1 FROM main.collection_failures AS failure WHERE failure.gid={alias}.gid AND failure.token={alias}.token AND failure.source=?)"
+
+    @classmethod
+    def _reuse_failures(cls, db, job_id, host):
+        # Preserve the actual request time and attempts when reusing a saved failure.
+        db.execute("""UPDATE tasks SET state='failed',failure_reused=1,
+            attempts=(SELECT attempts FROM collection_failures AS failure WHERE failure.gid=tasks.gid),
+            error=(SELECT error FROM collection_failures AS failure WHERE failure.gid=tasks.gid)
+            WHERE job_id=? AND state='pending' AND """+cls._matching_failure("tasks"), (job_id,host))
+        db.execute("""UPDATE collection_failures SET job_id=? WHERE source=? AND EXISTS(
+            SELECT 1 FROM tasks WHERE tasks.job_id=? AND tasks.gid=collection_failures.gid
+                AND tasks.token=collection_failures.token AND tasks.state='failed' AND tasks.failure_reused=1)""", (job_id,host,job_id))
 
     @staticmethod
     def _candidate_sql(where,eligible,rating_priority=False):
@@ -835,7 +862,7 @@ class Collector:
         if time.time() < self.cooldown_until and not (verification and recover_cooldown):
             raise ValueError("源站冷却时间尚未结束，请稍后再试。")
 
-    def _verification_candidate(self, query, cutoff, excluded):
+    def _verification_candidate(self, query, cutoff, excluded, retry_failed=False):
         eligible, eligibility_params = self._eligibility(cutoff)
         excluded_params=(json.dumps(sorted(excluded)),) if excluded else ()
         job=None
@@ -855,6 +882,10 @@ class Collector:
             _,where,params=self.catalog.collection_plan(query)
             scope="SELECT g.gid,g.token,("+eligible+") AS needs_collection,0 AS job_id,'' AS task_state FROM catalog.gallery AS g LEFT JOIN main.favorites AS f ON f.gid=g.gid WHERE ("+where+")"
             scope_params=(*eligibility_params,*params)
+        mode=job["collection_mode"] if job else self.settings.get("collection_mode")
+        if mode=="rating_full" and not (retry_failed or self.settings.get("retry_previous_failures",False)):
+            scope="SELECT * FROM ("+scope+") AS sample WHERE sample.task_state<>'failed' AND NOT "+self._matching_failure("sample")
+            scope_params+=(self.settings["host"],)
         skip="gid NOT IN (SELECT value FROM json_each(?))" if excluded else "1=1"
         with self.store.connection() as db:
             db.execute("ATTACH DATABASE ? AS catalog",(self.catalog.path.as_uri()+"?mode=ro",))
@@ -864,7 +895,7 @@ class Collector:
             # A zero-work plan still avoids source requests. Cache samples are used
             # only to establish access when actual queued work remains.
             work=db.execute("SELECT COALESCE(SUM(needs_collection),0) FROM ("+scope+")",scope_params).fetchone()[0]
-            if not work:return None,job["id"] if job else 0
+            if not work and not (mode=="rating_full" and job and job["failed"]):return None,job["id"] if job else 0
             counts=db.execute("SELECT COUNT(*),COALESCE(SUM(needs_collection=0),0) FROM ("+scope+") WHERE "+skip,(*scope_params,*excluded_params)).fetchone()
             size=counts[1] or counts[0]
             if not size:return None,job["id"] if job else 0
@@ -895,10 +926,10 @@ class Collector:
             unavailable=[]
             for attempt in range(1 if recovering else 3):
                 excluded=self.verification_unavailable | self.verification_issues.keys()
-                row,job_id=self._verification_candidate(query,cutoff,excluded)
+                row,job_id=self._verification_candidate(query,cutoff,excluded,retry_failed=retry_unavailable)
                 if row is None:
                     if unavailable:break
-                    if excluded and self._verification_candidate(query,cutoff,())[0] is not None:
+                    if excluded and self._verification_candidate(query,cutoff,(),retry_failed=retry_unavailable)[0] is not None:
                         raise ValueError("当前范围内的待验证作品已全部尝试，没有其他可验证作品；本次未向源站发送请求。请在浏览器核对访问异常作品，确实打不开时可确认不可访问并跳过；处理访问问题后可点击“重新验证失败作品”。原队列和已成功数据保留。")
                     return {"verified":self.verified,"no_request":True,"message":"当前条件没有需要抓取的作品，未向源站发送请求。可先预估查看跳过数量。"}
                 delay=max(0,self.settings["interval"]-(time.monotonic()-self.last_request))
@@ -924,7 +955,7 @@ class Collector:
                         task=db.execute("SELECT attempts FROM tasks WHERE job_id=? AND gid=?",(job_id,row["gid"])).fetchone() if job_id else None
                         attempts=(task[0] if task else 0)+1
                         if job_id:
-                            db.execute("UPDATE tasks SET state='failed',attempts=?,error=? WHERE job_id=? AND gid=?",(attempts,str(error),job_id,row["gid"]))
+                            db.execute("UPDATE tasks SET state='failed',failure_reused=0,attempts=?,error=? WHERE job_id=? AND gid=?",(attempts,str(error),job_id,row["gid"]))
                         self.store._save_failure(db,row["gid"],row["token"],self.settings["host"],error,attempts,job_id)
                     self.verification_unavailable.add(row["gid"])
                     unavailable.append({"gid":row["gid"],"url":gallery_url(self.settings["host"],row["gid"],row["token"]),"error":str(error)})
@@ -934,7 +965,10 @@ class Collector:
                 finally:
                     self.last_request=time.monotonic()
                 if row["needs_collection"]:
-                    self.store.save(row["gid"],count.favorite_count,self.settings["host"],count.rating_count)
+                    with self.store.connection() as db:
+                        self.store._save(db,row["gid"],count.favorite_count,self.settings["host"],count.rating_count)
+                        if job_id and json.loads(db.execute("SELECT selection_json FROM jobs WHERE id=?", (job_id,)).fetchone()[0]).get("collection_mode")=="rating_full":
+                            db.execute("UPDATE tasks SET state='done',failure_reused=0,attempts=attempts+1,error='' WHERE job_id=? AND gid=?", (job_id,row["gid"]))
                 if self.cooldown_until:
                     self.store.clear_cooldown()
                     self.cooldown_until=0
@@ -942,7 +976,7 @@ class Collector:
                 self.verified=True
                 return {"verified":True,"gid":row["gid"],"favorite_count":count.favorite_count,"rating_count":count.rating_count,"unavailable":unavailable,"verification_only":not bool(row["needs_collection"]),"cooldown_cleared":recovering}
             last=unavailable[-1]
-            has_more=self._verification_candidate(query,cutoff,self.verification_unavailable | self.verification_issues.keys())[0] is not None
+            has_more=self._verification_candidate(query,cutoff,self.verification_unavailable | self.verification_issues.keys(),retry_failed=retry_unavailable)[0] is not None
             next_step="再次点击验证将尝试其他待处理作品，不会重复本次失败作品。" if has_more else "当前范围没有其他可验证作品；请先在浏览器核对失败作品，处理后点击“重新验证失败作品”。"
             reasons="\n".join(f"作品 ID {item['gid']}：{item['error']}" for item in unavailable)
             if recovering:
@@ -970,7 +1004,7 @@ class Collector:
                     raise ValueError("这条任务记录已变化，请重新验证后再确认跳过。")
                 attempts=(task["attempts"] if task else 0)+1
                 if job_id:
-                    db.execute("UPDATE tasks SET state='failed',attempts=?,error=? WHERE job_id=? AND gid=?",(attempts,message,job_id,issue["gid"]))
+                    db.execute("UPDATE tasks SET state='failed',failure_reused=0,attempts=?,error=? WHERE job_id=? AND gid=?",(attempts,message,job_id,issue["gid"]))
                     db.execute("UPDATE jobs SET updated_at=? WHERE id=?",(int(time.time()),job_id))
                 self.store._save_failure(db,issue["gid"],issue["token"],issue["host"],message,attempts,job_id)
             self.verification_unavailable.add(issue["gid"])
@@ -1007,7 +1041,8 @@ class Collector:
             if job["host"] != self.settings["host"]:
                 raise ValueError("请切换回创建任务时使用的源站。")
             canonical = job["query"]
-            states = "('pending','failed')" if operation=="retry" else "('pending')"
+            retry_saved=operation=="retry" or (operation=="resume" and job["collection_mode"]=="rating_full" and self.settings.get("retry_previous_failures",False))
+            states = "('pending','failed')" if retry_saved else "('pending')"
             where,params = f"t.job_id=? AND t.state IN {states}",(job["id"],)
             if job["collection_mode"]=="rounds":
                 if operation=="next_round":
@@ -1019,6 +1054,7 @@ class Collector:
             source = "tasks AS t LEFT JOIN main.favorites AS f ON f.gid=t.gid"
         eligible,extra = self._eligibility(cutoff)
         candidates=None
+        reused_failures=0
         mode=self.settings.get("collection_mode","full") if operation in {"start","next_batch"} else job["collection_mode"]
         rating_priority=self.settings.get("rating_priority",False) if operation in {"start","next_batch"} else bool(job.get("selection",{}).get("rating_priority",False))
         with self.store.connection() as db:
@@ -1027,6 +1063,11 @@ class Collector:
             pending,never_seen = db.execute("SELECT COUNT(*),SUM(f.gid IS NULL) FROM " + source + " WHERE ("+where+") AND "+eligible,(*params,*extra)).fetchone()
             eligible_total=pending
             skipped=total-pending
+            if mode=="rating_full" and operation!="retry" and not self.settings.get("retry_previous_failures",False):
+                request_eligible=eligible+" AND NOT "+self._matching_failure("g" if operation=="start" else "t")
+                pending,never_seen=db.execute("SELECT COUNT(*),SUM(f.gid IS NULL) FROM "+source+" WHERE ("+where+") AND "+request_eligible,(*params,*extra,self.settings["host"])).fetchone()
+                reused_failures=eligible_total-pending
+                eligible_total=pending
             known=db.execute("SELECT COUNT(f.gid) FROM "+source+" WHERE "+where,params).fetchone()[0]
             if operation in {"start","next_batch"} and mode in {"batch","rounds"}:
                 candidates=self._batch_candidates(db,where,params,eligible,extra,self.settings["batch_size"],rating_priority)
@@ -1043,7 +1084,7 @@ class Collector:
         return {"canonical":canonical,"where":where,"params":params,"eligible":eligible,"eligibility_params":extra,"total":total,"pending":pending,"skipped":skipped,"never_seen":never_seen or 0,"refresh_count":pending-(never_seen or 0),"job_id":job["id"] if operation!="start" else None,
                 "collection_mode":mode,"batch_size":self.settings["batch_size"] if operation in {"start","next_batch"} else selection.get("batch_size"),
                 "scope_total":total if operation in {"start","next_batch"} else selection.get("scope_total",job["total"]),
-                "scope_known":known if new_task else None,"eligible_total":eligible_total,"deferred":deferred,
+                "scope_known":known if new_task else None,"eligible_total":eligible_total,"deferred":deferred,"reused_failures":reused_failures,
                 "queue_total":queue_total,"round_count":round_count,"round_number":round_number,
                 "candidates":candidates,"candidate_signature":self._candidate_signature(candidates),"year_breakdown":[{"year":year,"count":count} for year,count in sorted(years.items(),reverse=True)],"rating_priority":rating_priority}
 
@@ -1061,7 +1102,7 @@ class Collector:
             identifier = secrets.token_urlsafe(24)
             self.preview_data = {**plan,"id":identifier,"operation":operation,"cutoff":cutoff,"settings":self.settings.copy(),"expires":time.monotonic()+600}
             return {
-                "preview_id":identifier,"operation":operation,"total":plan["total"],"pending":plan["pending"],"skipped":plan["skipped"],
+                "preview_id":identifier,"operation":operation,"total":plan["total"],"pending":plan["pending"],"skipped":plan["skipped"],"reused_failures":plan["reused_failures"],"retry_previous_failures":self.settings.get("retry_previous_failures",False),
                 "never_seen":plan["never_seen"],"refresh_count":plan["refresh_count"],"interval":interval,"refresh_days":self.settings["refresh_days"],"skip_existing":self.settings["skip_existing"],
                 "interval_seconds":math.ceil(plan["pending"]*interval),"estimated_seconds":math.ceil(plan["pending"]*(interval+response_seconds)),
                 "response_seconds":round(response_seconds,3),"response_samples":len(samples),"estimate_basis":"measured" if samples else "assumed",
@@ -1077,7 +1118,7 @@ class Collector:
             self.preview_data = None
             raise ValueError("预估已过期或设置已变化，请重新预估。")
         plan = self._plan(query,operation,preview["cutoff"])
-        if any(plan[key]!=preview[key] for key in ("canonical","total","pending","skipped","never_seen","job_id","candidate_signature","collection_mode","batch_size","rating_priority","round_number","queue_total")):
+        if any(plan[key]!=preview[key] for key in ("canonical","total","pending","skipped","reused_failures","never_seen","job_id","candidate_signature","collection_mode","batch_size","rating_priority","round_number","queue_total")):
             self.preview_data = None
             raise ValueError("搜索范围、缓存或队列已变化，请重新预估后确认。")
         if plan["pending"]:
@@ -1097,7 +1138,7 @@ class Collector:
                 rounds=plan["collection_mode"]=="rounds"
                 total = plan["queue_total"] if rounds else plan["pending"] if batched else plan["total"]
                 selection={key:plan[key] for key in ("collection_mode","batch_size","scope_total","scope_known","eligible_total","deferred","year_breakdown","rating_priority","round_count")}
-                selection.update(scope_skipped=plan["skipped"],**{key:self.settings[key] for key in ("interval","refresh_days","skip_existing")})
+                selection.update(scope_skipped=plan["skipped"],**{key:self.settings[key] for key in ("interval","refresh_days","skip_existing","retry_previous_failures")})
                 cursor = db.execute("INSERT INTO jobs(query_json,host,state,total,created_at,updated_at,selection_json) VALUES (?,?,'running',?,?,?,?)", (json.dumps(canonical,ensure_ascii=False),self.settings["host"],total,now,now,json.dumps(selection,ensure_ascii=False)))
                 job_id = cursor.lastrowid
                 if rounds:
@@ -1122,7 +1163,9 @@ class Collector:
                 else:
                     db.execute("INSERT INTO tasks(job_id,gid,token) SELECT ?,g.gid,g.token FROM catalog.gallery AS g LEFT JOIN main.favorites AS f ON f.gid=g.gid WHERE (" + where + ") AND "+plan["eligible"], (job_id,*params,*plan["eligibility_params"]))
                 queued = db.execute("SELECT COUNT(*) FROM tasks WHERE job_id=?", (job_id,)).fetchone()[0]
-                if self.verification_unavailable:
+                if plan["collection_mode"]=="rating_full" and not self.settings.get("retry_previous_failures",False):
+                    self._reuse_failures(db,job_id,self.settings["host"])
+                elif self.verification_unavailable and plan["collection_mode"]!="rating_full":
                     db.execute("""UPDATE tasks SET state='failed',
                         attempts=(SELECT attempts FROM collection_failures AS failure WHERE failure.gid=tasks.gid),
                         error=(SELECT error FROM collection_failures AS failure WHERE failure.gid=tasks.gid)
@@ -1133,6 +1176,8 @@ class Collector:
                 pending = db.execute("SELECT COUNT(*) FROM tasks WHERE job_id=? AND state='pending'", (job_id,)).fetchone()[0]
                 failed = queued-pending
                 message="正在采集收藏数。" if pending else "当前待处理作品均已记录失败，可单独预估重试。" if failed else "按当前跳过规则，全部作品均可复用已有数据，无需发送请求。"
+                if plan["reused_failures"]:
+                    message+=f" 已沿用 {plan['reused_failures']} 条失败记录，未重新请求；可单独预估重试失败项。"
                 db.execute("UPDATE jobs SET cached=?,state=?,message=? WHERE id=?", (total-queued,"running" if pending else "completed_with_errors" if failed else "completed",message,job_id))
                 self.verification_issues={gid:{**issue,"job_id":job_id} for gid,issue in self.verification_issues.items() if db.execute("SELECT 1 FROM tasks WHERE job_id=? AND gid=? AND token=? AND state='pending'",(job_id,gid,issue["token"])).fetchone()}
             if pending:
@@ -1153,7 +1198,7 @@ class Collector:
 
     @staticmethod
     def _skip_cached(db,plan):
-        db.execute("UPDATE tasks SET state='skipped',error='' WHERE job_id=? AND gid IN (SELECT t.gid FROM tasks AS t LEFT JOIN main.favorites AS f ON f.gid=t.gid WHERE ("+plan["where"]+") AND NOT "+plan["eligible"]+")",(plan["job_id"],*plan["params"],*plan["eligibility_params"]))
+        db.execute("UPDATE tasks SET state='skipped',failure_reused=0,error='' WHERE job_id=? AND gid IN (SELECT t.gid FROM tasks AS t LEFT JOIN main.favorites AS f ON f.gid=t.gid WHERE ("+plan["where"]+") AND NOT "+plan["eligible"]+")",(plan["job_id"],*plan["params"],*plan["eligibility_params"]))
 
     def _launch(self, job_id):
         self.interrupt.clear()
@@ -1175,8 +1220,11 @@ class Collector:
             job = self.store.latest()
             with self.store.connection() as db:
                 self._skip_cached(db,plan)
-                if retry_failed:
-                    db.execute("UPDATE tasks SET state='pending',attempts=0,error='' WHERE job_id=? AND state='failed' AND round_no<=?", (job["id"],job["current_round"]))
+                retry_saved=retry_failed or (plan["collection_mode"]=="rating_full" and self.settings.get("retry_previous_failures",False))
+                if retry_saved:
+                    db.execute("UPDATE tasks SET state='pending',failure_reused=0,attempts=0,error='' WHERE job_id=? AND state='failed' AND round_no<=?", (job["id"],job["current_round"]))
+                elif plan["collection_mode"]=="rating_full":
+                    self._reuse_failures(db,job["id"],self.settings["host"])
                 db.execute("UPDATE jobs SET state='running',message='正在继续采集。',updated_at=? WHERE id=?", (int(time.time()),job["id"]))
             self._launch(job["id"])
         return self.status()
@@ -1215,7 +1263,7 @@ class Collector:
                     phase = "保存收藏数"
                     with self.store.connection() as db:
                         self.store._save(db,row["gid"],count.favorite_count,settings["host"],count.rating_count)
-                        db.execute("UPDATE tasks SET state='done',attempts=attempts+1,error='' WHERE job_id=? AND gid=?", (job_id,row["gid"]))
+                        db.execute("UPDATE tasks SET state='done',failure_reused=0,attempts=attempts+1,error='' WHERE job_id=? AND gid=?", (job_id,row["gid"]))
                         db.execute("UPDATE jobs SET updated_at=? WHERE id=?", (int(time.time()),job_id))
                     with self.lock:
                         self.verification_issues.pop(row["gid"],None)

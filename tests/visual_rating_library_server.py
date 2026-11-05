@@ -9,13 +9,14 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import Catalog, Server
-from favorites import Collector
+from favorites import Collector, GalleryUnavailable
 from test_desktop import make_library
 
 root = Path(sys.argv[1])
 database = root / 'data/catalog.sqlite3'
 requests_file = root / 'requests.json'
 requests = json.loads(requests_file.read_text()) if requests_file.exists() else []
+simulate_failures = len(sys.argv) > 2 and sys.argv[2] == 'failures'
 if not database.exists():
     make_library(root)
     with closing(sqlite3.connect(database)) as db, db:
@@ -32,6 +33,8 @@ class FixtureCollector(Collector):
         time.sleep(0.3)
         requests.append(gid)
         requests_file.write_text(json.dumps(requests), encoding='utf-8')
+        if simulate_failures and gid in {9,4,8} and not (root / 'source-recovered').exists():
+            raise GalleryUnavailable('模拟作品不可访问（HTTP 404）')
         return gid * 10
 
     def _launch(self, job_id):

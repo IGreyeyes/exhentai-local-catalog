@@ -11,7 +11,7 @@ import threading
 import unittest
 
 from app import Catalog, Server
-from favorites import Collector
+from favorites import Collector, GalleryUnavailable
 
 
 class RatingLibraryCollectionTests(unittest.TestCase):
@@ -94,6 +94,198 @@ class RatingLibraryCollectionTests(unittest.TestCase):
         self.assertEqual(job['query']['scope'], ['library'])
         saved = self.catalog.recorded({'q':['3']})['items'][0]
         self.assertEqual((saved['favorite_count'],saved['reading_state']), (0,'planned'))
+
+    def test_cancel_restart_reuses_failed_block_without_requesting_it_again(self):
+        def interrupted_source(settings, gid, token):
+            self.calls.append(gid)
+            if gid in {4,2,12}:
+                raise GalleryUnavailable('模拟作品不可访问')
+            if gid == 1:
+                self.collector.pause(cancel=True)
+            return gid * 10
+        self.collector.fetcher = interrupted_source
+        self.collector.verified = True
+        preview = self.collector.preview({})
+        self.collector.start({}, preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [4,2,12,1])
+        self.assertEqual(self.collector.status()['job']['state'], 'cancelled')
+        with self.catalog.favorites.connection() as db:
+            failures = [tuple(row) for row in db.execute('SELECT gid,failed_at,error,attempts FROM collection_failures ORDER BY gid')]
+        self.collector.close()
+        self.catalog = Catalog(self.path)
+        self.collector = Collector(self.catalog, self.fetch)
+        self.configure()
+        preview = self.collector.preview({})
+        self.assertEqual(preview['pending'], 2)
+        self.assertEqual((preview['skipped'],preview['reused_failures']), (3,3))
+        with patch('favorites.secrets.randbelow', return_value=0): self.collector.verify({})
+        before = len(self.calls)
+        preview = self.collector.preview({})
+        self.collector.start({}, preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls[before:], [11,5])
+        job = self.collector.status()['job']
+        self.assertEqual((job['state'],job['succeeded'],job['failed'],job['reused_failures'],job['cached']),
+                         ('completed_with_errors',2,3,3,3))
+        with self.catalog.favorites.connection() as db:
+            self.assertEqual(failures, [tuple(row) for row in db.execute('SELECT gid,failed_at,error,attempts FROM collection_failures ORDER BY gid')])
+        self.assertEqual(self.catalog.recorded({'collection':['failed'],'job_id':[str(job['id'])]})['total'], 3)
+
+    def test_upgrade_resume_skips_matching_failures_in_old_pending_queue(self):
+        self.collector.verified = True
+        with patch.object(self.collector, '_launch'):
+            preview = self.collector.preview({})
+            self.collector.start({}, preview['preview_id'])
+        job_id = self.collector.status()['job']['id']
+        with self.catalog.favorites.connection() as db:
+            self.catalog.favorites._save_failure(db,4,'abcdef0123','e-hentai.org','模拟旧任务失败',1,0)
+        self.collector.close()
+        self.collector = Collector(self.catalog, self.fetch)
+        self.configure()
+        self.collector.verified = True
+        preview = self.collector.preview({}, 'resume')
+        self.assertEqual((preview['pending'],preview['reused_failures']), (5,1))
+        self.collector.resume(preview_id=preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [2,12,1,11,5])
+        job = self.collector.status()['job']
+        self.assertEqual((job['id'],job['failed'],job['reused_failures']), (job_id,1,1))
+
+    def test_failure_reuse_matches_source_and_token_and_explicit_retry_still_works(self):
+        with self.catalog.favorites.connection() as db:
+            for gid, token, host in ((4,'abcdef0123','e-hentai.org'),(2,'0123abcdef','e-hentai.org'),(12,'abcdef0123','exhentai.org')):
+                self.catalog.favorites._save_failure(db,gid,token,host,'模拟不可访问',1,0)
+        self.collector.verified = True
+        preview = self.collector.preview({})
+        self.assertEqual((preview['pending'],preview['reused_failures']), (5,1))
+        self.collector.start({}, preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [2,12,1,11,5])
+        preview = self.collector.preview({}, 'retry')
+        self.assertEqual((preview['pending'],preview['reused_failures']), (1,0))
+        self.collector.resume(retry_failed=True, preview_id=preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [2,12,1,11,5,4])
+        job = self.collector.status()['job']
+        self.assertEqual((job['state'],job['failed'],job['reused_failures']), ('completed',0,0))
+        self.assertEqual(self.catalog.recorded({'collection':['failed']})['total'], 0)
+
+    def test_all_known_failures_need_no_requests_until_explicit_verification_retry(self):
+        with self.catalog.favorites.connection() as db:
+            db.execute('DELETE FROM favorites')
+            for gid in (1,2,3,4,5,6,11,12):
+                self.catalog.favorites._save_failure(db,gid,'abcdef0123','e-hentai.org','模拟不可访问',1,0)
+        self.assertTrue(self.collector.verify({})['no_request'])
+        preview = self.collector.preview({})
+        self.assertEqual((preview['pending'],preview['reused_failures']), (0,8))
+        self.collector.start({}, preview['preview_id'])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.collector.status()['job']['state'], 'completed_with_errors')
+        self.assertTrue(self.collector.verify(None)['no_request'])
+        with patch('favorites.secrets.randbelow', return_value=0):
+            result = self.collector.verify(None, retry_unavailable=True)
+        self.assertTrue(result['verified'])
+        self.assertEqual(self.calls, [12])
+        preview = self.collector.preview({}, 'retry')
+        self.assertEqual(preview['pending'], 7)
+        self.collector.resume(retry_failed=True, preview_id=preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.collector.status()['job']['state'], 'completed')
+        self.assertEqual(len(self.calls), 8)
+
+    def test_retry_switch_persists_and_includes_previous_failures_in_new_plan(self):
+        with self.catalog.favorites.connection() as db:
+            self.catalog.favorites._save_failure(db,4,'abcdef0123','e-hentai.org','模拟不可访问',1,0)
+        self.assertFalse(self.collector.status()['retry_previous_failures'])
+        preview = self.collector.preview({})
+        self.assertEqual((preview['pending'],preview['reused_failures']), (5,1))
+        self.configure(retry_previous_failures=True)
+        with self.assertRaises(ValueError): self.collector.start({}, preview['preview_id'])
+        self.collector.close()
+        self.collector = Collector(self.catalog, self.fetch)
+        self.assertTrue(self.collector.status()['retry_previous_failures'])
+        self.configure()
+        self.collector.verified = True
+        preview = self.collector.preview({})
+        self.assertEqual((preview['pending'],preview['reused_failures'],preview['retry_previous_failures']), (6,0,True))
+        self.collector.start({}, preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [4,2,12,1,11,5])
+        self.assertEqual(self.catalog.recorded({'collection':['failed']})['total'], 0)
+        self.configure(retry_previous_failures=False)
+        self.collector.close()
+        self.collector = Collector(self.catalog, self.fetch)
+        self.assertFalse(self.collector.status()['retry_previous_failures'])
+
+    def test_retry_switch_includes_failed_tasks_on_resume_and_can_be_turned_off(self):
+        def failing_source(settings, gid, token):
+            self.calls.append(gid)
+            if gid == 4: raise GalleryUnavailable('模拟不可访问')
+            if gid == 2: self.collector.pause()
+            return gid * 10
+        self.collector.fetcher = failing_source
+        self.collector.verified = True
+        preview = self.collector.preview({})
+        self.collector.start({}, preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [4,2])
+        self.configure(retry_previous_failures=True)
+        self.collector.fetcher = self.fetch
+        preview = self.collector.preview({}, 'resume')
+        self.assertEqual((preview['pending'],preview['reused_failures']), (5,0))
+        self.collector.resume(preview_id=preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [4,2,4,12,1,11,5])
+        self.assertEqual(self.collector.status()['job']['state'], 'completed')
+
+    def test_invalid_retry_switch_and_changed_failures_require_new_preview(self):
+        for invalid in ('false',1,None):
+            with self.subTest(value=invalid), self.assertRaisesRegex(ValueError, '开关值'):
+                self.configure(retry_previous_failures=invalid)
+        preview = self.collector.preview({})
+        with self.catalog.favorites.connection() as db:
+            self.catalog.favorites._save_failure(db,4,'abcdef0123','e-hentai.org','模拟导入的失败记录',1,0)
+        self.collector.verified = True
+        with self.assertRaisesRegex(ValueError, '范围、缓存或队列已变化'):
+            self.collector.start({}, preview['preview_id'])
+        self.assertEqual(self.calls, [])
+
+    def test_seven_thousand_saved_failures_are_reused_as_one_persistent_block(self):
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.executemany("INSERT INTO gallery VALUES(?,'abcdef0123','模拟不可访问作品','','Manga',1,24,'5.0',0,0,0)",
+                           ((gid,) for gid in range(100,7100)))
+        with self.catalog.favorites.connection() as db:
+            db.executemany("INSERT INTO collection_failures VALUES(?,'abcdef0123','e-hentai.org',1,'模拟不可访问',1,0)",
+                           ((gid,) for gid in range(100,7100)))
+        self.collector.verified = True
+        preview = self.collector.preview({})
+        self.assertEqual((preview['pending'],preview['reused_failures']), (6,7000))
+        self.collector.start({}, preview['preview_id'])
+        self.finish()
+        self.assertEqual(self.calls, [4,2,12,1,11,5])
+        job = self.collector.status()['job']
+        self.assertEqual((job['failed'],job['reused_failures'],job['succeeded']), (7000,7000,6))
+        self.collector.close()
+        self.collector = Collector(self.catalog, self.fetch)
+        self.assertEqual(self.collector.status()['job']['reused_failures'], 7000)
+
+    def test_explicit_failed_verification_updates_reused_failure_feedback(self):
+        with self.catalog.favorites.connection() as db:
+            db.execute('DELETE FROM favorites')
+            for gid in (1,2,3,4,5,6,11,12):
+                self.catalog.favorites._save_failure(db,gid,'abcdef0123','e-hentai.org','模拟不可访问',1,0)
+        preview = self.collector.preview({})
+        self.collector.start({}, preview['preview_id'])
+        def unavailable(settings, gid, token):
+            self.calls.append(gid)
+            raise GalleryUnavailable('模拟重新验证仍不可访问')
+        self.collector.fetcher = unavailable
+        with patch('favorites.secrets.randbelow', return_value=0), self.assertRaises(ValueError):
+            self.collector.verify(None, retry_unavailable=True)
+        job = self.collector.status()['job']
+        self.assertEqual((job['failed'],job['reused_failures']), (8,5))
+        self.assertEqual(len(self.calls), 3)
 
     def test_cache_period_and_zero_request_plan_keep_existing_data(self):
         self.configure(skip_existing=False)

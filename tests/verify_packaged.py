@@ -119,6 +119,8 @@ def verify(program_directory=None):
                         raise AssertionError("Packaged cover retry button missing")
                     if page == "/maintenance" and (b'value="cover"' not in page_body or b'id="network-cover-url"' not in page_body):
                         raise AssertionError("Packaged cover connection test is missing")
+                    if page == "/maintenance" and any(marker not in page_body for marker in (b'id="catalog-download"',b'class="catalog-download-steps"',b'id="favorites-operation"',b'id="favorites-phase"',b'id="favorites-progress"')):
+                        raise AssertionError("Packaged download guide or merge feedback is missing")
             report["cover_retry"] = "retry API, script and all three page controls included"
             cloud = get("/api/cloud-sync")
             if cloud["enabled"] or cloud["upload_enabled"] or cloud["source_id"]:
@@ -222,6 +224,8 @@ def verify(program_directory=None):
             state = wait_task(task)
             state = wait_task(post('/api/maintenance/favorites-import', {'prepared_id':state['prepared_favorites']['id']}, token))
             imported = state['result']
+            if not imported['message'].startswith('合并成功：'):
+                raise AssertionError('Packaged merge does not report actual success')
             if imported['summary']['added'] != 1 or imported['summary']['failures']['added']!=1 or imported['backup']['include_catalog']:
                 raise AssertionError('Packaged favorites import did not create a light protection backup')
             failed=get('/api/records?collection=failed')['items']

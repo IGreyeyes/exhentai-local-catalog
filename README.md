@@ -34,12 +34,14 @@
 | 查看记录、标记看过 | 打开 **已记录**，点击爱心标记「看过」、划线圆圈标记「不看」；再次点击取消。 |
 | 备份资料 | **资料库维护 → 备份资料**，选择保存位置，点击 **立即备份**；换电脑时建议勾选「同时备份作品目录」。 |
 | 恢复备份 | **资料库维护 → 恢复备份**，选择具体的一份备份文件夹，检查后确认恢复。 |
-| 更新作品目录 | 下载新的 `e-hentai.db.zstd` 放回程序文件夹，在 **资料库维护 → 作品目录** 检查，再点击 **备份旧版并应用更新**。 |
-| 导入他人的收藏数 | **资料库维护 → 收藏数导入导出**，选择 `.ehfavorites.json` 文件，检查后确认合并。 |
+| 更新作品目录 | **资料库维护 → 作品目录**，点击醒目的 **前往 GitHub 下载目录**，将新版 `e-hentai.db.zstd` 放到提示的位置，检查后点击 **备份旧版并应用更新**。 |
+| 导入他人的收藏数与失败记录 | **资料库维护 → 收藏数导入导出**，选择 `.ehfavorites.json` 文件，检查后确认合并；完成后查看 **合并成功** 及各项数量。 |
 | 在线同步收藏数 | **资料库维护 → 在线同步**，按需勾选上传或下载并保存；两项首次默认关闭，开启上传前请阅读分享范围。 |
 | 配置网络 | 打开 **网络代理**，保存设置后使用页面上的连接测试。 |
 
 收藏数显示「未知」时，可自行采集、导入分享文件或开启公共数据下载。数据库不自带收藏数，采集需要能访问所选源站。平时关闭窗口即可退出，等待当前请求保存完成。
+
+收藏数文件的检查、导出和合并会在操作区显示当前状态与结果。**文件检查成功仍需确认合并**；合并时显示处理中，完成后显示「合并成功」，失败时显示原因。若提示结果待确认，请等待重新连接并核对结果，避免重复操作。
 
 ## 升级与保留资料
 
@@ -63,6 +65,6 @@
 
 ---
 
-[v1.2.10 更新说明](RELEASE_NOTES.md) · [源码与构建](DEVELOPMENT.md) · [桌面高级选项](DESKTOP.md) · [同步服务部署](https://github.com/IGreyeyes/exhentai-local-catalog/blob/master/cloudflare/README.md)
+[v1.2.11 更新说明](RELEASE_NOTES.md) · [源码与构建](DEVELOPMENT.md) · [桌面高级选项](DESKTOP.md) · [同步服务部署](https://github.com/IGreyeyes/exhentai-local-catalog/blob/master/cloudflare/README.md)
 
 数据来源：[URenko/e-hentai-db](https://github.com/URenko/e-hentai-db)；中文标签：[EhTagTranslation/Database](https://github.com/EhTagTranslation/Database)。译文归 EhTagTranslation 全体编辑者所有，采用 [CC BY-NC-SA 3.0 CN](https://creativecommons.org/licenses/by-nc-sa/3.0/cn/) 许可。详见 [第三方说明](THIRD_PARTY_NOTICES.md)。

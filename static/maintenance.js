@@ -7,14 +7,24 @@
   const element=(tag,className,text="")=>{const node=document.createElement(tag);node.className=className;node.textContent=text;return node;};
   let state=null,token="",busy=false,polling=false,preparedId="",restoreId="",backupsKey="",directoryLoaded=false;
   let favoritesTaskId="",favoritesFileKey="",favoritesPreparedId="";
-  let favoritesLocalMessage=null;
+  let favoritesLocalMessage=null,favoritesRequest=null,favoritesConnectionError="";
   let identityLoadedKey="",identityChecked=null,identityLocalMessage=null,identityEditing=false;
   let catalogRequest=null,catalogLocalError="",catalogConnectionError="",catalogUnconfirmed=false,actionRevision=0;
   const identityApiAvailable=()=>Boolean(state?.collector_identity?.collector_id&&typeof state?.collector_identity_initialized==="boolean");
   function identityMessage(text,error=false){identityLocalMessage={text,error};ui("collector-identity-feedback").textContent=text;ui("collector-identity-feedback").classList.toggle("error",error);}
   function identityMatches(){return Boolean(identityChecked&&identityChecked.current_id===state?.collector_identity?.collector_id&&identityChecked.key===fileKey(ui("collector-identity-file").files[0]));}
   function invalidateIdentity(){identityChecked=null;ui("collector-identity-confirm").checked=false;ui("collector-identity-preview").hidden=true;controls();}
-  function favoritesMessage(text,error=false){favoritesLocalMessage={text,error};ui("favorites-feedback").textContent=text;ui("favorites-feedback").classList.toggle("error",error);}
+  function favoritesTask(){return state?.kind?.startsWith("favorites-")?state:[...(state?.recent_tasks||[])].reverse().find(item=>item.kind?.startsWith("favorites-"));}
+  function renderFavoritesFeedback({text,status="info",title="操作提示"}){
+    const panel=ui("favorites-operation"),running=status==="running";
+    panel.dataset.state=status;
+    for(const value of ["running","success","error","warning"])panel.classList.toggle(value,status===value);
+    panel.setAttribute("aria-busy",String(running));
+    ui("favorites-phase").textContent=title;ui("favorites-progress").hidden=!running;
+    ui("favorites-feedback").textContent=text;ui("favorites-feedback").classList.toggle("error",status==="error");
+    ui("favorites-connection-error").hidden=!favoritesConnectionError;ui("favorites-connection-error").textContent=favoritesConnectionError;
+  }
+  function favoritesMessage(text,status="info",title="操作提示"){favoritesLocalMessage={text,status,title};renderFavoritesFeedback(favoritesLocalMessage);}
   function shareTime(value){
     const parts=Object.fromEntries(new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Hong_Kong",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).formatToParts(new Date(typeof value==="number"?value*1000:value)).map(part=>[part.type,part.value]));
     return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
@@ -54,7 +64,7 @@
   }
   function message(text,error=false){ui("maintenance-status").textContent=text;ui("maintenance-status").classList.toggle("error",error);}
   function controls(){
-    const working=Boolean(busy||catalogUnconfirmed||state?.busy||window.catalogStopped||!token||!state);
+    const working=Boolean(busy||catalogUnconfirmed||favoritesRequest?.awaiting||state?.busy||window.catalogStopped||!token||!state);
     ["maintenance-backup","backup-full","maintenance-prepare","archive-sha256","maintenance-stop","maintenance-stop-request","backup-directory","backup-save-directory","backup-default-directory","backup-automatic","backup-browse","restore-browse","restore-directory","restore-full","maintenance-check-restore"].forEach(id=>ui(id).disabled=working);
     ui("maintenance-apply").disabled=working||!state?.prepared||(state.prepared.older&&!ui("allow-older-import").checked);
     ui("maintenance-apply-no-backup").disabled=ui("maintenance-apply").disabled;
@@ -76,6 +86,9 @@
     ui("favorites-check").disabled=working||!selectedFavoritesFile();
     ui("favorites-confirm").disabled=working||!favoritesMatches();
     ui("favorites-import").disabled=working||!favoritesMatches()||!ui("favorites-confirm").checked;
+    const favoritesKind=favoritesRequest?.kind||(state?.busy&&state.kind?.startsWith("favorites-")?state.kind:"");
+    ui("favorites-check").textContent=favoritesKind==="favorites-prepare"?"正在检查记录文件…":"检查收藏数文件";
+    ui("favorites-import").textContent=favoritesKind==="favorites-import"?"正在备份并合并记录…":"备份当前资料并合并记录";
     const identitySupported=identityApiAvailable(),initialized=Boolean(state?.collector_identity_initialized);
     ["collector-name","collector-identity-generate","collector-name-edit","collector-name-save","collector-name-cancel","collector-identity-export","collector-identity-file"].forEach(id=>ui(id).disabled=working||!identitySupported);
     ui("collector-name").readOnly=initialized&&!identityEditing;
@@ -112,9 +125,13 @@
       for(const [id,key] of [["favorites-failed-total","total"],["favorites-failed-added","added"],["favorites-failed-updated","updated"],["favorites-failed-kept","kept"]])ui(id).textContent=number(failures[key]);
       ui("favorites-preview-detail").textContent=`采集者：我的记录 ${number(summary.own_records)} 条，他人的记录 ${number(summary.other_records)} 条，未知采集者 ${number(summary.unknown_records)} 条。保留现有：${number(summary.kept_older_or_equal_time)} 条自己的或未知采集者记录抓取时间相同或更旧，${number(summary.kept_count_not_increased)} 条收藏数未增加。失败记录跳过：${number(failures.kept_newer_success)} 条已有同时或较新的成功结果，${number(failures.kept_newer_or_equal_failure)} 条已有同时或较新的失败记录。${summary.missing_catalog?`其中 ${number(summary.missing_catalog)} 个作品在当前目录暂缺，成功和失败记录仍按作品 ID 保存，可在「已记录」查看；以后更新目录会自动匹配标题和标签。`:""} 正式合并会按当时数据重新判断，以最终结果为准。`;
     }
-    const task=state.kind?.startsWith("favorites-")?state:[...(state.recent_tasks||[])].reverse().find(item=>item.kind?.startsWith("favorites-"));
-    if(favoritesLocalMessage){ui("favorites-feedback").textContent=favoritesLocalMessage.text;ui("favorites-feedback").classList.toggle("error",favoritesLocalMessage.error);}
-    else if(task){ui("favorites-feedback").textContent=task.message;ui("favorites-feedback").classList.toggle("error",task.phase==="failed"||task.phase==="interrupted");}
+    const task=favoritesTask();
+    if(favoritesLocalMessage)renderFavoritesFeedback(favoritesLocalMessage);
+    else if(task){
+      const running=task.busy,failed=task.phase==="failed"||task.phase==="interrupted",success=task.phase==="completed",merge=task.kind==="favorites-import";
+      const title=running?(merge?"正在合并记录":"正在检查记录文件"):task.phase==="interrupted"?"上次操作已中断":failed?(merge?"合并失败":"文件检查失败"):success?(merge?"合并成功":"文件检查成功，等待确认合并"):"操作状态待确认";
+      renderFavoritesFeedback({text:task.message,status:running?"running":failed?"error":success?"success":"warning",title});
+    }else renderFavoritesFeedback({text:"导出不会访问源站。合并前自动轻量备份，并暂停当前采集；进度和阅读标记保留。",title:"等待操作"});
   }
   function renderTranslations(){
     const translations=state.translations||{},local=translations.local||{},latest=translations.latest;
@@ -226,20 +243,38 @@
     try{
       const response=await fetch("/api/maintenance",{signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error("无法读取维护信息，请重启服务后刷新。");
       const updated=await response.json();if(revision!==actionRevision||busy)return;
-      state=updated;catalogConnectionError="";if(catalogUnconfirmed)catalogLocalError="";catalogUnconfirmed=false;render();
+      state=updated;catalogConnectionError="";favoritesConnectionError="";if(catalogUnconfirmed)catalogLocalError="";catalogUnconfirmed=false;
+      if(favoritesRequest?.awaiting){
+        const request=favoritesRequest,task=[state,...(state.recent_tasks||[])].find(item=>item.kind===request.kind&&!request.knownIds.has(item.id));
+        favoritesRequest=null;
+        if(task){
+          favoritesLocalMessage=null;
+          if(request.kind==="favorites-prepare"){favoritesTaskId=task.id;favoritesFileKey=request.fileKey;}
+        }else{
+          favoritesTaskId="";favoritesFileKey="";ui("favorites-confirm").checked=false;
+          favoritesMessage("已恢复连接，但尚未确认本次操作结果。请先核对记录，并重新检查文件后再合并。","warning","结果待核对");
+        }
+      }
+      render();
       ui("connection").replaceChildren(element("i",""),document.createTextNode(state.busy?" 维护任务进行中":" 本地服务已连接"));
-    }catch(error){if(revision!==actionRevision||busy)return;catalogConnectionError="暂时无法读取最新进度，将自动重试。操作可能仍在后台运行，请勿重复应用；重新连接后会显示最终结果。";renderCatalog();message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击「启动搜索.cmd」再刷新。":error.message,true);ui("connection").textContent="本地服务未连接";}
+    }catch(error){if(revision!==actionRevision||busy)return;catalogConnectionError="暂时无法读取最新进度，将自动重试。操作可能仍在后台运行，请勿重复应用；重新连接后会显示最终结果。";if(favoritesTask()?.busy||favoritesRequest?.awaiting){favoritesConnectionError="暂时无法读取最新结果，将自动重试。操作可能仍在后台运行，请勿重复合并；重新连接后会显示最终结果。";renderFavorites();}renderCatalog();message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击「启动搜索.cmd」再刷新。":error.message,true);ui("connection").textContent="本地服务未连接";}
     finally{polling=false;}
   }
   async function action(name,payload={}){
     if(busy)return false;
     actionRevision++;
     const catalogAction=["prepare","apply"].includes(name);
+    const favoritesAction=name.startsWith("favorites-"),prepareFavorites=name==="favorites-prepare";
+    if(favoritesAction){
+      favoritesRequest={kind:name,fileKey:prepareFavorites?fileKey(payload):"",knownIds:new Set([state?.id,...(state?.recent_tasks||[]).map(task=>task.id)])};favoritesConnectionError="";
+      favoritesMessage(prepareFavorites?"正在上传并检查收藏数与失败记录文件…":"正在提交合并请求，随后会暂停采集、备份并合并记录…","running",prepareFavorites?"正在检查记录文件":"正在合并记录");
+    }
     if(catalogAction){catalogLocalError="";catalogConnectionError="";catalogRequest={kind:name,busy:true,create_backup:payload.create_backup!==false,started_at:new Date().toISOString(),message:name==="prepare"?"正在提交检查请求，完成后仍需确认应用。":payload.create_backup===false?"正在提交直接应用请求，本次不创建备份…":"正在提交应用请求，先完整备份旧版再切换…"};renderCatalog();}
     busy=true;controls();message(name==="stop"?"正在暂停采集并等待当前请求结束，请稍候…":"正在提交维护操作…");
     try{
-      const response=await fetch(`/api/maintenance/${name}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify(payload),...(catalogAction?{signal:AbortSignal.timeout(15000)}:{})});
+      const response=await fetch(`/api/maintenance/${name}`,{method:"POST",headers:{"Content-Type":prepareFavorites?"application/octet-stream":"application/json","X-Catalog-Token":token},body:prepareFavorites?payload:JSON.stringify(payload),...(catalogAction||favoritesAction?{signal:AbortSignal.timeout(15000)}:{})});
       const result=await response.json();if(!response.ok){const error=new Error(result.error||"操作失败");error.rejected=true;throw error;}
+      if(favoritesAction){if(prepareFavorites){favoritesTaskId=result.requested_id;favoritesFileKey=fileKey(payload);}favoritesLocalMessage=null;favoritesRequest=null;}
       if(name==="stop"){
         window.catalogStopped=true;ui("connection").textContent="本地服务正在退出";
         message(window.catalogDesktop?"服务已停止，采集进度已保存。请关闭窗口，重新打开应用即可继续使用。":"服务已停止，采集进度已保存。再次使用时，请双击「启动搜索.cmd」，然后刷新本页。");
@@ -252,7 +287,14 @@
         }
       }
       return true;
-    }catch(error){if(catalogAction){catalogRequest=null;catalogUnconfirmed=!error.rejected;catalogLocalError=catalogUnconfirmed?"未能确认请求结果，将自动读取后台状态。请勿重复应用。":error.message;renderCatalog();}message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击启动搜索。":error.message,true);return false;}
+    }catch(error){
+      if(favoritesAction){
+        if(error.rejected){favoritesRequest=null;favoritesMessage(error.message,"error",prepareFavorites?"文件检查失败":"合并失败");}
+        else{favoritesRequest.awaiting=true;favoritesMessage("未能确认请求结果，操作可能仍在后台运行。正在重新读取状态，请勿重复合并。","warning","结果待确认");}
+      }
+      if(catalogAction){catalogRequest=null;catalogUnconfirmed=!error.rejected;catalogLocalError=catalogUnconfirmed?"未能确认请求结果，将自动读取后台状态。请勿重复应用。":error.message;renderCatalog();}
+      message(error.message==="Failed to fetch"?"无法连接本地服务，请先双击启动搜索。":error.message,true);return false;
+    }
     finally{busy=false;catalogRequest=null;if(!window.catalogStopped)controls();}
   }
   function invalidateRestore(){ui("restore-confirm").checked=false;ui("prepared-restore").hidden=true;controls();}
@@ -315,30 +357,24 @@
   };
   ui("collector-identity-import").onclick=()=>{if(identityMatches()&&ui("collector-identity-confirm").checked){identityLocalMessage=null;action("collector-identity-import",{file:identityChecked.file,expected_id:identityChecked.current_id});}};
   ui("favorites-export").onclick=async()=>{
-    if(busy)return;busy=true;clearShareInfo();controls();favoritesMessage("正在生成收藏数文件…");
+    if(busy)return;busy=true;clearShareInfo();controls();favoritesMessage("正在生成收藏数与失败记录文件…","running","正在导出记录");
     try{
       const result=await downloadAttachment("/api/maintenance/favorites-export","favorites.ehfavorites.json");
-      if(result.cancelled)favoritesMessage("已取消导出，本次未生成分享信息。");
+      if(result.cancelled)favoritesMessage("已取消导出，本次未生成分享信息。","info","导出已取消");
       else{
         const ready=renderShareInfo(result.share_info);
-        favoritesMessage(`已导出 ${number(result.record_count)} 条成功收藏数和 ${number(result.share_info?.failure_count)} 条失败记录。${window.catalogExportLocation()}文件保留原始抓取与失败时间，成功记录保留原采集者。${ready?"下方已生成分享标题和正文，可复制到 GitHub。":"当前后台未提供分享信息，请重启应用后重新导出。"}`);
+        favoritesMessage(`已导出 ${number(result.record_count)} 条成功收藏数和 ${number(result.share_info?.failure_count)} 条失败记录。${window.catalogExportLocation()}文件保留原始抓取与失败时间，成功记录保留原采集者。${ready?"下方已生成分享标题和正文，可复制到 GitHub。":"当前后台未提供分享信息，请重启应用后重新导出。"}`,"success","导出成功");
       }
-    }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导出。":error.message,true);}
+    }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导出。":error.message,"error","导出失败");}
     finally{busy=false;controls();}
   };
   ui("favorites-share-copy-title").onclick=()=>copyShareInfo("favorites-share-title","标题");
   ui("favorites-share-copy-body").onclick=()=>copyShareInfo("favorites-share-body","正文");
   ui("favorites-check").onclick=async()=>{
     const file=selectedFavoritesFile();if(busy||!file)return;
-    if(file.size===0||file.size>128*1024**2){favoritesMessage("请选择非空且不超过 128 MiB 的收藏数文件。",true);return;}
-    busy=true;ui("favorites-confirm").checked=false;favoritesTaskId="";favoritesFileKey="";ui("favorites-preview").hidden=true;controls();
-    favoritesMessage("正在上传并检查收藏数文件…");
-    try{
-      const response=await fetch("/api/maintenance/favorites-prepare",{method:"POST",headers:{"Content-Type":"application/octet-stream","X-Catalog-Token":token},body:file});
-      const result=await response.json();if(!response.ok)throw new Error(result.error||"收藏数检查失败");
-      favoritesTaskId=result.requested_id;favoritesFileKey=fileKey(file);favoritesLocalMessage=null;state={...result,cover_cache:result.cover_cache||state?.cover_cache};render();
-    }catch(error){favoritesMessage(error.message==="Failed to fetch"?"无法连接本地服务，收藏数未导入。":error.message,true);}
-    finally{busy=false;controls();}
+    if(file.size===0||file.size>128*1024**2){favoritesMessage("请选择非空且不超过 128 MiB 的收藏数文件。","error","文件检查失败");return;}
+    ui("favorites-confirm").checked=false;favoritesTaskId="";favoritesFileKey="";ui("favorites-preview").hidden=true;
+    await action("favorites-prepare",file);
   };
   ui("favorites-import").onclick=()=>{if(favoritesMatches()&&ui("favorites-confirm").checked){favoritesLocalMessage=null;action("favorites-import",{prepared_id:state.prepared_favorites.id});}};
   ui("allow-older-import").onchange=controls;

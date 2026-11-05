@@ -245,7 +245,7 @@ class LibraryMaintenance:
         on_merged()
         self.prepared_favorites_file.unlink(missing_ok=True)
         failures = summary["failures"]
-        return {"summary": summary, "backup": backup, "message": f"收藏数合并完成：成功收藏数新增 {summary['added']:,} 条，更新 {summary['updated']:,} 条，保留现有 {summary['kept']:,} 条；失败记录新增 {failures['added']:,} 条，更新 {failures['updated']:,} 条，跳过 {failures['kept']:,} 条。原抓取与失败时间已保留，当前采集计划保持暂停。"}
+        return {"summary": summary, "backup": backup, "message": f"合并成功：成功收藏数新增 {summary['added']:,} 条，更新 {summary['updated']:,} 条，保留现有 {summary['kept']:,} 条；失败记录新增 {failures['added']:,} 条，更新 {failures['updated']:,} 条，跳过 {failures['kept']:,} 条。原抓取与失败时间已保留，当前采集计划保持暂停。"}
 
     def translation_status(self):
         paths = [self.data/"tag-translations.json", self.data/"tag-translations-info.json"]

@@ -1,6 +1,7 @@
 """Independent source/target computers for browser failure migration checks."""
 from pathlib import Path
 import sys
+import time
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from app import Catalog, Server
@@ -26,6 +27,17 @@ else:
         store._save_failure(db,2,'abcdef0123','e-hentai.org','目标电脑原有失败记录',1,0)
         db.execute('UPDATE collection_failures SET failed_at=1760000050 WHERE gid=2')
 server=Server(('127.0.0.1',0),catalog)
+if role=='target':
+    original_import=server.maintenance.engine.import_favorites
+    def import_with_feedback(identifier,on_merged,progress):
+        progress('正在备份并合并记录…')
+        time.sleep(1.1)
+        marker=root/'fail-next-merge'
+        if marker.exists():
+            marker.unlink()
+            raise ValueError('模拟合并失败，原有记录保留')
+        return original_import(identifier,on_merged,progress)
+    server.maintenance.engine.import_favorites=import_with_feedback
 print(f'http://127.0.0.1:{server.server_port}',flush=True)
 try:server.serve_forever()
 finally:server.server_close()

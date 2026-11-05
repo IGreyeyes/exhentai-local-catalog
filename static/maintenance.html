@@ -196,7 +196,12 @@
             <label class="checkbox"><input id="favorites-confirm" type="checkbox">我确认按上述规则合并成功收藏数与失败记录</label>
             <button class="button primary" id="favorites-import" disabled>备份当前资料并合并记录</button>
           </div>
-          <p id="favorites-feedback" class="translation-feedback" role="status" aria-live="polite">导出不会访问源站。合并前自动轻量备份，并暂停当前采集；进度和阅读标记保留。</p>
+          <div id="favorites-operation" class="operation-feedback" role="status" aria-live="polite" aria-atomic="true" aria-busy="false" data-state="info">
+            <strong id="favorites-phase">等待操作</strong>
+            <progress id="favorites-progress" aria-label="正在处理收藏数与失败记录" hidden></progress>
+            <p id="favorites-feedback" class="translation-feedback">导出不会访问源站。合并前自动轻量备份，并暂停当前采集；进度和阅读标记保留。</p>
+            <p id="favorites-connection-error" class="error" hidden></p>
+          </div>
         </section>
         <section class="maintenance-card maintenance-section" id="restore-section" aria-labelledby="restore-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↙</span><div><h2 id="restore-title">导入已有备份</h2><p>从备份恢复收藏数、阅读状态、黑名单、采集进度和中文词库。</p></div></div>
@@ -215,7 +220,14 @@
         </section>
         <section class="maintenance-card maintenance-section" id="catalog-section" aria-labelledby="catalog-title">
           <div class="maintenance-heading"><span class="maintenance-icon" aria-hidden="true">↻</span><div><h2 id="catalog-title">更新作品目录</h2><p>导入已下载的新版目录，继续保留你的收藏资料和登录设置。</p></div></div>
-          <p>从 <a href="https://github.com/URenko/e-hentai-db/releases/tag/nightly" target="_blank" rel="noopener noreferrer">GitHub 发布页 ↗</a> 下载新的 <strong>e-hentai.db.zstd</strong>，放到下面的位置，再点击检查。</p>
+          <div class="catalog-download-guide" aria-labelledby="catalog-download-title">
+            <div class="catalog-download-heading"><div><h3 id="catalog-download-title">先下载新版作品目录</h3><p>打开 GitHub 发布页，在附件中下载目录压缩包，无需手动解压。</p></div><a id="catalog-download" class="button primary" href="https://github.com/URenko/e-hentai-db/releases/tag/nightly" target="_blank" rel="noopener noreferrer">前往 GitHub 下载目录 ↗</a></div>
+            <ol class="catalog-download-steps">
+              <li><span aria-hidden="true">1</span><div><strong>下载新版文件</strong><p>选择 <code>e-hentai.db.zstd</code></p></div></li>
+              <li><span aria-hidden="true">2</span><div><strong>放到指定位置</strong><p>保存到下方显示的文件位置</p></div></li>
+              <li><span aria-hidden="true">3</span><div><strong>检查后确认应用</strong><p>点击下方检查按钮，核对后应用更新</p></div></li>
+            </ol>
+          </div>
           <p class="path-hint" id="archive-path">—</p><p id="archive-state" class="field-hint"></p>
           <p id="catalog-current" class="field-hint"></p>
           <div class="catalog-backup-info"><p>备份保存目录：<code id="catalog-backup-path">—</code></p><p id="catalog-backup-count">正在统计备份数量…</p><a href="#backup-section">查看最近备份 / 修改保存位置</a></div>

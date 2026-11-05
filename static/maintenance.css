@@ -10,3 +10,29 @@
 .favorites-merge-rules{margin:20px 0;padding:17px 18px;border:1px solid #dfe8d5;border-radius:7px;background:#f8faf5}.favorites-merge-rules h3{font-size:14px;margin:0 0 12px}.favorites-merge-rules p{font-size:12px;line-height:1.9;margin:10px 0;color:#546b4c}.favorites-merge-rules table{width:100%;border-collapse:collapse;margin:14px 0;font-size:12px;line-height:1.8;text-align:left;background:#fff}.favorites-merge-rules th,.favorites-merge-rules td{padding:11px 12px;border:1px solid #dfe8d5;vertical-align:top}.favorites-merge-rules thead th{background:#edf3e7;color:#426b3c}.favorites-merge-rules tbody th{width:31%;font-weight:500;color:#426b3c}.favorites-merge-rules tbody th span{font-size:11px;font-weight:400;color:#63795c}.favorites-merge-rules .favorites-rule-example{padding:10px 12px;background:#edf3e7;border-radius:5px}@media(max-width:760px){.favorites-merge-rules{padding:15px 12px}.favorites-merge-rules th,.favorites-merge-rules td{padding:9px 8px}.favorites-merge-rules tbody th{width:34%}}
 
 .cloud-upload-guide{padding:17px 18px;margin:0 0 20px;background:#edf5e7;border:1px solid #b9cfa8;border-radius:8px;font-size:13px;line-height:1.85}.cloud-upload-guide strong{font-size:15px;color:#355f2b}.cloud-upload-guide p{margin:8px 0 12px}.cloud-guide-active{border-color:#9cba83;box-shadow:0 0 0 3px #e7f0df}.cloud-upload-guide[hidden]{display:none}
+
+.operation-feedback{margin:18px 0 0;padding:16px 18px;border:1px solid #d3ded6;border-left:4px solid #82968a;border-radius:8px;background:#f5f8f6;overflow-wrap:anywhere}
+.operation-feedback>strong{display:block;font-size:16px;line-height:1.6;color:#334f40}
+.maintenance-section .operation-feedback p{margin:7px 0 0;font-size:13px;line-height:1.85;color:#435c4e}
+.operation-feedback progress{width:100%;height:8px;margin:12px 0 0;accent-color:#356e52}
+.operation-feedback.running{border-color:#a9c8e1;border-left-color:#427dad;background:#f0f6fc}
+.operation-feedback.success{border-color:#a8cdb6;border-left-color:#2f7950;background:#edf7f0}
+.operation-feedback.success>strong{color:#24643e}
+.operation-feedback.error{border-color:#e4b8b8;border-left-color:#b34c4c;background:#fff3f3}
+.operation-feedback.error>strong,.maintenance-section .operation-feedback .error{color:#9a3434}
+.operation-feedback.warning{border-color:#e2c998;border-left-color:#ac7827;background:#fff8eb}
+.operation-feedback.warning>strong{color:#805717}
+.catalog-download-guide{margin:0 0 18px;padding:20px;border:1px solid #a8cbb9;border-left:4px solid #326d50;border-radius:9px;background:#edf6f0}
+.catalog-download-heading{display:flex;align-items:center;justify-content:space-between;gap:20px}
+.maintenance-section .catalog-download-heading h3{margin:0 0 7px;font-size:18px;line-height:1.5;color:#234f39}
+.maintenance-section .catalog-download-guide p{margin:0;font-size:13px;color:#435f50;line-height:1.8}
+.maintenance-section .catalog-download-heading>.button{flex-shrink:0;min-height:44px;padding:11px 18px;background:#2b6548;color:#fff;text-decoration:none;font-size:14px;font-weight:600}
+.maintenance-section .catalog-download-heading>.button:hover{background:#204e37}
+.catalog-download-heading>.button:focus-visible{outline:3px solid #699b80;outline-offset:3px}
+.catalog-download-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:19px 0 0;padding:17px 0 0;border-top:1px solid #c8ddcf;list-style:none}
+.catalog-download-steps li{display:flex;gap:10px;min-width:0;align-items:flex-start}
+.catalog-download-steps li>span{display:grid;place-items:center;flex-shrink:0;width:27px;height:27px;border-radius:50%;background:#d7eadd;color:#29533c;font-size:13px;font-weight:600}
+.catalog-download-steps strong{display:block;margin-bottom:3px;font-size:13px;line-height:1.8;color:#2d503b}
+.catalog-download-steps code{font-size:12px;overflow-wrap:anywhere}
+@media(max-width:900px){.catalog-download-heading{align-items:flex-start;flex-direction:column;gap:14px}.catalog-download-steps{grid-template-columns:1fr;gap:13px}}
+@media(max-width:760px){.operation-feedback{padding:13px 14px}.catalog-download-guide{padding:17px 14px}.maintenance-section .catalog-download-heading h3{font-size:17px}.catalog-download-heading>.button{width:100%;justify-content:center;white-space:normal}}

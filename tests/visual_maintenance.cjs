@@ -18,6 +18,11 @@ async function main(){
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(base+'/maintenance#catalog-section');
   await page.waitForFunction(()=>!document.querySelector('#maintenance-prepare').disabled);
+  assert(await page.locator('#catalog-download').getAttribute('href')==='https://github.com/URenko/e-hentai-db/releases/tag/nightly','Catalog download points to the wrong release');
+  assert(await page.locator('#catalog-download').getAttribute('target')==='_blank','Download must open separately');
+  assert(await page.locator('.catalog-download-steps li').count()===3,'Download steps are incomplete');
+  assert(await page.locator('#catalog-download').evaluate(node=>node.getBoundingClientRect().height>=44&&parseFloat(getComputedStyle(node).fontSize)>=14),'Download button is not prominent');
+  await page.locator('.catalog-download-guide').screenshot({path:path.join(output,'catalog-download-guide-desktop.png')});
   assert((await page.locator('#catalog-backup-path').textContent())===path.join(fixture,'backups'),'Actual backup directory missing');
   assert((await page.locator('#catalog-backup-count').textContent()).includes('0 份成功备份'),'Initial count missing');
   await page.locator('#maintenance-prepare').click();
@@ -67,6 +72,7 @@ async function main(){
     await page.setViewportSize({width,height:1100});
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Maintenance overflow at '+width);
     await page.locator('#catalog-section').screenshot({path:path.join(output,'maintenance-direct-'+width+'.png')});
+    if(width===390)await page.locator('.catalog-download-guide').screenshot({path:path.join(output,'catalog-download-guide-mobile.png')});
   }
   await page.unroute('**/api/maintenance');
   await page.route('**/api/maintenance',route=>route.abort());

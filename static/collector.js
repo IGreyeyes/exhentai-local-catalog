@@ -3,15 +3,27 @@
   let state=null,token="",actionBusy=false,pollBusy=false,settingsDirty=false;
   let preview=null,previewRevision=0,initialStatus=true,errorRowsKey="";
   let proxyTimer=null,proxySaving=null,savedProxy=null;
+  let scheduleReceivedAt=0;
   const ui=id=>document.getElementById(id);
   function acceptState(data){
-    state=data;render();
+    state=data;scheduleReceivedAt=performance.now();render();
   }
   ui("collector-interval").onchange=()=>{
     settingsDirty=true;invalidatePreview();render();
   };
   const labels={running:"采集中",paused:"已暂停",awaiting_next:"本轮已结束 · 等待继续",completed:"采集完成",completed_with_errors:"已处理完 · 有失败项",cancelled:"任务已结束",preparing:"正在准备"};
   function feedback(text,error=false){ui("collector-feedback").textContent=text;ui("collector-feedback").classList.toggle("error",error);}
+  function scheduleFeedback(text,error=false){ui("collector-auto-pause-feedback").textContent=text;ui("collector-auto-pause-feedback").classList.toggle("error",error);}
+  function savedScheduleFeedback(data){scheduleFeedback(data.auto_pause_enabled?`定时休息设置已保存：每连续采集 ${data.auto_pause_work_minutes} 分钟，休息 ${data.auto_pause_rest_minutes} 分钟后自动继续。`:"定时休息已关闭并保存，采集沿用原有节奏。");}
+  function renderSchedule(){
+    const schedule=state?.schedule,box=ui("collector-schedule-status");
+    box.hidden=!schedule||state?.job?.state!=="running";
+    if(box.hidden)return;
+    const elapsed=(performance.now()-scheduleReceivedAt)/1000,remaining=Math.max(0,Math.ceil(schedule.remaining_seconds-elapsed));
+    const resting=schedule.phase==="resting",minutes=Math.floor(remaining/60),seconds=String(remaining%60).padStart(2,"0");
+    box.classList.toggle("resting",resting);
+    box.textContent=elapsed>10?"采集状态暂无法确认，正在重新连接；恢复连接后将核对休息和采集状态。":resting?(remaining?`定时休息中 · ${minutes}:${seconds} 后自动继续当前队列。可点击「暂停本轮」取消自动继续。`:"休息时间已到，正在确认采集状态…"):(remaining?`定时休息已启用 · 再采集 ${minutes}:${seconds} 后休息 ${schedule.rest_minutes} 分钟 · 已完成 ${schedule.completed_rests} 次休息。`:"连续采集时间已到，等待当前请求结束后休息…");
+  }
   function credentialFeedback(text,error=false){
     ui("credential-feedback").hidden=false;
     ui("credential-feedback").textContent=text;
@@ -44,6 +56,7 @@
   function refreshDays(){return Number(ui("collector-refresh").value==="custom"?ui("collector-custom-days").value:ui("collector-refresh").value);}
   function batchSize(){return Number(ui("collector-batch-size").value==="custom"?ui("collector-custom-batch-size").value:ui("collector-batch-size").value);}
   function requestInterval(){return Number(ui("collector-interval").value==="custom"?ui("collector-custom-interval").value:ui("collector-interval").value);}
+  function pauseMinutes(id,key,fallback){const value=Number(ui(id).value);return !ui("collector-auto-pause").checked&&(!Number.isFinite(value)||value<0.1||value>1440)?state?.[key]??fallback:value;}
   function libraryMode(){return ui("collector-mode").value==="rating_full";}
   function collectionQuery(){return libraryMode()?"":submittedFilters?.toString()||"";}
   function savedTask(){return Boolean(state?.job&&["paused","awaiting_next","completed_with_errors"].includes(state.job.state));}
@@ -128,6 +141,7 @@
     ui("estimate-duration").textContent=duration(data.estimated_seconds);
     ui("estimate-detail").textContent=`其中首次采集 ${number(data.never_seen)} 条、过期刷新 ${number(data.refresh_count)} 条。`+(data.skip_existing?"本次跳过所有已成功采集的作品，缓存天数不生效。":`本次复用 ${data.refresh_days} 天内的缓存。`)+(batched&&newTask?`另有 ${number(data.deferred)} 条需要处理，但未纳入本批，留待后续。`:"");
     ui("estimate-detail").textContent+=data.collection_mode==="rating_full"?"全库队列按数据库平均评分从高到低排列，同分时作品 ID 较大的优先；无评分作品排在后面，持续处理到队列完成。":data.rating_priority?"队列按平均评分从高到低排列；持续失败项延后。":data.collection_mode==="full"?"队列使用作品 ID 顺序。":"队列使用年份均衡顺序。";
+    if(data.auto_pause_enabled)ui("estimate-detail").textContent+=`定时休息：每采集 ${data.auto_pause_work_minutes} 分钟，休息 ${data.auto_pause_rest_minutes} 分钟。预计耗时已计入${data.estimated_rest_seconds?duration(data.estimated_rest_seconds):" 0 分钟"}休息，实际以请求耗时为准；当前轮次或队列结束后停止。`;
     if(data.collection_mode==="rating_full")ui("estimate-detail").textContent+=data.operation==="retry"||data.retry_previous_failures?"本次会重新请求符合范围及缓存规则的失败项；每条失败项在本轮处理一次，临时网络错误最多尝试 3 次。":`本次沿用 ${number(data.reused_failures||0)} 条同一源站、同一作品链接的失败记录，不访问这些作品；失败时间与尝试次数保留。`;
     if(rounds)ui("estimate-detail").textContent+=newTask?`将保存 ${number(data.queue_total)} 条待抓取作品，分为 ${number(data.round_count)} 轮，每轮最多 ${number(data.batch_size)} 条。本次只执行第 1 轮，后续由你手动继续。`:`本次处理第 ${number(data.round_number)} / ${number(data.round_count)} 轮；另有 ${number(data.deferred)} 条留在后续轮次。`;
     ui("estimate-coverage").textContent=(data.scope_known!=null?`全范围 ${number(data.scope_total)} 条，预估时已有收藏数 ${number(data.scope_known)} 条。`:`这是原任务的剩余队列；原搜索范围共 ${number(data.scope_total)} 条。`)+(batched?"覆盖完成前，分批结果不能代表完整收藏榜。":"最新覆盖情况可在刷新搜索结果后查看。");
@@ -151,6 +165,8 @@
     ui("custom-interval-control").hidden=!customInterval;
     ui("collector-custom-interval").disabled=busy||!customInterval;
     ui("collector-custom-interval").required=customInterval;
+    const autoPause=ui("collector-auto-pause").checked;
+    ["collector-work-minutes","collector-rest-minutes"].forEach(id=>{ui(id).disabled=busy||!autoPause;ui(id).required=autoPause;});
     ui("credential-import").disabled=busy;
     ui("credential-export").disabled=busy||settingsDirty||!state?.has_credentials;
     const skip=ui("collector-skip-existing").checked,custom=ui("collector-refresh").value==="custom";
@@ -234,7 +250,7 @@
   function render(){
     if(!state)return;
     const job=state.job;
-    const jobLabel=job?.collection_mode==="batch"&&job.state==="completed"?"本批完成":job?.collection_mode==="batch"&&job.state==="completed_with_errors"?"本批完成 · 有失败项":job?(labels[job.state]||job.state):"";
+    const jobLabel=job?.state==="running"&&state.schedule?.phase==="resting"?"定时休息中":job?.collection_mode==="batch"&&job.state==="completed"?"本批完成":job?.collection_mode==="batch"&&job.state==="completed_with_errors"?"本批完成 · 有失败项":job?(labels[job.state]||job.state):"";
     ui("collector-config-state").textContent=settingsDirty?"设置已修改，请先应用":state.verified?`已验证 · ${state.host}`:state.configured?"设置已应用，请验证后开始采集":"尚未配置";
     const sameHost=ui("collector-host").value===state.host;
     const loaded=state.has_credentials&&sameHost;
@@ -297,7 +313,7 @@
       ui("collector-job-message").textContent=job.message+cooling;
       renderErrors(job);
     }
-    updateControls();
+    renderSchedule();updateControls();
   }
   async function refresh(){
     if(pollBusy||actionBusy||window.catalogStopped||window.catalogMaintenanceActive)return;
@@ -315,6 +331,7 @@
     invalidatePreview();
     const revision=previewRevision,key=scopeKey();
     actionBusy=true;updateControls();feedback(path==="preview"?"正在统计待抓取数量和预计耗时，不访问源站…":path==="verify"?(payload.recover_cooldown?"正在单次验证客户端访问，成功后解除冷却…":"正在随机取样并验证源站访问，请稍候…"):"正在处理…");
+    if(path==="settings")scheduleFeedback("正在应用并保存定时休息设置…");
     try{
       if(path==="settings"){clearTimeout(proxyTimer);if(proxySaving)await proxySaving;}
       const response=await fetch(`/api/collector/${path}`,{method:"POST",headers:{"Content-Type":"application/json","X-Catalog-Token":token},body:JSON.stringify(payload)});
@@ -332,14 +349,15 @@
         focusProgress=["start","next_round","next_batch","resume","retry"].includes(path);
       }
       if(path==="settings"&&(libraryMode()||data.job?.collection_mode==="rating_full"))feedback(`设置已应用并保存。评分全库采集已${data.retry_previous_failures?"开启重新采集之前的失败项":"关闭失败项重采，将沿用历史失败记录"}；可先预估，再确认采集。`);
+      if(path==="settings")savedScheduleFeedback(data);
       if(path==="start"&&data.job?.collection_mode==="rating_full")feedback(data.job.pending?`评分全库计划已保存，正在按平均评分连续采集，可随时暂停。已沿用 ${number(data.job.reused_failures||0)} 条失败记录，未重新请求。`:data.job.message);
       if(path==="resume"&&data.job?.collection_mode==="rating_full")feedback(`已按预估继续评分全库采集。${data.retry_previous_failures?"历史失败项已纳入本次队列。":`已沿用 ${number(data.job.reused_failures||0)} 条失败记录，未重新请求。`}`);
       if(path==="verify"&&submittedFilters&&!libraryMode()) await search(responseData?.page||1,false,false);
-    }catch(error){feedback(error.message==="Failed to fetch"?"无法连接本地服务，请重新启动。":error.message,true);}
+    }catch(error){const message=error.message==="Failed to fetch"?"连接中断，操作结果暂无法确认；请恢复连接后核对状态，再决定是否重试。":error.message;feedback(message,true);if(path==="settings")scheduleFeedback(message,true);}
     finally{actionBusy=false;await refresh();updateControls();if(focusProgress)showJob();}
   }
   function settingsPayload(includeCredentials=false){
-    const values={interval:requestInterval(),refresh_days:refreshDays()||state?.refresh_days||7,skip_existing:ui("collector-skip-existing").checked,collection_mode:ui("collector-mode").value,batch_size:libraryMode()?1000:batchSize(),rating_priority:libraryMode()||ui("collector-rating-priority").checked,retry_previous_failures:ui("collector-retry-previous-failures").checked};
+    const values={interval:requestInterval(),refresh_days:refreshDays()||state?.refresh_days||7,skip_existing:ui("collector-skip-existing").checked,collection_mode:ui("collector-mode").value,batch_size:libraryMode()?1000:batchSize(),rating_priority:libraryMode()||ui("collector-rating-priority").checked,retry_previous_failures:ui("collector-retry-previous-failures").checked,auto_pause_enabled:ui("collector-auto-pause").checked,auto_pause_work_minutes:pauseMinutes("collector-work-minutes","auto_pause_work_minutes",60),auto_pause_rest_minutes:pauseMinutes("collector-rest-minutes","auto_pause_rest_minutes",10)};
     if(includeCredentials)Object.assign(values,{host:ui("collector-host").value,proxy:ui("collector-proxy").value,ipb_member_id:ui("cookie-member").value,ipb_pass_hash:ui("cookie-hash").value,igneous:ui("cookie-igneous").value});
     return values;
   }
@@ -366,7 +384,7 @@
       state=data;settingsDirty=false;savedProxy=data.proxy;ui("collector-host").value=data.host;ui("collector-proxy").value=data.proxy;
       proxyFeedback("登录文件中的采集代理已保存，下次打开会恢复。");
       ["cookie-member","cookie-hash","cookie-igneous"].forEach(id=>ui(id).value="");
-      invalidatePreview();render();credentialFeedback("导入成功：登录信息已载入，输入框留空即可沿用。请先验证源站访问，再点击“开始采集”。");
+      invalidatePreview();render();savedScheduleFeedback(data);credentialFeedback("导入成功：登录信息已载入，输入框留空即可沿用。请先验证源站访问，再点击“开始采集”。");
     }catch(error){credentialFeedback(error.message==="Failed to fetch"?"无法连接本地服务，登录文件没有导入。":error.message,true);}
     finally{ui("credential-file").value="";ui("credential-import").textContent="导入加密登录文件";actionBusy=false;await refresh();updateControls();}
   }
@@ -396,6 +414,7 @@
   ui("collector-confirm").onclick=()=>{if(preview){const selected=preview;action(selected.operation,{query:selected.queryText,preview_id:selected.preview_id});}};
   ui("collector-dismiss").onclick=()=>{invalidatePreview();feedback("已取消本次预估，未开始抓取。");updateControls();};
   ui("collector-settings").addEventListener("input",()=>{settingsDirty=true;invalidatePreview();render();});
+  ["collector-auto-pause","collector-work-minutes","collector-rest-minutes"].forEach(id=>ui(id).addEventListener("input",()=>scheduleFeedback("定时休息设置已修改，尚未生效；请点击「应用本次设置」。")));
   ui("search-form").addEventListener("input",()=>{invalidatePreview();updateControls();});
   ui("collector-refresh-results").onclick=()=>search(responseData?.page||1,false,false);
   window.collectorUI={updateControls,refresh,invalidatePreview};
@@ -408,8 +427,9 @@
       savedProxy=state?.proxy_error?null:(state?.saved_proxy??state?.proxy);
       if(state?.proxy_error)proxyFeedback(state.proxy_error,true);
       else if(savedProxy)proxyFeedback("已恢复上次保存的采集代理；应用本次设置后生效。");
-      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=savedProxy??state.proxy;ui("collector-interval").value=[0.5,1,1.5,2,2.5,3].includes(state.interval)?String(state.interval):"custom";ui("collector-custom-interval").value=state.interval;ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-retry-previous-failures").checked=Boolean(state.retry_previous_failures);ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);settingsDirty=Boolean(state.configured&&savedProxy!==null&&savedProxy!==state.proxy);render();}
+      if(state&&!settingsDirty){ui("collector-host").value=state.configured?state.host:(state.job?.host||state.host);ui("collector-proxy").value=savedProxy??state.proxy;ui("collector-interval").value=[0.5,1,1.5,2,2.5,3].includes(state.interval)?String(state.interval):"custom";ui("collector-custom-interval").value=state.interval;ui("collector-refresh").value=[1,7,30].includes(state.refresh_days)?String(state.refresh_days):"custom";ui("collector-custom-days").value=state.refresh_days;ui("collector-skip-existing").checked=Boolean(state.skip_existing);ui("collector-retry-previous-failures").checked=Boolean(state.retry_previous_failures);ui("collector-auto-pause").checked=Boolean(state.auto_pause_enabled);ui("collector-work-minutes").value=state.auto_pause_work_minutes??60;ui("collector-rest-minutes").value=state.auto_pause_rest_minutes??10;scheduleFeedback(state.auto_pause_enabled?`已恢复定时休息：每采集 ${state.auto_pause_work_minutes} 分钟，休息 ${state.auto_pause_rest_minutes} 分钟。`:"定时休息当前关闭；修改后点击「应用本次设置」保存。");ui("collector-mode").value=state.collection_mode||"rounds";ui("collector-batch-size").value=[100,300,1000,3000,5000].includes(state.batch_size)?String(state.batch_size):"custom";ui("collector-custom-batch-size").value=state.batch_size||1000;ui("collector-rating-priority").checked=Boolean(state.rating_priority);settingsDirty=Boolean(state.configured&&savedProxy!==null&&savedProxy!==state.proxy);render();}
     }catch(error){feedback("采集工具尚未连接，请重新启动服务后刷新页面。",true);}
   })();
   setInterval(()=>{if(!document.hidden)refresh();},3000);
+  setInterval(()=>{if(!document.hidden)renderSchedule();},1000);
 })();

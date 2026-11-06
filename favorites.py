@@ -28,6 +28,26 @@ from credentials import _dpapi
 HOSTS = {"exhentai.org", "e-hentai.org"}
 REQUEST_INTERVALS = (0.5, 1, 1.5, 2, 2.5, 3)
 DEFAULT_REQUEST_INTERVAL = 3
+DEFAULT_AUTO_PAUSE = {"auto_pause_enabled": False, "auto_pause_work_minutes": 60.0, "auto_pause_rest_minutes": 10.0}
+
+
+def auto_pause_settings(values, previous=None):
+    result = {**DEFAULT_AUTO_PAUSE, **(previous or {})}
+    result.update({key: values[key] for key in DEFAULT_AUTO_PAUSE if key in values})
+    if not isinstance(result["auto_pause_enabled"], bool):
+        raise ValueError("定时休息须为开关值。")
+    for key, label in (("auto_pause_work_minutes", "连续采集时间"), ("auto_pause_rest_minutes", "休息时间")):
+        value = result[key]
+        try:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ValueError
+            minutes = float(value)
+            if not math.isfinite(minutes) or not 0.1 <= minutes <= 1440:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"{label}须为 0.1～1440 分钟，可填写小数。") from None
+        result[key] = minutes
+    return result
 
 
 def request_interval(value):
@@ -667,6 +687,7 @@ class Collector:
         self.cooldown_until = 0
         self.cooldown_probe_after = 0
         self.saved_proxy, self.proxy_error = "", ""
+        self.schedule = None
         with self.store.connection() as db:
             saved_proxy = db.execute("SELECT value FROM app_settings WHERE key='collector_proxy'").fetchone()
             if saved_proxy:
@@ -690,6 +711,11 @@ class Collector:
                 self.saved_interval = DEFAULT_REQUEST_INTERVAL
             saved = db.execute("SELECT value FROM app_settings WHERE key='collector_retry_previous_failures'").fetchone()
             self.saved_retry_previous_failures = bool(saved and saved[0]=='true')
+            saved = db.execute("SELECT value FROM app_settings WHERE key='collector_auto_pause'").fetchone()
+            try:
+                self.saved_auto_pause = auto_pause_settings(json.loads(saved[0]) if saved else {})
+            except (ValueError, TypeError):
+                self.saved_auto_pause = DEFAULT_AUTO_PAUSE.copy()
             db.execute("UPDATE jobs SET state='paused',message='服务重启后已暂停。请重新配置并验证登录信息，再继续。' WHERE state IN ('running','preparing')")
             row = db.execute("SELECT MAX(cooldown_until) FROM jobs").fetchone()
             self.cooldown_until = row[0] or 0
@@ -703,6 +729,7 @@ class Collector:
             job = self.store.latest()
             settings = self.settings or (job.get("selection",{}) if job else {})
             issue = self.verification_issues[next(reversed(self.verification_issues))] if self.verification_issues else None
+            schedule = self.schedule if job and job["state"] == "running" else None
             return {
                 "configured": bool(self.settings), "verified": self.verified,
                 "verification_unavailable": len(self.verification_unavailable),
@@ -717,6 +744,8 @@ class Collector:
                 "batch_size": settings.get("batch_size",1000),
                 "rating_priority": settings.get("rating_priority",False),
                 "retry_previous_failures": (self.settings or {}).get("retry_previous_failures",self.saved_retry_previous_failures),
+                **{key: (self.settings or {}).get(key, value) for key, value in self.saved_auto_pause.items()},
+                "schedule": {key: value for key, value in schedule.items() if key != "deadline"} | {"remaining_seconds": max(0, schedule["deadline"]-time.monotonic())} if schedule else None,
                 "busy": bool(self.thread and self.thread.is_alive()),
                 "cooldown_until": self.cooldown_until, "cooldown_probe_after": self.cooldown_probe_after, "job": job,
             }
@@ -776,6 +805,7 @@ class Collector:
             retry_previous_failures=values.get("retry_previous_failures",self.saved_retry_previous_failures)
             if not isinstance(retry_previous_failures,bool):
                 raise ValueError("重新采集之前的失败项须为开关值。")
+            auto_pause = auto_pause_settings(values, self.saved_auto_pause)
             if mode == "rating_full":
                 rating_priority = True
             cookie_header = self.settings["cookies"] if reuse else "; ".join(cookies)
@@ -785,10 +815,12 @@ class Collector:
                 db.execute("INSERT INTO app_settings(key,value) VALUES('collector_interval',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(interval),))
                 db.execute("INSERT INTO app_settings(key,value) VALUES('collector_proxy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (encoded_proxy,))
                 db.execute("INSERT INTO app_settings(key,value) VALUES('collector_retry_previous_failures',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(retry_previous_failures),))
+                db.execute("INSERT INTO app_settings(key,value) VALUES('collector_auto_pause',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(auto_pause),))
             self.saved_proxy, self.proxy_error = proxy, ""
             self.saved_interval = interval
             self.saved_retry_previous_failures = retry_previous_failures
-            self.settings = {"host":host,"cookies":cookie_header,"proxy":proxy,"interval":interval,"refresh_days":days,"skip_existing":skip_existing,"collection_mode":mode,"batch_size":batch_size,"rating_priority":rating_priority,"retry_previous_failures":retry_previous_failures}
+            self.saved_auto_pause = auto_pause
+            self.settings = {"host":host,"cookies":cookie_header,"proxy":proxy,"interval":interval,"refresh_days":days,"skip_existing":skip_existing,"collection_mode":mode,"batch_size":batch_size,"rating_priority":rating_priority,"retry_previous_failures":retry_previous_failures,**auto_pause}
             self.verified = bool(self.verified and same_access)
             self.preview_data = None
             if not same_access:
@@ -1099,12 +1131,15 @@ class Collector:
             samples = list(self.response_times)
             response_seconds = sum(samples)/len(samples) if samples else 2.0
             interval = self.settings["interval"]
+            active_seconds = plan["pending"]*(interval+response_seconds)
+            rest_seconds = max(0, math.ceil(active_seconds/(self.settings["auto_pause_work_minutes"]*60))-1)*self.settings["auto_pause_rest_minutes"]*60 if self.settings["auto_pause_enabled"] else 0
             identifier = secrets.token_urlsafe(24)
             self.preview_data = {**plan,"id":identifier,"operation":operation,"cutoff":cutoff,"settings":self.settings.copy(),"expires":time.monotonic()+600}
             return {
                 "preview_id":identifier,"operation":operation,"total":plan["total"],"pending":plan["pending"],"skipped":plan["skipped"],"reused_failures":plan["reused_failures"],"retry_previous_failures":self.settings.get("retry_previous_failures",False),
                 "never_seen":plan["never_seen"],"refresh_count":plan["refresh_count"],"interval":interval,"refresh_days":self.settings["refresh_days"],"skip_existing":self.settings["skip_existing"],
-                "interval_seconds":math.ceil(plan["pending"]*interval),"estimated_seconds":math.ceil(plan["pending"]*(interval+response_seconds)),
+                "interval_seconds":math.ceil(plan["pending"]*interval),"estimated_seconds":math.ceil(active_seconds+rest_seconds),"estimated_rest_seconds":math.ceil(rest_seconds),
+                **{key:self.settings[key] for key in DEFAULT_AUTO_PAUSE},
                 "response_seconds":round(response_seconds,3),"response_samples":len(samples),"estimate_basis":"measured" if samples else "assumed",
                 "expires_at":int(time.time())+600,"query":plan["canonical"],"host":self.settings["host"],
                 **{key:plan[key] for key in ("collection_mode","batch_size","scope_total","scope_known","eligible_total","deferred","year_breakdown","rating_priority","queue_total","round_count","round_number")},
@@ -1138,7 +1173,7 @@ class Collector:
                 rounds=plan["collection_mode"]=="rounds"
                 total = plan["queue_total"] if rounds else plan["pending"] if batched else plan["total"]
                 selection={key:plan[key] for key in ("collection_mode","batch_size","scope_total","scope_known","eligible_total","deferred","year_breakdown","rating_priority","round_count")}
-                selection.update(scope_skipped=plan["skipped"],**{key:self.settings[key] for key in ("interval","refresh_days","skip_existing","retry_previous_failures")})
+                selection.update(scope_skipped=plan["skipped"],**{key:self.settings[key] for key in ("interval","refresh_days","skip_existing","retry_previous_failures",*DEFAULT_AUTO_PAUSE)})
                 cursor = db.execute("INSERT INTO jobs(query_json,host,state,total,created_at,updated_at,selection_json) VALUES (?,?,'running',?,?,?,?)", (json.dumps(canonical,ensure_ascii=False),self.settings["host"],total,now,now,json.dumps(selection,ensure_ascii=False)))
                 job_id = cursor.lastrowid
                 if rounds:
@@ -1209,6 +1244,7 @@ class Collector:
         with self.lock:
             self.preview_data = None
             self.interrupt.set()
+            self.schedule = None
             with self.store.connection() as db:
                 db.execute("UPDATE jobs SET state=?,message=?,updated_at=? WHERE id=(SELECT MAX(id) FROM jobs) AND state IN "+("('running','paused','awaiting_next')" if cancel else "('running','paused')"), ("cancelled" if cancel else "paused","任务已结束，已采集数据保留。" if cancel else "任务已暂停；当前请求若已发出，会等待它结束。",int(time.time())))
         return self.status()
@@ -1229,9 +1265,46 @@ class Collector:
             self._launch(job["id"])
         return self.status()
 
+    def _wait_for_request(self, job_id, settings, retry_after=0):
+        """Wait without holding SQLite transactions or the controller lock during rest."""
+        while not self.interrupt.is_set():
+            now = time.monotonic()
+            with self.lock:
+                schedule = self.schedule
+                if self.interrupt.is_set():
+                    return False
+                if schedule and now >= schedule["deadline"]:
+                    resting = schedule["phase"] == "collecting"
+                    message = "定时休息中，倒计时结束后自动继续当前队列；可手动暂停或结束任务。" if resting else "定时休息结束，已自动继续当前队列。"
+                    with self.store.connection() as db:
+                        updated = db.execute("UPDATE jobs SET message=?,updated_at=? WHERE id=? AND state='running'", (message,int(time.time()),job_id)).rowcount
+                    if not updated:
+                        return False
+                    self.schedule = schedule = {**schedule, "phase": "resting" if resting else "collecting",
+                        "deadline": time.monotonic()+settings["auto_pause_rest_minutes" if resting else "auto_pause_work_minutes"]*60,
+                        "completed_rests": schedule["completed_rests"]+(0 if resting else 1)}
+            if schedule and schedule["phase"] == "resting":
+                delay = max(0, schedule["deadline"]-time.monotonic())
+            else:
+                delay = max(0, self.last_request+settings["interval"]-time.monotonic(), retry_after-time.monotonic())
+                if delay <= 0:
+                    return not self.interrupt.is_set()
+                if not schedule:
+                    return not self.interrupt.wait(delay)
+                if schedule:
+                    delay = min(delay, max(0, schedule["deadline"]-time.monotonic()))
+            if self.interrupt.wait(delay):
+                return False
+        return False
+
     def _run(self, job_id, settings):
         phase = "读取任务"
         try:
+            with self.lock:
+                if settings.get("auto_pause_enabled") and not self.interrupt.is_set():
+                    self.schedule = {"job_id":job_id, "phase":"collecting", "deadline":time.monotonic()+settings["auto_pause_work_minutes"]*60,
+                        "work_minutes":settings["auto_pause_work_minutes"], "rest_minutes":settings["auto_pause_rest_minutes"], "completed_rests":0}
+            retry_after = 0
             with self.store.connection() as db:
                 job=db.execute("SELECT * FROM jobs WHERE id=?",(job_id,)).fetchone()
                 selection=json.loads(job["selection_json"])
@@ -1254,9 +1327,10 @@ class Collector:
                         try:self.on_completed(job_id)
                         except Exception:pass
                     return
-                delay = max(0, settings["interval"] - (time.monotonic()-self.last_request))
-                if self.interrupt.wait(delay):
+                phase = "等待请求或定时休息"
+                if not self._wait_for_request(job_id, settings, retry_after):
                     return
+                retry_after = 0
                 try:
                     phase = "读取网页"
                     count = self._fetch(settings, row["gid"], row["token"])
@@ -1278,8 +1352,8 @@ class Collector:
                     if terminal:
                         with self.lock:
                             self.verification_issues.pop(row["gid"],None)
-                    if not terminal and self.interrupt.wait(max(settings["interval"],10*attempts)):
-                        return
+                    if not terminal:
+                        retry_after = time.monotonic()+max(settings["interval"],10*attempts)
                 except CollectionPaused as error:
                     phase = "保存暂停状态"
                     with self.lock:
@@ -1310,6 +1384,9 @@ class Collector:
             except sqlite3.Error as pause_error:
                 kind, code, _ = collection_error_details(pause_error)
                 logging.getLogger(__name__).error("Collector pause state could not be saved: type=%s sqlite=%s", kind, code or "none")
+        finally:
+            with self.lock:
+                self.schedule = None
 
     def close(self):
         self.pause()

@@ -149,6 +149,8 @@ def verify(program_directory=None):
             history=get('/api/release-history')
             if history['current_version'] != APP_VERSION:
                 raise AssertionError('Packaged client version does not match this release')
+            if get('/api/collector')['auto_pause_enabled'] or get('/api/collector')['schedule'] is not None:
+                raise AssertionError('Packaged collector must start with scheduled breaks disabled')
             configured=post('/api/collector/settings',{'host':'e-hentai.org','collection_mode':'rating_full','rating_priority':False,'skip_existing':True},token)
             if configured['collection_mode']!='rating_full' or not configured['rating_priority']:
                 raise AssertionError('Packaged full-library rating mode is unavailable')
@@ -172,6 +174,14 @@ def verify(program_directory=None):
             interval_settings = post('/api/collector/settings', {'host':'e-hentai.org','interval':0.75}, token)
             if interval_settings['interval'] != 0.75 or get('/api/collector')['interval'] != 0.75:
                 raise AssertionError('Packaged custom collection interval failed')
+            scheduled = post('/api/collector/settings', {'host':'e-hentai.org','auto_pause_enabled':True,'auto_pause_work_minutes':12.5,'auto_pause_rest_minutes':0.1}, token)
+            if (scheduled['auto_pause_enabled'],scheduled['auto_pause_work_minutes'],scheduled['auto_pause_rest_minutes']) != (True,12.5,0.1) or scheduled['schedule'] is not None:
+                raise AssertionError('Packaged scheduled break settings failed or started collecting without confirmation')
+            for asset, marker in (('collector.js', b'renderSchedule'), ('', b'id="collector-auto-pause-feedback"'), ('', b'id="collector-schedule-status"')):
+                with opener.open(base+'/'+asset,timeout=10) as response:
+                    if marker not in response.read():
+                        raise AssertionError('Packaged scheduled break controls or feedback are missing')
+            report['auto_pause'] = 'disabled default, custom work/rest settings, no implicit collection and countdown/feedback assets passed'
             for asset, marker in (('app.js', b'catalog-search-session-v1'), ('collector.js', b'matchesSavedTask'), ('', b'id="collector-custom-interval"')):
                 with opener.open(base+'/'+asset, timeout=10) as response:
                     if marker not in response.read():
